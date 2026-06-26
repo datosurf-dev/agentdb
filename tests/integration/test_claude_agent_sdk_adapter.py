@@ -244,3 +244,53 @@ async def test_prepare_turn_async_retrieves_memory(tmp_path):
 
     assert len(retrieval.records) >= 1
     assert any("Governed memory context" in m["content"] for m in messages if m["role"] == "system")
+
+
+@pytest.mark.asyncio
+async def test_from_sdk_client_handle_turn_async(tmp_path):
+    db = AgentDB(path=tmp_path / "test.db", permissions_path=PERMS)
+
+    class FakeTextBlock:
+        def __init__(self, text):
+            self.text = text
+
+    class FakeAssistantMessage:
+        def __init__(self, text):
+            self.content = [FakeTextBlock(text)]
+
+    class FakeResultMessage:
+        session_id = "sdk-sess-001"
+        is_error = False
+        result = None
+
+    class FakeSdkClient:
+        async def query(self, prompt):
+            self._last_prompt = prompt
+
+        async def receive_response(self):
+            yield FakeAssistantMessage("sdk agentic response")
+            yield FakeResultMessage()
+
+    def sdk_client_factory(thread_id):
+        return FakeSdkClient()
+
+    runtime = AgentDBClaudeRuntime.from_sdk_client(
+        db=db,
+        agent_id="research_agent",
+        sdk_client_factory=sdk_client_factory,
+        profile="full_storage",
+        system_prompt="You are a Slack assistant.",
+    )
+
+    result = await runtime.handle_turn_async(
+        user_query="summarize this thread",
+        session_id="sdk-sess-001",
+        message_id="msg-sdk-001",
+        outcome_type="task_complete",
+        outcome_value=1.0,
+    )
+
+    assert "sdk agentic response" in result["response_text"]
+    entries = db.audit_log.replay(from_sequence=0)
+    assert any(e.event_type == EVENT_MEMORY_RETRIEVE for e in entries)
+    assert any(e.event_type == EVENT_MEMORY_OUTCOME for e in entries)

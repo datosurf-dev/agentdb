@@ -481,6 +481,115 @@ class AgentDBClaudeRuntime:
             response_to_text=_extract_text_from_model_response,
         )
 
+    @classmethod
+    def from_sdk_client(
+        cls,
+        *,
+        db: "AgentDB",
+        agent_id: str,
+        sdk_client_factory: Callable[[str], Any],
+        profile: str = "budget_optimized",
+        system_prompt: Optional[str] = None,
+        retrieve_limit: Optional[int] = None,
+        memory_budget_chars: Optional[int] = None,
+    ) -> "AgentDBClaudeRuntime":
+        """
+        Build a runtime that wraps a ClaudeSDKClient (agentic subprocess).
+
+        sdk_client_factory: callable(thread_id: str) -> client
+            The client must support: await client.query(prompt) and
+            async-for client.receive_response() yielding messages with
+            .content (list of blocks with .text) or .is_error/.result.
+        """
+        middleware = AgentDBClaudeMiddleware(
+            db=db,
+            agent_id=agent_id,
+            profile=profile,
+            retrieve_limit=retrieve_limit,
+            memory_budget_chars=memory_budget_chars,
+        )
+        instance = cls(
+            middleware=middleware,
+            invoke_model=lambda messages: "",
+            default_system_prompt=system_prompt,
+        )
+        instance._sdk_client_factory = sdk_client_factory
+        return instance
+
+    async def handle_turn_async(
+        self,
+        *,
+        user_query: str,
+        session_id: str,
+        message_id: Optional[str] = None,
+        system_prompt: Optional[str] = None,
+        external_context: Optional[list[dict[str, Any]]] = None,
+        base_messages: Optional[list[dict[str, str]]] = None,
+        memory_writes: Optional[list[dict[str, Any]]] = None,
+        tracked_directories: Optional[list[str]] = None,
+        directory_snapshots: Optional[list[dict[str, Any]]] = None,
+        tracking_base_dir: Optional[str] = None,
+        max_files_per_directory: Optional[int] = None,
+        outcome_type: Optional[str] = None,
+        outcome_value: Optional[float] = None,
+    ) -> dict[str, Any]:
+        sdk_factory = getattr(self, "_sdk_client_factory", None)
+        if sdk_factory is None:
+            raise RuntimeError(
+                "handle_turn_async requires a runtime built with from_sdk_client(). "
+                "Use handle_turn() for the messages.create() path."
+            )
+
+        messages, retrieval = await self._middleware.prepare_turn_async(
+            user_query=user_query,
+            session_id=session_id,
+            system_prompt=system_prompt if system_prompt is not None else self._default_system_prompt,
+            external_context=external_context,
+            base_messages=base_messages,
+        )
+
+        system_blocks = [m["content"] for m in messages if m.get("role") == "system"]
+        user_messages = [m for m in messages if m.get("role") == "user"]
+        prompt_parts = system_blocks + [m["content"] for m in user_messages]
+        prompt = "\n\n".join(prompt_parts)
+
+        client = sdk_factory(session_id)
+        await client.query(prompt)
+
+        text_parts: list[str] = []
+        async for message in client.receive_response():
+            content = getattr(message, "content", None)
+            if content is not None:
+                for block in content:
+                    text = getattr(block, "text", None)
+                    if text is not None:
+                        text_parts.append(text)
+            is_error = getattr(message, "is_error", False)
+            if is_error:
+                error_msg = getattr(message, "result", "Claude SDK error")
+                raise RuntimeError(error_msg or "Claude SDK returned an error")
+
+        response_text = "\n".join(text_parts).strip()
+
+        await self._middleware.finalize_turn_async(
+            session_id=session_id,
+            model_response=response_text,
+            memory_writes=memory_writes,
+            message_id=message_id,
+            tracked_directories=tracked_directories,
+            directory_snapshots=directory_snapshots,
+            tracking_base_dir=tracking_base_dir,
+            max_files_per_directory=max_files_per_directory,
+            outcome_type=outcome_type,
+            outcome_value=outcome_value,
+        )
+
+        return {
+            "response_text": response_text,
+            "retrieval": retrieval,
+            "messages": messages,
+        }
+
     def handle_turn(
         self,
         *,
