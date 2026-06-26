@@ -1,0 +1,42 @@
+default_policy: deny
+
+human_zone_prefixes:
+  - "skills/"
+  - "config/human/"
+  - "prompts/locked/"
+
+agents:
+  research_agent:
+    can_write:
+      - "memory/working/"
+      - "memory/episodic/"
+      - "memory/provider/"
+      - "config/agent/learned_prefs/research_*"
+    cannot_write:
+      - "config/human/"
+      - "prompts/locked/"
+      - "skills/"
+    can_read:
+      - "memory/working/"
+      - "memory/episodic/"
+      - "memory/long_term/"
+
+  coder_agent:
+    can_write:
+      - "memory/working/"
+      - "memory/episodic/"
+      - "memory/provider/"
+      - "config/agent/heuristics/coding_*"
+    can_read:
+      - "memory/working/"
+      - "memory/episodic/"
+
+  langgraph_agent:
+    can_write:
+      - "memory/working/"
+      - "memory/episodic/"
+      - "memory/provider/"
+    can_read:
+      - "memory/working/"
+      - "memory/episodic/"
+      - "memory/long_term/"
