@@ -433,6 +433,7 @@ class AgentDBClaudeRuntime:
         self._invoke_model = invoke_model
         self._default_system_prompt = default_system_prompt
         self._response_to_text = response_to_text
+        self._sdk_client_factory = None
 
     @classmethod
     def from_claude_client(
@@ -558,16 +559,16 @@ class AgentDBClaudeRuntime:
 
         text_parts: list[str] = []
         async for message in client.receive_response():
+            is_error = getattr(message, "is_error", False)
+            if is_error:
+                error_msg = getattr(message, "result", "Claude SDK error")
+                raise RuntimeError(error_msg or "Claude SDK returned an error")
             content = getattr(message, "content", None)
             if content is not None:
                 for block in content:
                     text = getattr(block, "text", None)
                     if text is not None:
                         text_parts.append(text)
-            is_error = getattr(message, "is_error", False)
-            if is_error:
-                error_msg = getattr(message, "result", "Claude SDK error")
-                raise RuntimeError(error_msg or "Claude SDK returned an error")
 
         response_text = "\n".join(text_parts).strip()
 
@@ -586,6 +587,7 @@ class AgentDBClaudeRuntime:
 
         return {
             "response_text": response_text,
+            "raw_response": None,
             "retrieval": retrieval,
             "messages": messages,
         }
