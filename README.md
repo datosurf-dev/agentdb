@@ -11,6 +11,7 @@ AgentDB is designed to improve agent behavior without becoming another layer of 
 The full architecture pitch and the numbered design principles (now including Principle 12's real-time-enforcement vs. async-integrity-check split for adapters) live in one canonical place — this section just points to it instead of repeating it:
 
 - Architecture & design principles: `/Users/jm/Documents/github/agentdb/docs/context/architecture-principles.md`
+- Capabilities by type: `/Users/jm/Documents/github/agentdb/docs/context/capabilities.md`
 - Global agent instructions: `/Users/jm/Documents/github/agentdb/AGENTS.md`
 - Project context document: `/Users/jm/Documents/github/agentdb/docs/context/agentdb-context.md`
 - Plan: `/Users/jm/Documents/github/agentdb/docs/superpowers/plans/2026-06-06-agentdb-revised.md`
@@ -681,7 +682,7 @@ const db = new AgentDB()
 const db = AgentDB.connect('mcp://localhost:5433')
 ```
 
-**MCP server (not yet implemented, Phase 5):** the target design is 3 tools — `memory_write`, `memory_retrieve`, `conflict_queue` — as a native integration point for any MCP-compatible framework. A 4th tool, `memory_subscribe`, is deferred along with the event bus it would depend on (never built — see `docs/superpowers/plans/2026-06-06-agentdb-revised.md` Task 12) until a concrete consumer needs push notifications instead of polling.
+**MCP server (not yet implemented, Phase 5):** the target design is 4 tools — `memory_write`, `memory_retrieve`, `conflict_queue`, `memory_subscribe` — as a native integration point for any MCP-compatible framework. `conflict_queue`/`memory_subscribe` are thin transports over an already-implemented core mechanism (`AgentDB.register_reconciliation_handler`/`dispatch_reconciliation_trigger`, a live in-memory dispatcher — not a new event-bus subsystem to build), blocked only on real conflict detection (Task 6) existing to dispatch something worth subscribing to. That same mechanism means a Slack/Telegram notifier doesn't need MCP at all — a host app can register a handler directly. See `docs/context/capabilities.md`.
 
 **Security note:** In embedded (in-process) mode, the permission router runs in the same process as the application. For security-sensitive deployments, server mode is required — the router runs out-of-process and cannot be reached by application code. Embedded mode is for development and prototyping.
 
@@ -689,7 +690,7 @@ const db = AgentDB.connect('mcp://localhost:5433')
 
 ## Architecture
 
-**This is the target architecture, not a diagram of what's running today.** Implemented today: `AgentDBBackend`, the permission router, the SQLite store, the multi-signal ranker, and the audit log. Not implemented: MCP server, conflict detector, budget manager, Postgres/pgvector, and the event bus. See `docs/context/database-schema.md` for what's actually persisted.
+**This is the target architecture, not a diagram of what's running today.** Implemented today: `AgentDBBackend`, the permission router, the SQLite store, the multi-signal ranker, and the audit log. A live in-memory notifier dispatcher also exists (`register_reconciliation_handler`/`dispatch_reconciliation_trigger`) — narrower and less durable than the "Event bus" box below implies; see `docs/context/capabilities.md`. Not implemented: MCP server, conflict detector, budget manager, Postgres/pgvector. See `docs/context/database-schema.md` for what's actually persisted.
 
 ```
 Agent (any framework)

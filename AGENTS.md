@@ -10,8 +10,9 @@ These instructions are repository-level and apply to all agent work in this repo
 2. Project context document: `/Users/jm/Documents/github/agentdb/docs/context/agentdb-context.md`
 3. Superpowers plan: `/Users/jm/Documents/github/agentdb/docs/superpowers/plans/2026-06-06-agentdb-revised.md`
 4. Architecture & design principles: `/Users/jm/Documents/github/agentdb/docs/context/architecture-principles.md`
-5. Database schema and memory assets: `/Users/jm/Documents/github/agentdb/docs/context/database-schema.md`
-6. Algorithm review skill (when touching ranking/reinforcement surfaces): `/Users/jm/Documents/github/agentdb/.claude/skills/agentdb-algorithm-review/SKILL.md`
+5. Capabilities by type: `/Users/jm/Documents/github/agentdb/docs/context/capabilities.md`
+6. Database schema and memory assets: `/Users/jm/Documents/github/agentdb/docs/context/database-schema.md`
+7. Algorithm review skill (when touching ranking/reinforcement surfaces): `/Users/jm/Documents/github/agentdb/.claude/skills/agentdb-algorithm-review/SKILL.md`
 
 If guidance conflicts, follow this file first, then the superpowers plan.
 

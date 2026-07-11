@@ -163,7 +163,7 @@ Created on first run, otherwise empty. No code writes into them yet — they're 
 
 ### In-memory-only state (not on disk, lost on process restart)
 - `AgentDB._session_record_ids: dict[session_id, list[record_id]]` — the only current link between a `retrieve()` call and a later `record_outcome()` call.
-- `AgentDB._reconciliation_handlers: dict[trigger_type, list[Callable]]` — registered callbacks, not data; harmless to lose on restart, but means any registration must happen again each process start.
+- `AgentDB._reconciliation_handlers: dict[trigger_type, list[Callable]]` — registered callbacks, not data; harmless to lose on restart, but means any registration must happen again each process start. This is also the core mechanism behind `docs/context/architecture-principles.md` Principle 12b (async integrity checks) — reused for any named trigger, not just reconciliation. By design (see Principle 7) it's meant to stay in-memory-only unless a specific consumer would lose real value from a missed notification across a restart.
 
 ---
 

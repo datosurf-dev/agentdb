@@ -8,6 +8,8 @@ Provide a single reusable project-level context document that summarizes code fe
 
 - Primary: `/Users/jm/Documents/github/agentdb/docs/context/agentdb-context.md`
 - Supporting plan: `/Users/jm/Documents/github/agentdb/docs/superpowers/plans/2026-06-06-agentdb-revised.md`
+- Architecture & design principles: `/Users/jm/Documents/github/agentdb/docs/context/architecture-principles.md`
+- Capabilities by type: `/Users/jm/Documents/github/agentdb/docs/context/capabilities.md`
 - Database schema and memory assets: `/Users/jm/Documents/github/agentdb/docs/context/database-schema.md`
 - Testing strategy: `/Users/jm/Documents/github/agentdb/docs/context/testing-strategy.md`
 
@@ -60,8 +62,10 @@ Do not use this context for:
 
 ### 6. Audit/event split
 
-- Append-only audit log and event bus are separate subsystems.
-- Shared sequencing is allowed; implementation coupling is not.
+- Append-only audit log and the notifier/event bus are separate subsystems conceptually — but durability/replay is not the default for the notifier.
+- The notifier's concrete mechanism already exists: `AgentDB.register_reconciliation_handler`/`dispatch_reconciliation_trigger`, a live in-memory register/dispatch pair. Extending 12b coverage (new trigger types like `conflict_detected`, `skill_stale`) means adding dispatch call sites, not building a new subsystem.
+- Add a shared sequence counter, persistence, and replay only for a consumer that would lose real value from a missed notification during a restart. During testing, and for any capability where a missed notification costs nothing, a live-only dispatcher is the correct permanent design, not a stopgap.
+- See `docs/context/architecture-principles.md` Principle 7/12b and `docs/context/capabilities.md`.
 
 ### 7. Conflict model
 
