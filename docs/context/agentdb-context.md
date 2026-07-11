@@ -8,6 +8,7 @@ Provide a single reusable project-level context document that summarizes code fe
 
 - Primary: `/Users/jm/Documents/github/agentdb/docs/context/agentdb-context.md`
 - Supporting plan: `/Users/jm/Documents/github/agentdb/docs/superpowers/plans/2026-06-06-agentdb-revised.md`
+- Database schema and memory assets: `/Users/jm/Documents/github/agentdb/docs/context/database-schema.md`
 - Testing strategy: `/Users/jm/Documents/github/agentdb/docs/context/testing-strategy.md`
 
 If conflicts exist between planning notes, treat the canonical superpowers plan as authoritative for technical behavior and delivery scope.

@@ -10,6 +10,7 @@ Global instruction layer (always loaded when supported by the agent runtime):
 
 - Canonical plan: `/Users/jm/Documents/github/agentdb/docs/superpowers/plans/2026-06-06-agentdb-revised.md`
 - Canonical feature-context document: `/Users/jm/Documents/github/agentdb/docs/context/agentdb-context.md`
+- Database schema and memory assets: `/Users/jm/Documents/github/agentdb/docs/context/database-schema.md`
 
 When documentation differs, treat `AGENTS.md` first, then this file and the context document above.
 
@@ -90,7 +91,7 @@ Full audit against this plan, done by reading every current `src/agentdb` module
 2. ~~Fix the skill health-score bug (Task 8)~~ — done 2026-07-11.
 3. ~~Wire `delete()` through the permission router + audit log~~ — done 2026-07-11 (`list()` per-agent scoping gap remains).
 4. ~~Build Task 7 (multi-signal ranking)~~ — done 2026-07-11 (semantic signal still deferred to Phase 3; budget/conflict-detection pieces remain Task 6 gaps).
-5. **Re-plan the adapter backlog from zero** (not yet started): `deepagents.py` (flagship per Design Principle 2), then `langgraph.py`/`autogen.py`/`crewai.py`/`openai_agents.py`/`google_adk.py`, using the existing `test_*_adapter.py` files as acceptance criteria — do not assume any prior partial implementation to resume from.
+5. **Build `deepagents.py` only** (not yet started; scope narrowed 2026-07-11 — see Task 13): flagship per Design Principle 2, using `tests/integration/test_deepagents_adapter.py` as acceptance criteria. The other five adapters (`langgraph.py`, `autogen.py`, `crewai.py`, `openai_agents.py`, `google_adk.py`) are deferred until a specific framework's users actually ask for one — `AgentDBBackend` already covers any framework generically without a dedicated adapter, per the README's own working example.
 6. After the adapter re-plan, the next highest-value gap is the public client's budgeted retrieval + real conflict detection (see "Public client" under Partial, above) — it blocks Task 9's per-record lifecycle decisions and the dead `override_instructions` field.
 
 ## Design Principles
@@ -310,7 +311,13 @@ Weighted sum decays older outcomes. Recent outcomes count more.
 
 ### Task 9: Lifecycle Manager
 
-**Status: not started.** Note before implementing: this spec's test fixtures import `SQLiteMemoryStore` from `agentdb.core.memory_store` and `SystemTables` from `agentdb.core.system_tables` — neither module exists. The actual equivalents are `MemoryStore` and `SystemStats`, both defined inline in `agentdb/interface/client.py` (see "Store + audit log" and "System tables" under Current Status → Partial). Adapt constructor signatures and imports accordingly before following this spec literally — the same kind of drift Task 7 had to work around.
+**Status: not started. Scope narrowed 2026-07-11 — reconsider the confidence-decay half before implementing.**
+
+The spec below (kept for the archival mechanics, which are still needed) originally paired two behaviors: (1) scheduled confidence decay on unretrieved records, and (2) archival of records that fall below a confidence/staleness threshold. (1) is likely redundant now: the ranking algorithm (Task 7, shipped) already applies exponential recency decay to a record's *effective* relevance at every `retrieve()` call (`exp(-λ·days)`, see Algorithm Reference above) — a stale record already sinks in ranking without anyone mutating its stored `confidence`. Skills already use the better pattern for this: health score is computed at read time and never stored (per the algorithm-review skill's own rule). A scheduled background job that mutates stored `confidence` on a timer is exactly the kind of memory-asset bookkeeping Design Principle 1a/11 says to avoid unless it demonstrably improves action quality — and nothing here has been shown to.
+
+**Recommendation:** implement only the archival half — a simple on-demand (not scheduled) sweep that archives records below `ARCHIVAL_THRESHOLD` or stale past `STALENESS_DAYS` — and drop the periodic `CONFIDENCE_DECAY_RATE` mutation from the design. If archival turns out to need current confidence as an input, read it live rather than pre-decaying it on a schedule. `DECAY_INTERVAL_DAYS` in the spec below was never actually wired to anything even in the original design (defined but unused by `run_cycle()`) — a sign this was under-designed to begin with.
+
+Note before implementing whichever version is built: this spec's test fixtures import `SQLiteMemoryStore` from `agentdb.core.memory_store` and `SystemTables` from `agentdb.core.system_tables` — neither module exists. The actual equivalents are `MemoryStore` and `SystemStats`, both defined inline in `agentdb/interface/client.py` (see "Store + audit log" and "System tables" under Current Status → Partial). Adapt constructor signatures and imports accordingly before following this spec literally — the same kind of drift Task 7 had to work around.
 
 **Files:**
 - Create: `agentdb/governance/lifecycle_manager.py`
@@ -845,10 +852,9 @@ Rationale:
 
 **Status: not started, correctly phase-gated** — no `retrieval/embedding.py`, no vector library usage anywhere in the codebase.
 
-> **[DECISION required before starting]** Confirm embedding model:
-> - `text-embedding-3-small` (OpenAI) — 1536 dims, API call, ~$0.00002/1K tokens
-> - `voyage-3` (Voyage AI) — Anthropic-recommended, 1024 dims, API call
-> - `all-MiniLM-L6-v2` (sentence-transformers) — local, 384 dims, zero API cost, lower quality
+**Scope narrowed 2026-07-11:** build local-only first (`all-MiniLM-L6-v2` via sentence-transformers) — zero API cost, zero API-key/network dependency, nothing to configure. The spec below supports OpenAI and Voyage backends too; treat those as deferred until the local model is proven insufficient for retrieval quality. Shipping all three backends up front is more surface (config branching, two extra API integrations, two extra sets of credentials to manage) than Design Principle 11 ("memory assets are subordinate... only in scope when they improve recall/reduce conflicts/increase accuracy") justifies before there's evidence the local model isn't good enough.
+
+> **[DECISION required before starting]** Confirm the local model is `all-MiniLM-L6-v2` (384 dims) and not some other sentence-transformers model. If/when local proves insufficient, revisit `text-embedding-3-small` (OpenAI, 1536 dims) or `voyage-3` (Voyage AI, 1024 dims) — both remain in the spec below for that path.
 >
 > Store model name in `embedding_version` on every record from this point forward.
 > This field enables reindexing when the model is upgraded.
@@ -1019,24 +1025,23 @@ Outline of what Task 11 will deliver:
 
 **Status: not started.** See Current Status → Recommended next actions #5 for the adapter re-plan approach (start from zero, do not assume any prior partial implementation).
 
-### Task 12: MCP Server (4 tools)
+### Task 12: MCP Server
 
 **Files:**
 - Create: `agentdb/interface/mcp_server.py`
 
-Four tools: `memory_write`, `memory_retrieve`, `memory_subscribe`, `conflict_queue`.
-`memory_subscribe` uses the event bus (separate from the audit log — see Design Principle 7).
+**Scope narrowed 2026-07-11:** ship 3 tools first — `memory_write`, `memory_retrieve`, `conflict_queue` — all of which map to functionality that already exists (`write()`, `retrieve()`, and once built, the conflict queue). Defer the 4th tool, `memory_subscribe`, along with the event bus subsystem it depends on (see Design Principle 7 — never built, no schema, no task spec ever written for it, confirmed via full git-history search 2026-07-11).
+
+The event bus's most concrete justification, if it gets built: push-notifying a consumer the instant a new conflict is queued for human review, or the instant a shared human-approved skill/memory changes — sparing a consumer from polling `agentdb_stats()` or replaying the audit log. That's a real, differentiated use case tied to the governance/conflict-queue story (not a generic pub/sub bolt-on), but there's no evidence yet that anyone needs it. Build `memory_subscribe` + the event bus only when a concrete consumer shows up wanting exactly that notification, and scope it to that use case rather than a general-purpose bus.
+
 Full task expansion after Phase 3 is complete.
 
 ### Task 13: Framework Adapters
 
 **Files:**
-- Create: `agentdb/adapters/langgraph.py`
-- Create: `agentdb/adapters/crewai.py`
-- Create: `agentdb/adapters/openai_agents.py`
+- Create: `agentdb/adapters/deepagents.py`
 
-LangGraph checkpointer, CrewAI step callback, OpenAI Agents SDK handoff hook.
-Full task expansion after Phase 3 is complete. Per Current Status recommended action #5, re-plan this backlog from zero when picking it up — `deepagents.py` first (flagship per Design Principle 2), then the rest, using the existing `test_*_adapter.py` files as acceptance criteria.
+**Scope narrowed 2026-07-11:** build `deepagents.py` only, for now. Design Principle 2 names it the flagship integration; README's own "drop into your stack in 30 minutes" pitch already demonstrates full deepagents integration using the generic `AgentDBBackend` with no dedicated adapter module at all. Committing to 5 more full adapters (`langgraph.py`, `crewai.py`, `openai_agents.py`, `google_adk.py`, `autogen.py`) before any of them has a real consumer is exactly the integration-breadth-before-core-loop-stable pattern Design Principle 10 / the README's "Execution Strategy" warns against — `AgentDBBackend` already covers any framework with pluggable key-value storage without a bespoke adapter. Build the next one only when a specific framework's users actually ask for it, using its existing `test_*_adapter.py` file as acceptance criteria.
 
 ---
 
