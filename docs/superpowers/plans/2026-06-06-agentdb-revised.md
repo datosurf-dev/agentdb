@@ -83,6 +83,7 @@ See `docs/superpowers/plans/completed-tasks.md` for the full synthesized record 
 - **Task 9 (lifecycle manager):** no file exists. The only confidence adjustment is the reactive path in `record_outcome()` above — no background/scheduled decay of memories that are simply never retrieved. Full spec below.
 - **Task 10 (provider ingestors):** no `src/agentdb/providers/` directory. Correctly gated behind the core loop stabilizing. Full spec below.
 - **Phase 4 (embeddings/semantic search):** no `retrieval/embedding.py`, no vector library usage. Correctly not started — properly phase-gated. Full spec below.
+- **Task 13 (skill draft reconciliation pipeline):** no file exists. Deep in the dependency chain (needs Task 12's semantic conflict detection, itself needing Task 11's embeddings) — not a near-term priority, but the design is written so implementation can start the moment its prerequisites land. Full spec below. A standalone prerequisite (the `SkillStore.update()` governance fix) can and should happen independent of the rest.
 - **Phase 5 (MCP server + adapters):** no `interface/mcp_server.py`. Adapters: only `claude_agent_sdk.py` exists. Six integration test files exist for adapters that were never built. Full spec below.
 
 ### Recommended next actions
@@ -90,7 +91,7 @@ See `docs/superpowers/plans/completed-tasks.md` for the full synthesized record 
 2. ~~Fix the skill health-score bug (Task 8)~~ — done 2026-07-11.
 3. ~~Wire `delete()` through the permission router + audit log~~ — done 2026-07-11 (`list()` per-agent scoping gap remains).
 4. ~~Build Task 7 (multi-signal ranking)~~ — done 2026-07-11 (semantic signal still deferred to Phase 3; budget/conflict-detection pieces remain Task 6 gaps).
-5. **Build `deepagents.py` only** (not yet started; scope narrowed 2026-07-11 — see Task 13): flagship per Design Principle 2, using `tests/integration/test_deepagents_adapter.py` as acceptance criteria. The other five adapters (`langgraph.py`, `autogen.py`, `crewai.py`, `openai_agents.py`, `google_adk.py`) are deferred until a specific framework's users actually ask for one — `AgentDBBackend` already covers any framework generically without a dedicated adapter, per the README's own working example.
+5. **Build `deepagents.py` only** (not yet started; scope narrowed 2026-07-11 — see Task 15): flagship per Design Principle 2, using `tests/integration/test_deepagents_adapter.py` as acceptance criteria. The other five adapters (`langgraph.py`, `autogen.py`, `crewai.py`, `openai_agents.py`, `google_adk.py`) are deferred until a specific framework's users actually ask for one — `AgentDBBackend` already covers any framework generically without a dedicated adapter, per the README's own working example.
 6. After the adapter re-plan, the next highest-value gap is the public client's budgeted retrieval + real conflict detection (see "Public client" under Partial, above) — it blocks Task 9's per-record lifecycle decisions and the dead `override_instructions` field.
 
 ## Design Principles
@@ -836,9 +837,7 @@ Rationale:
 
 ---
 
-### Task 14: Embedding Service
-
-(Renumbered 2026-07-11 from a duplicate "Task 10" — the original doc used "Task 10" for both this and Provider Ingestors above.)
+### Task 11: Embedding Service
 
 **Files:**
 - Create: `agentdb/retrieval/embedding.py`
@@ -982,13 +981,13 @@ git commit -m "feat: embedding service with local/openai/voyage backends, conten
 
 ---
 
-### Task 11: Semantic Conflict Detection + pgvector Backend
+### Task 12: Semantic Conflict Detection + pgvector Backend
 
 These are described in the plan — implementation tasks to be expanded once the embedding model decision is confirmed. Stubs are in place from Phase 1. Full implementation follows the same TDD pattern as prior tasks.
 
 **Blocking decision: confirm embedding model before starting this task.**
 
-Outline of what Task 11 will deliver:
+Outline of what Task 12 will deliver:
 - `PostgresMemoryStore(MemoryStoreBackend)` in `agentdb/core/memory_store.py`
 - `ConflictDetector.check()` extended with cosine similarity comparison against existing records
 - `MultiSignalRanker` semantic signal activated (weight_semantic > 0)
@@ -996,11 +995,69 @@ Outline of what Task 11 will deliver:
 
 ---
 
+### Task 13: Skill Draft Reconciliation Pipeline
+
+**Status: not started. Designed 2026-07-11, out of a session-long discussion about whether AgentDB's own async (12b) capabilities could help this repo remember its own process rules** (specifically: migrate completed plan tasks to `completed-tasks.md`, delete fully-completed plan files). That discussion concluded the answer for *this repo's own maintenance* is "no" — no Claude Code session working on agentdb is wired to retrieve from an AgentDB instance, so there's no attachment point for a hook or a dispatch to reach. But the underlying capability — turn a recurring, human-approved instruction into a governed skill, with conflict-aware reconciliation before it's committed — is a real, general AgentDB feature in its own right, useful for any deployment where an agent is wired to AgentDB (e.g. slack-assistant). This task builds that feature, not something specific to this repo.
+
+**Dependencies (why this sits here, not earlier):** Task 12 (semantic conflict detection) for reconciling drafts against existing skills/other drafts/changed files by meaning, not just exact keyword overlap; Task 11 (embeddings) as Task 12's own prerequisite; the skill store (`skills/skill_store.py`, done) and skill-store governance fix below; the notifier dispatcher (`register_reconciliation_handler`/`dispatch_reconciliation_trigger`, done); `agentdb_stats()` (done).
+
+**Design directive: recycle methods, don't invent parallel ones.** Every piece of this pipeline reuses an existing mechanism rather than adding a new subsystem next to it — that's not a style preference, it's the point of the design. Reuse map:
+
+| Pipeline need | Reuses | Does not add |
+|---|---|---|
+| Store a draft | A plain `MemoryRecord`, `origin="agent_inferred"`, key `memory/skill_drafts/{draft_id}` | No new table |
+| Classify update-vs-create | Same keyword/entity matching `retrieve_by_entities()` already does, against existing skills' `scope`/content | No new matcher |
+| Detect draft-vs-draft / draft-vs-skill conflicts | Task 12's conflict detector, applied to drafts as well as stored memories | No draft-specific conflict engine |
+| Detect draft-vs-changed-file conflicts | `core/file_integrity.py` (built 2026, never wired to anything — see `docs/context/capabilities.md`) as a cheap hash pre-filter, then Task 12's embeddings only when the hash actually changed | No new file-watching mechanism |
+| Notify a human reviewer | `dispatch_reconciliation_trigger("skill_draft_proposed"/"skill_draft_conflict", ...)` — the existing 12b mechanism (Design Principle 12b) | No new pub/sub |
+| Metric-driven triggers | New fields on `agentdb_stats()` (repeated-correction cluster count, pending-draft backlog count), computed from the existing `outcomes` table and `memory/skill_drafts/*` records | No new stats surface |
+| Commit a draft | `skills_api.create_skill()` / `update_skill_version()` (existing) | No new skill-writing path |
+
+**Prerequisite fix, part of this task, not optional:** `SkillStore.update()` (via `SkillsAPI.update_skill_version()`) currently has no protection against being called by non-human-initiated code — it silently inherits `authored_by` from the original skill and lets any caller rewrite content, unlike `create()` which at least checks `authored_by == "human"` at the call site. This must be closed before this pipeline exists, otherwise the pipeline's own "approve" step would be indistinguishable from any other code path that happens to call `update_skill_version` directly. Fix: `update_skill_version`/`create_skill` remain the only two methods that touch `skills.sqlite` content; nothing in this task's "propose" surface may call either.
+
+**Pipeline:**
+
+```
+propose_skill_draft(name, content, scope, agent_id, entities=None, session_id=None)
+    → classify: match content/entities against existing skills (reuse retrieve_by_entities matching)
+        → action="update"(target_skill_id) if a good match, else action="create"
+    → reconcile (batch, not isolated to this one draft):
+        - vs. other pending drafts sharing entities/scope → flag if contradictory
+        - vs. the target skill's current content, if action="update" → always flagged for review (any change to a human skill needs eyes)
+        - vs. files tagged with the same entities: file_integrity hash changed since draft/skill was last touched?
+          → if yes, escalate to Task 12's semantic comparison to decide if the change is meaningfully conflicting
+    → write memory/skill_drafts/{draft_id}  (status="pending"|"conflicted", action, target_skill_id, conflicts=[...])
+    → dispatch_reconciliation_trigger("skill_draft_proposed" | "skill_draft_conflict", draft_id=..., agent_id=..., session_id=...)
+
+[metric triggers, computed from existing data, not a new scheduler]
+    → agentdb_stats() gains: repeated_correction_cluster_count (human_correction outcomes sharing entities, in a window),
+      skill_draft_backlog_count (pending drafts)
+    → either crossing a threshold → dispatch_reconciliation_trigger("skill_candidate_threshold_reached" | "skill_draft_backlog_high", ...)
+
+approve_skill_draft(draft_id, resolution=None)
+    → if status == "conflicted": require an explicit resolution argument, refuse otherwise
+    → action="create" → skills_api.create_skill(...); action="update" → skills_api.update_skill_version(...)
+    → archive the draft record, audit-log skill_draft_approved
+
+reject_skill_draft(draft_id, reason=None)
+    → archive the draft record, audit-log skill_draft_rejected, skills.sqlite untouched
+```
+
+**Open question, decide before implementing:** whether `approve_skill_draft`/`reject_skill_draft`/`propose_skill_draft` live directly on `AgentDB`, or on a new small `SkillDraftsAPI` parallel to `SkillsAPI` — leaning toward the latter for the same reason `SkillsAPI` exists as its own surface rather than more methods on `AgentDB`.
+
+**Implementation order** (per this repo's TDD convention — tests first for each slice):
+1. `SkillStore.update()` governance fix (prerequisite, standalone, no dependency on the rest).
+2. `propose_skill_draft`/`approve_skill_draft`/`reject_skill_draft` with classification, no conflict-checking yet (draft always `status="pending"`).
+3. Conflict reconciliation (depends on Task 12 existing — do not build a bespoke keyword-only conflict heuristic here as a stand-in; wait for Task 12 rather than duplicating it in a phase-inconsistent way, per Design Principle 8).
+4. Metric-driven triggers.
+
+---
+
 ## Phase 5 — MCP Server + Framework Adapters
 
 **Status: not started.** See Current Status → Recommended next actions #5 for the adapter re-plan approach (start from zero, do not assume any prior partial implementation).
 
-### Task 12: MCP Server
+### Task 14: MCP Server
 
 **Type: `memory_write`/`memory_retrieve` are thin transport over already-real-time-enforced operations; `conflict_queue` and `memory_subscribe` are thin transports over the 12b notifier dispatcher** (per `docs/context/architecture-principles.md` Principle 12/12b) — MCP is a consumer of that mechanism, not the thing that defines it.
 
@@ -1011,11 +1068,11 @@ Outline of what Task 11 will deliver:
 
 **Sequencing:** ship `memory_write`/`memory_retrieve` first (no new dependency). `conflict_queue`/`memory_subscribe` are blocked on Task 6's real conflict detection dispatching a `conflict_detected` trigger in the first place — there's nothing meaningful to subscribe to until stored records actually get flagged. Once that exists, `conflict_queue`/`memory_subscribe` are a few lines of MCP-side handler registration, not new plumbing.
 
-Note this also means a Slack/Telegram notifier doesn't need MCP or this task at all — a host app (e.g. slack-assistant) can call `db.register_reconciliation_handler("conflict_detected", ...)` directly once Task 6 dispatches that trigger, entirely independent of whether Task 12 ever ships.
+Note this also means a Slack/Telegram notifier doesn't need MCP or this task at all — a host app (e.g. slack-assistant) can call `db.register_reconciliation_handler("conflict_detected", ...)` directly once Task 6 dispatches that trigger, entirely independent of whether Task 14 ever ships.
 
 Full task expansion after Phase 3 is complete.
 
-### Task 13: Framework Adapters
+### Task 15: Framework Adapters
 
 **Type: 12a, real-time enforcement.** Per `docs/context/architecture-principles.md` Principle 12, this adapter is not "done" on API existence alone — it must name the exact point in deepagents' own control flow where AgentDB governance executes (the equivalent of Claude SDK's `PreToolUse` + `prepare_turn`), and a test must prove that framework-triggered point changes what context/instructions reach the agent.
 

@@ -32,7 +32,8 @@ Every capability tagged **Dual** below shares one shape: the detection logic (co
 | Entity-aware retrieval | Rank | 12a | Implemented | |
 | Provider ingestors (Task 10) | Rank | Ingest feeds 12a for free; a sync-caused conflict could dispatch 12b | Missing | |
 | `prepare_turn` / `pre_tool_use` | Inject | 12a | Implemented | |
-| MCP server (Task 12) | Inject | `memory_write`/`memory_retrieve` = transport over 12a; `conflict_queue` = transport over 12b (subscribes to the existing dispatcher) | Missing | Not a new event-bus subsystem — a thin consumer of the dispatcher row above |
+| MCP server (Task 14) | Inject | `memory_write`/`memory_retrieve` = transport over 12a; `conflict_queue` = transport over 12b (subscribes to the existing dispatcher) | Missing | Not a new event-bus subsystem — a thin consumer of the dispatcher row above |
+| Skill draft reconciliation pipeline (Task 13) | Reconcile | **Dual** — propose/metric-triggers = 12b (dispatches `skill_draft_proposed`/`skill_candidate_threshold_reached`); approve/reject = write-time governance (the only path allowed to touch `skills.sqlite` content) | Missing, designed | Reuses `retrieve_by_entities` matching, Task 12's conflict detector, `file_integrity.py` (finally gets a caller), the notifier dispatcher, and `agentdb_stats()` — no new subsystem. Depends on Task 12/11. Requires the `SkillStore.update()` governance fix as a prerequisite |
 
 ## What this means for near-term work
 
