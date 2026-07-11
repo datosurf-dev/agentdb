@@ -13,6 +13,8 @@ Global instruction layer (always loaded when supported by the agent runtime):
 
 When documentation differs, treat `AGENTS.md` first, then this file and the context document above.
 
+**Known doc issue (flagged 2026-07-10, not yet fixed):** task numbering in this file collides — "Task 3" is used twice (SQLite Memory Store and, separately, Audit Log), and "Task 10" is used three times (two identical "Provider Ingestors" headings plus a distinct "Embedding Service" task). Not renumbered here to avoid breaking cross-references without a dedicated pass; when picking up any Task 3 or Task 10 item, confirm by section title, not number.
+
 ## Plan Manifest
 
 The following feature groups are included for superpowers execution context:
@@ -44,16 +46,18 @@ To make implementation incremental and verifiable, execute the plan in these che
 10. Provider Slice (gated): Anthropic/OpenAI/Google ingestion only after the core loop is stable and useful.
 11. Interface + Hardening Slice (gated): MCP surface, adapter hardening, migration tooling, and production constraints.
 
-**Note — ahead-of-schedule adapters:** The following adapters were implemented ahead of schedule and exist in `src/agentdb/adapters/` without a corresponding plan task: `langgraph.py`, `autogen.py`, `crewai.py`, `openai_agents.py`. These are treated as Phase 1 deliverables consistent with the Backend Slice (Slice 2). They have no dedicated task spec — the existing `test_*_adapter.py` integration tests serve as their acceptance criteria.
+**Note — adapter status correction (2026-07-10):** Prior revisions of this plan claimed `langgraph.py`, `autogen.py`, `crewai.py`, and `openai_agents.py` were implemented ahead of schedule in `src/agentdb/adapters/`. As of 2026-07-10 this is false: `src/agentdb/adapters/` contains only `claude_agent_sdk.py`. No git commit (`git log --all`) ever added the other five adapter files, so this was a documentation/tracking error rather than a deleted-code regression. `tests/integration/test_autogen_adapter.py`, `test_crewai_adapter.py`, `test_deepagents_adapter.py`, `test_google_adk_adapter.py`, `test_langgraph_adapter.py`, and `test_openai_agents_adapter.py` all exist but fail to collect (`ModuleNotFoundError`) because their target modules don't exist. Treat all adapters except `claude_agent_sdk.py` as **not started**. See "Current Snapshot Progress (2026-07-10)" below for full detail.
 
 Execution gate before Slice 10+: confirm the actionable memory loop is demonstrably stable end-to-end:
 - track relevant assets -> enforce write boundaries -> reconcile when needed -> conflict-first retrieval/injection -> outcome recording -> confidence updates -> stats visibility
 - package-style tests passing via editable install workflow
 - no phase-boundary violations (for example semantic/conflict claims before embeddings phase)
 
-## Current Snapshot Progress (2026-06-24)
+## Historical Snapshot (2026-06-24) — superseded, contains inaccuracies
 
-The following execution slices have been implemented in the current repository snapshot:
+**This section is kept for history only. It is factually wrong about adapters (see "Current Snapshot Progress (2026-07-10)" below) and should not be treated as current status.** In particular, the `deepagents.py` bullet below and the `test_deepagents_adapter.py` validation-evidence line do not match the repository as of 2026-07-10 — no `src/agentdb/adapters/deepagents.py` file exists and no git commit ever added one.
+
+The following execution slices were claimed as implemented in the 2026-06-24 snapshot:
 
 - Core governed retrieval/improvement loop (initial phase-consistent implementation) in `src/agentdb/interface/client.py`:
   - `retrieve()` with conflict-first result shape and retrieval audit event (`memory_retrieve`)
@@ -115,6 +119,46 @@ Validation evidence (venv-local):
 - Additional validation after Claude middleware adapter:
   - `python -m pytest -q tests/integration/test_claude_agent_sdk_adapter.py tests/integration/test_deepagents_adapter.py tests/unit/test_audit_contracts.py tests/unit/test_system_stats.py tests/unit/test_client_loop.py tests/unit/test_backend.py tests/unit/test_models.py`
   - Result: passing (`44 passed`)
+
+## Current Snapshot Progress (2026-07-10)
+
+Full audit against this plan, done by reading every current `src/agentdb` module against its corresponding task spec and running the test suite. Supersedes the 2026-06-24 snapshot above.
+
+**Repo hygiene warning:** `git status` shows almost all of `src/agentdb/` (everything except `src/agentdb/adapters/claude_agent_sdk.py`) is **untracked** — never committed. If this working tree is lost, so is this implementation. Commit it before doing further work here.
+
+**Test evidence:** `python -m pytest -q tests/unit tests/integration/test_claude_agent_sdk_adapter.py` → 75 passed. Running plain `pytest -q` (no path filter) fails collection entirely: `test_autogen_adapter.py`, `test_crewai_adapter.py`, `test_deepagents_adapter.py`, `test_google_adk_adapter.py`, `test_langgraph_adapter.py`, `test_openai_agents_adapter.py` all raise `ModuleNotFoundError` because their target adapter modules don't exist.
+
+### Done
+- **Phase 2 Task F (Action-driven retrieval):** `MemoryRecord.entities` (`core/models.py:57`), `AgentDB.retrieve_by_entities()` (`interface/client.py:749-793`) with keyword matching, entity-triggered audit metadata. Claude SDK adapter (`adapters/claude_agent_sdk.py`) implements `_extract_entities_from_tool`, `build_action_context`, `pre_tool_use`, `build_hook_handlers`, `PreToolUse` wiring. Matches plan intent.
+- **`directory_tracking.py` / `file_integrity.py`** (`core/directory_tracking.py`, `core/file_integrity.py`): tested, working, but undocumented anywhere in this plan (searched full doc — `file_integrity` appears zero times, `directory_tracking` appears once as a bare test-file bullet). Add a task spec for these or fold their rationale into Phase 2 Task G.
+
+### Partial (works, but diverges from plan spec — decide if drift is intentional)
+- **Task 1 (models):** `MemoryRecord`/`ConflictRecord`/`Skill` in `core/models.py:44-84` are missing plan-required fields: `user_id, session_id, expiry_policy, tier, updated_at, last_retrieved, conflict_id, audit_sequence, embedding, embedding_version` (records), `detected_at/resolved_at/resolution/agent_id` (conflicts). `ExpiryPolicy`/`MemoryTier` enums exist but are never attached to a record.
+- **Task 2 (`AgentDBBackend`):** `backend.py:10-76`. No `AgentDB.delete()` exists at all — `delete()` calls `db._store.delete_by_key()` directly, **bypassing permission checks and the audit log entirely**. `list()` uses `list_all()` (all agents), not scoped per-agent as spec'd. Two undocumented extra methods (`grep`, `glob`) exist beyond the plan's 4-method contract.
+- **Task 3 (store + audit log):** Both live inline in `interface/client.py` (`MemoryStore` lines 110-289, `AuditLog` lines 295-338) rather than as separate `core/memory_store.py` / `core/audit_log.py` modules. Audit log is a SQLite table, not append-only NDJSON as spec'd. Missing schema fields (`expiry_policy, embedding, conflict_id, audit_sequence, user_id, session_id`) that later ranking/lifecycle tasks depend on.
+- **Task 4 (permission router):** `governance/permission_router.py:58-109`. API renamed from spec (`check_write`/`check_read` vs. planned `validate_write`/`get_agent_readable_prefixes` — the latter doesn't exist). `PermissionDenied` carries a plain string, not the structured `reason/key/agent_id/origin` the plan specifies. `config/permissions.example.yaml` does not exist.
+- **Task 5 (system tables):** Only `agentdb_stats()` exists (`client.py:345-423`) — no `agentdb_memories()`/`agentdb_agents()`/`agentdb_conflicts()` queryable relations. `conflict_pending_count` is a **hardcoded `0` stub** (`client.py:388`) — conflict tracking doesn't exist yet at all.
+- **Task 6 (public client):** `interface/client.py:600-747`. `retrieve()` has no `budget_tokens` param and `RetrievalResult` has no `token_estimate`/`truncated` fields — budgeted context assembly (Design Principle 1a) is unimplemented. No `governance/conflict_detector.py` module exists; `write()` never checks for conflicts and `retrieve()` hardcodes `conflicts=[]` (`client.py:743`) — Design Principles 8/9 are unimplemented despite being called out as core.
+- **Task A (retrieval event logging):** Present (`client.py:677-687`) but `signal_scores` is a stub (`{id: 1.0}` for every record) since Task 7 doesn't exist to produce real scores.
+- **Task B (outcome reinforcement):** Implemented inline in `record_outcome()` (`client.py:795-873`) rather than a `LifecycleManager`. Confidence deltas match spec, but there's no `outcome_type`/`outcome_value` validation (plan requires `ValueError`s that aren't there), and session→record linkage uses a non-persistent in-memory dict (`_session_record_ids`) instead of audit-log replay — lost on process restart.
+- **Task C (corpus quality metrics):** Implemented in `agentdb_stats()` but two thresholds drift from spec: `low_confidence_count` uses `<0.5` (plan says `<0.4`), `outcome_positive_rate` uses `>=0.5` (plan says `>=0.7`). No `skill_health_avg`/`skill_stale_count` fields.
+- **Task 8 (skill store health score) — real correctness bug:** `skills/skill_store.py:59-74` computes staleness from `skill.created_at`, not `last_retrieved` as spec'd. This means a skill retrieved daily still decays purely by calendar age since creation — the plan's own acceptance test ("recently retrieved after 45 days ⇒ health ≥ 0.9") would fail against this code. Worth fixing before this is relied on. Also missing: entity-drift penalty, unresolved-conflict penalty, `SkillConflict` exception, `search()`.
+- **Phase 2 Task E (priority enforcement):** Mostly done — conflict detection against `external_context`, `external_conflict_detected` event, `external_conflict_rate` stat all present (`client.py:660-729`). But `RetrievalResult.override_instructions` is dead code — defined but never populated by any code path, so "explicit override instructions on conflict" isn't actually implemented, only detection is.
+- **Phase 2 Task G (package memory workspace):** Behavior exists and is tested (`tests/unit/test_memory_workspace.py` passes) but **the file location claimed in the 2026-06-24 snapshot is wrong** — there is no `src/agentdb/core/memory_workspace.py`; all of it (root resolution, `memory.yaml` load/validation, tracked-directory validation) is inlined in `AgentDB.__init__` (`client.py:492-579`). Reconciliation dispatcher (`register_reconciliation_handler`/`dispatch_reconciliation_trigger`, `client.py:875-884`) is generic rather than specifically wired per trigger type, and `reconciliation_run_id` is hardcoded `None` everywhere.
+
+### Missing
+- **Task 7 (multi-signal ranking algorithm) — the plan's stated "algorithmic moat" (Design Principle 4) does not exist.** No `src/agentdb/retrieval/` directory at all. `retrieve()` hardcodes `signal_scores = {r.id: 1.0 for r in records}` (`client.py:669`); search is plain substring match (`MemoryStore.search()`, `client.py:227-249`). This is the single biggest gap versus the plan's own stated value proposition.
+- **Task 9 (lifecycle manager):** No file exists. The only confidence adjustment is the reactive path in `record_outcome()` (Task B) — no background/scheduled decay of memories that are simply never retrieved.
+- **Task 10 (provider ingestors):** No `src/agentdb/providers/` directory. Expected — this is Phase 3, gated behind the core loop stabilizing, and the core loop (per Task 7 gap above) is not there yet.
+- **Phase 4 (embeddings/semantic search):** No `retrieval/embedding.py`, no vector library usage. Correctly not started — properly phase-gated, no drift here.
+- **Phase 5 (MCP server + adapters):** No `interface/mcp_server.py`. Adapters: only `claude_agent_sdk.py` exists; `langgraph.py`, `deepagents.py`, `openai_agents.py`, `google_adk.py`, `autogen.py`, `crewai.py` are all absent — see the corrected "adapter status" note earlier in this doc. Six integration test files exist for adapters that were never built.
+
+### Recommended next actions (in priority order)
+1. **Commit the untracked `src/agentdb/` tree now** — this is the highest-risk item; real working code currently has no backup.
+2. Fix the skill health-score bug (Task 8) — it's a silent correctness issue, not just an API gap.
+3. Wire `delete()` through the permission router + audit log (Task 2) — it currently bypasses governance entirely, which directly violates Design Principle 1/"governance built in."
+4. Build Task 7 (multi-signal ranking) before any further adapter or provider work — every later phase assumes it exists, and Design Principle 4 calls it the technical moat.
+5. Re-plan the adapter backlog from zero: `deepagents.py` (flagship per Design Principle 2), then `langgraph.py`/`autogen.py`/`crewai.py`/`openai_agents.py`/`google_adk.py`, using the existing `test_*_adapter.py` files as acceptance criteria — do not assume any prior partial implementation to resume from.
 
 ## Integrated Temp Prompt Requirements
 
@@ -519,14 +563,15 @@ agentdb/
 │   │   ├── __init__.py
 │   │   ├── mcp_server.py            # MCP server (4 tools)
 │   │   └── client.py                # AgentDB() and AgentDB.connect()
-│   └── adapters/                    # ✅ COMPLETE (built ahead of schedule)
+│   └── adapters/                    # ⚠️ ONLY claude_agent_sdk.py exists as of 2026-07-10 — rest not started
 │       ├── __init__.py
-│       ├── langgraph.py             # BaseCheckpointSaver (langgraph-checkpoint>=0.4)
-│       ├── deepagents.py            # BackendProtocol (ls/read/grep/glob/write/edit)
-│       ├── openai_agents.py         # Session protocol (openai-agents>=0.1)
-│       ├── google_adk.py            # BaseMemoryService ABC (google-adk>=1.0)
-│       ├── autogen.py               # Memory ABC (autogen-core>=0.4)
-│       └── crewai.py                # StorageBackend Protocol (crewai>=0.80, 14 methods)
+│       ├── claude_agent_sdk.py      # ✅ implemented — AgentDBClaudeMiddleware, action-driven retrieval hooks
+│       ├── langgraph.py             # not started — BaseCheckpointSaver (langgraph-checkpoint>=0.4)
+│       ├── deepagents.py            # not started — BackendProtocol (ls/read/grep/glob/write/edit)
+│       ├── openai_agents.py         # not started — Session protocol (openai-agents>=0.1)
+│       ├── google_adk.py            # not started — BaseMemoryService ABC (google-adk>=1.0)
+│       ├── autogen.py               # not started — Memory ABC (autogen-core>=0.4)
+│       └── crewai.py                # not started — StorageBackend Protocol (crewai>=0.80, 14 methods)
 │
 ├── sdk-ts/
 │   └── src/
