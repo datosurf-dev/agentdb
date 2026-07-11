@@ -7,8 +7,8 @@ These instructions are repository-level and apply to all agent work in this repo
 ## Canonical Context Sources
 
 1. Global instructions: `/Users/jm/Documents/github/agentdb/AGENTS.md`
-2. Project context document: `/Users/jm/Documents/github/agentdb/docs/context/agentdb-context.md`
-3. Superpowers plan: `/Users/jm/Documents/github/agentdb/docs/superpowers/plans/2026-06-06-agentdb-revised.md`
+2. Superpowers plan (active/open work): `/Users/jm/Documents/github/agentdb/docs/superpowers/plans/2026-06-06-agentdb-revised.md`
+3. Completed work tracker: `/Users/jm/Documents/github/agentdb/docs/superpowers/plans/completed-tasks.md`
 4. Architecture & design principles: `/Users/jm/Documents/github/agentdb/docs/context/architecture-principles.md`
 5. Capabilities by type: `/Users/jm/Documents/github/agentdb/docs/context/capabilities.md`
 6. Database schema and memory assets: `/Users/jm/Documents/github/agentdb/docs/context/database-schema.md`
@@ -33,6 +33,16 @@ Full numbered design principles live in `docs/context/architecture-principles.md
 - Keep provider-ingested origin semantics strict; do not silently promote trust levels.
 - Keep tests aligned with package-style imports and editable install workflow.
 - Prefer minimal, phase-consistent changes over speculative full-phase implementations.
+- Never document a capability as active/implemented before tests and code verify it. This repo's docs have drifted into overclaiming before (adapters, system tables, conflict detection all got described as done when they weren't) — treat every "Implemented" claim you write as something you personally checked against source, not something you inferred from a doc.
+
+## Reporting Expectations
+
+When finishing a task in this repo, report:
+
+- Which feature group(s)/task(s) were touched.
+- Which phase requirement(s) were satisfied or deferred.
+- Any limitation or decision dependency encountered.
+- Test evidence validating the intended behavior.
 
 ## Packaging And Test Expectations
 

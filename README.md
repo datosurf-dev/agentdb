@@ -13,8 +13,8 @@ The full architecture pitch and the numbered design principles (now including Pr
 - Architecture & design principles: `/Users/jm/Documents/github/agentdb/docs/context/architecture-principles.md`
 - Capabilities by type: `/Users/jm/Documents/github/agentdb/docs/context/capabilities.md`
 - Global agent instructions: `/Users/jm/Documents/github/agentdb/AGENTS.md`
-- Project context document: `/Users/jm/Documents/github/agentdb/docs/context/agentdb-context.md`
-- Plan: `/Users/jm/Documents/github/agentdb/docs/superpowers/plans/2026-06-06-agentdb-revised.md`
+- Plan (active/open work): `/Users/jm/Documents/github/agentdb/docs/superpowers/plans/2026-06-06-agentdb-revised.md`
+- Completed work tracker: `/Users/jm/Documents/github/agentdb/docs/superpowers/plans/completed-tasks.md`
 
 ## Current Repository Status (As Of 2026-07-11)
 

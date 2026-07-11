@@ -18,14 +18,14 @@ The model provider (local or cloud) is orthogonal to AgentDB.
 
 ## A) Cloud Model (Claude) Via Deepagents
 
-The deepagents adapter is the most direct path currently documented.
+**`agentdb.adapters.deepagents` does not exist yet** (see the plan's Task 13) — the module and `make_agentdb_backend` below are the target shape, not something you can import today. Use the generic `AgentDBBackend` directly instead (works now):
 
 ```python
 from deepagents import create_deep_agent
 from deepagents.backends import CompositeBackend, StateBackend
 
 from agentdb import AgentDB
-from agentdb.adapters.deepagents import make_agentdb_backend
+from agentdb.backend import AgentDBBackend
 
 db = AgentDB(path="./agentdb.db", permissions_path="./permissions.yaml")
 
@@ -35,12 +35,14 @@ agent = create_deep_agent(
     backend=CompositeBackend(
         default=StateBackend(),
         routes={
-            "/memories/": make_agentdb_backend(db, "assistant", trust_zone="agent_inferred"),
-            "/skills/": make_agentdb_backend(db, "assistant", trust_zone="human_approved"),
+            "/memories/": AgentDBBackend(agent_id="assistant", trust_zone="agent_inferred", db=db),
+            "/skills/": AgentDBBackend(agent_id="assistant", trust_zone="human_approved", db=db),
         },
     ),
 )
 ```
+
+Once `agentdb.adapters.deepagents` ships, `make_agentdb_backend(db, "assistant", trust_zone=...)` would just be a thin convenience wrapper over the same `AgentDBBackend` construction above.
 
 Use this when you want cloud-hosted reasoning and governed memory boundaries.
 
@@ -272,12 +274,7 @@ memory_backend = AgentDBBackend(
 # Your local model selection remains independent from AgentDB.
 ```
 
-If your runtime expects framework-specific memory interfaces, use one of the implemented adapters:
-
-- `adapters/langgraph.py`
-- `adapters/autogen.py`
-- `adapters/crewai.py`
-- `adapters/openai_agents.py`
+If your runtime expects a framework-specific memory interface: only `adapters/claude_agent_sdk.py` exists today (see "A.1" above). `adapters/langgraph.py`, `autogen.py`, `crewai.py`, and `openai_agents.py` are **not implemented** — see the plan's Task 13. Until one exists for your framework, use the generic `AgentDBBackend` pattern shown above; it works with any runtime that supports pluggable key-value storage, adapter or not.
 
 ## C) Making Memory Effective (Both Local And Cloud)
 

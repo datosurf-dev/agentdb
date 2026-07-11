@@ -8,13 +8,13 @@ Global instruction layer (always loaded when supported by the agent runtime):
 
 - `/Users/jm/Documents/github/agentdb/AGENTS.md`
 
-- Canonical plan: `/Users/jm/Documents/github/agentdb/docs/superpowers/plans/2026-06-06-agentdb-revised.md`
-- Canonical feature-context document: `/Users/jm/Documents/github/agentdb/docs/context/agentdb-context.md`
+- Canonical plan (active/open work): `/Users/jm/Documents/github/agentdb/docs/superpowers/plans/2026-06-06-agentdb-revised.md`
+- Completed work tracker: `/Users/jm/Documents/github/agentdb/docs/superpowers/plans/completed-tasks.md`
 - Architecture & design principles: `/Users/jm/Documents/github/agentdb/docs/context/architecture-principles.md`
 - Capabilities by type (Track/Reconcile/Rank/Inject × enforcement type): `/Users/jm/Documents/github/agentdb/docs/context/capabilities.md`
 - Database schema and memory assets: `/Users/jm/Documents/github/agentdb/docs/context/database-schema.md`
 
-When documentation differs, treat `AGENTS.md` first, then this file and the context document above.
+When documentation differs, treat `AGENTS.md` first, then this file and the context documents above.
 
 ## Plan Manifest
 
@@ -63,15 +63,11 @@ Full audit against this plan, done by reading every current `src/agentdb` module
 **Adapter status:** `src/agentdb/adapters/` contains only `claude_agent_sdk.py`. No git commit ever added `langgraph.py`, `deepagents.py`, `openai_agents.py`, `google_adk.py`, `autogen.py`, or `crewai.py` — treat all of them as not started.
 
 ### Done
-- **Phase 2 Task F (Action-driven retrieval):** `MemoryRecord.entities` (`core/models.py`), `AgentDB.retrieve_by_entities()` (`interface/client.py`) with keyword matching, entity-triggered audit metadata. Claude SDK adapter (`adapters/claude_agent_sdk.py`) implements `_extract_entities_from_tool`, `build_action_context`, `pre_tool_use`, `build_hook_handlers`, `PreToolUse` wiring, `conversation_started_callback`, and JSONL conversation capture gated by `memory_config.capture.conversation_jsonl`.
-- **Task 7 (multi-signal ranking algorithm) — implemented 2026-07-11.** `agentdb/retrieval/algorithm.py` adds `MultiSignalRanker`/`RankedRecord` with provenance/recency/confidence/causal weights and formulas (see Algorithm Reference below); semantic weight stays 0.0, correctly phase-gated behind embeddings. Wired into `AgentDB.retrieve()`: candidates are fetched from `search()`, ranked, then sliced to `limit`; `signal_scores` in the `memory_retrieve` audit event reflects real composite scores instead of the old `1.0` stub. Required adding `last_retrieved`/`conflict_id` fields to `MemoryRecord` (with a schema migration for pre-existing databases) — `increment_retrieval_count` now also stamps `last_retrieved`. **Not included** (deliberately out of scope, see Task 6 gap below): `budget_tokens`/`token_estimate`/`truncated` on `retrieve()`, and real conflict detection (`conflict_flag` reads `False` until something populates `conflict_id`). Also flagged, not implemented: weighting outcome reinforcement by a record's `signal_score` at retrieval time.
-- **Task A (retrieval event logging):** `signal_scores` in the `memory_retrieve` audit event now reflects real `MultiSignalRanker` composite scores (see Task 7) instead of a hardcoded `{id: 1.0}`.
-- **Task 8 (skill store health score):** staleness (`skills/skill_store.py:_compute_health`) now measures age from `skill.last_retrieved`, falling back to `created_at` only when a skill has never been retrieved. Still missing: entity-drift penalty, unresolved-conflict penalty, `SkillConflict` exception, `search()`. **Also missing (12b, identified 2026-07-11):** dispatching a `skill_stale` trigger the first time a skill's health score crosses below 0.6, via `dispatch_reconciliation_trigger`. Today staleness only ever surfaces as a warning string returned to whichever agent happens to retrieve that skill — no one else is notified. Needs a "just crossed the threshold" check, not a "currently below" check, to avoid dispatching on every single retrieve.
-- **Task 2 (`AgentDBBackend`) delete governance:** `AgentDB.delete()` (`interface/client.py`) runs the same `check_write` permission check as `write()` (denies and audit-logs `permission_denied` on failure), appends a `memory_delete` audit event on success. `AgentDBBackend.delete()` routes through it instead of calling `db._store.delete_by_key()` directly.
-- **`directory_tracking.py` / `file_integrity.py`** (`core/directory_tracking.py`, `core/file_integrity.py`): tested, working. No dedicated task spec exists for these — fold their rationale into Phase 2 Task G if one is written.
-- **Notifier / 12b dispatch mechanism (reframed 2026-07-11):** `AgentDB.register_reconciliation_handler(trigger, handler)` / `dispatch_reconciliation_trigger(trigger, **kwargs)` (`interface/client.py`) already is the core async-integrity-check mechanism described in `docs/context/architecture-principles.md` Principle 12b — a live, in-memory register/dispatch pair, not durable, not MCP-specific. Previously scoped only for reconciliation triggers (`conversation_started`, `file_modified`, `cron`); it can carry any named trigger. See `docs/context/capabilities.md`.
+
+See `docs/superpowers/plans/completed-tasks.md` for the full synthesized record of shipped work (Phase 2 Task F, Task 7, Task A, Task 8's staleness fix, Task 2's delete governance, `directory_tracking.py`/`file_integrity.py`, the notifier/12b dispatch mechanism, and the Claude SDK async adapter). This active plan only tracks what's still open — see Partial/Missing below.
 
 ### Partial (works, but diverges from original spec — drift is not necessarily a problem, just noted)
+- **Skill store (Task 8):** the staleness fix shipped (see `completed-tasks.md`). Still missing: entity-drift penalty, unresolved-conflict penalty, `SkillConflict` exception, `search()`. **Also missing (12b):** dispatching a `skill_stale` trigger the first time a skill's health score crosses below 0.6, via `dispatch_reconciliation_trigger`. Today staleness only ever surfaces as a warning string returned to whichever agent happens to retrieve that skill — no one else is notified. Needs a "just crossed the threshold" check, not a "currently below" check, to avoid dispatching on every single retrieve.
 - **Models:** `MemoryRecord`/`ConflictRecord`/`Skill` in `core/models.py` are missing several originally-planned fields: `user_id, session_id, expiry_policy, tier, audit_sequence, embedding, embedding_version` (records), `detected_at/resolved_at/resolution/agent_id` (conflicts). `ExpiryPolicy`/`MemoryTier` enums exist but are never attached to a record. `last_retrieved`/`conflict_id` were added 2026-07-11 to support ranking.
 - **`AgentDBBackend`:** `list()` uses `list_all()` (all agents), not scoped per-agent. Two extra methods (`grep`, `glob`) exist beyond the original 4-method contract (harmless, useful).
 - **Store + audit log:** both live inline in `interface/client.py` (`MemoryStore`, `AuditLog` classes) rather than as separate `core/memory_store.py` / `core/audit_log.py` modules. Audit log is a SQLite table, not append-only NDJSON.
