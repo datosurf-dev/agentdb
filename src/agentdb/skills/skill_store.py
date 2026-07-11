@@ -57,13 +57,13 @@ def _row_to_skill(row: sqlite3.Row) -> Skill:
 
 
 def _compute_health(skill: Skill) -> tuple[float, list[str]]:
-    """Compute health score based on staleness."""
+    """Compute health score based on staleness since last retrieval (or
+    creation, for a skill that has never been retrieved)."""
     now = _utcnow()
-    # Make created_at timezone-aware if needed
-    created_at = skill.created_at
-    if created_at.tzinfo is None:
-        created_at = created_at.replace(tzinfo=timezone.utc)
-    age_days = (now - created_at).days
+    reference = skill.last_retrieved or skill.created_at
+    if reference.tzinfo is None:
+        reference = reference.replace(tzinfo=timezone.utc)
+    age_days = (now - reference).days
     health_score = 1.0
     reasons: list[str] = []
     if age_days > 30:

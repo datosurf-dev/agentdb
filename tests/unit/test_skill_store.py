@@ -60,3 +60,13 @@ def test_health_score_degrades_for_stale_skill(store):
     assert len(result) == 1
     assert result[0].health_score < 0.6
     assert any("staleness" in reason for reason in result[0].health_score_reasons)
+
+
+def test_health_score_high_when_recently_retrieved_despite_old_creation(store):
+    skill = _skill()
+    skill.created_at = skill.created_at - timedelta(days=45)
+    skill.last_retrieved = skill.created_at + timedelta(days=44)
+    store.create(skill)
+    result = store.get_for_agent("research_agent")
+    assert len(result) == 1
+    assert result[0].health_score >= 0.9
