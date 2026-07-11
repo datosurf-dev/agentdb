@@ -18,7 +18,7 @@ The model provider (local or cloud) is orthogonal to AgentDB.
 
 ## A) Cloud Model (Claude) Via Deepagents
 
-**`agentdb.adapters.deepagents` does not exist yet** (see the plan's Task 13) — the module and `make_agentdb_backend` below are the target shape, not something you can import today. Use the generic `AgentDBBackend` directly instead (works now):
+**`agentdb.adapters.deepagents` does not exist yet** (see the plan's Task 15) — the module and `make_agentdb_backend` below are the target shape, not something you can import today. Use the generic `AgentDBBackend` directly instead (works now):
 
 ```python
 from deepagents import create_deep_agent
@@ -274,7 +274,7 @@ memory_backend = AgentDBBackend(
 # Your local model selection remains independent from AgentDB.
 ```
 
-If your runtime expects a framework-specific memory interface: only `adapters/claude_agent_sdk.py` exists today (see "A.1" above). `adapters/langgraph.py`, `autogen.py`, `crewai.py`, and `openai_agents.py` are **not implemented** — see the plan's Task 13. Until one exists for your framework, use the generic `AgentDBBackend` pattern shown above; it works with any runtime that supports pluggable key-value storage, adapter or not.
+If your runtime expects a framework-specific memory interface: only `adapters/claude_agent_sdk.py` exists today (see "A.1" above). `adapters/langgraph.py`, `autogen.py`, `crewai.py`, and `openai_agents.py` are **not implemented** — see the plan's Task 15. Until one exists for your framework, use the generic `AgentDBBackend` pattern shown above; it works with any runtime that supports pluggable key-value storage, adapter or not.
 
 ## C) Making Memory Effective (Both Local And Cloud)
 

@@ -1,6 +1,6 @@
 # Google ADK Integration (Planned — Not Yet Implemented)
 
-**`src/agentdb/adapters/google_adk.py` and `AgentDBMemoryService` do not exist yet.** This guide describes the target design (see the plan's Task 13 for the framework-adapter backlog and its current priority order — Google ADK isn't next). Nothing below can be imported or run today. If you need Google ADK integration now, use the generic `AgentDBBackend` directly (see `docs/integrations/model-and-runtime-wiring.md`, section A) with your own thin glue code.
+**`src/agentdb/adapters/google_adk.py` and `AgentDBMemoryService` do not exist yet.** This guide describes the target design (see the plan's Task 15 for the framework-adapter backlog and its current priority order — Google ADK isn't next). Nothing below can be imported or run today. If you need Google ADK integration now, use the generic `AgentDBBackend` directly (see `docs/integrations/model-and-runtime-wiring.md`, section A) with your own thin glue code.
 
 This guide describes how AgentDB would provide governed memory for a Google ADK agent through:
 

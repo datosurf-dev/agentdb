@@ -328,6 +328,8 @@ A health score below 0.6 surfaces a staleness warning in every retrieval result.
 
 **Current limitation (Phase 2):** Entity drift detection is keyword-based — a skill that uses a synonym for a deprecated entity will not be flagged. Semantic entity matching is Phase 5 scope. This limitation is documented in LIMITATIONS.md.
 
+**Planned (Task 13, not started, blocked on Phase 4 embeddings):** a skill draft reconciliation pipeline — an agent can *propose* a new skill or an update to an existing one (written as an ordinary agent-inferred memory record, never touching `skills.sqlite` directly), which gets reconciled against other pending drafts, the target skill, and recently-changed files before a human explicitly approves or rejects it. Proposing is async (notifies a reviewer); only the approval step can ever create or modify a real skill. See the plan for the full design.
+
 ### Why the algorithm and skills belong together
 
 The retrieval algorithm and the governed skills system are one foundation, not two unrelated features.
