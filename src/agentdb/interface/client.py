@@ -14,6 +14,7 @@ import yaml
 
 from ..core.models import MemoryRecord, Skill
 from ..governance.permission_router import PermissionDenied, PermissionRouter
+from ..retrieval.algorithm import MultiSignalRanker
 from ..skills.skill_store import SkillStore
 
 
@@ -66,9 +67,16 @@ CREATE TABLE IF NOT EXISTS memories (
     archived INTEGER NOT NULL DEFAULT 0,
     retrieval_count INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL,
-    entities TEXT NOT NULL DEFAULT '[]'
+    entities TEXT NOT NULL DEFAULT '[]',
+    last_retrieved TEXT,
+    conflict_id TEXT
 )
 """
+
+_MEMORIES_MIGRATION_COLUMNS = (
+    ("last_retrieved", "TEXT"),
+    ("conflict_id", "TEXT"),
+)
 
 _CREATE_AUDIT_LOG = """
 CREATE TABLE IF NOT EXISTS audit_log (
@@ -117,6 +125,11 @@ class MemoryStore:
         db_path.parent.mkdir(parents=True, exist_ok=True)
         with self._connect() as conn:
             conn.execute(_CREATE_MEMORIES)
+            for column, coltype in _MEMORIES_MIGRATION_COLUMNS:
+                try:
+                    conn.execute(f"ALTER TABLE memories ADD COLUMN {column} {coltype}")
+                except sqlite3.OperationalError:
+                    pass  # column already exists (pre-existing database)
         # Load existing records into memory
         self._reload()
 
@@ -155,6 +168,11 @@ class MemoryStore:
             retrieval_count=row["retrieval_count"],
             created_at=datetime.fromisoformat(row["created_at"]),
             entities=json.loads(row["entities"]),
+            last_retrieved=(
+                datetime.fromisoformat(row["last_retrieved"])
+                if row["last_retrieved"] else None
+            ),
+            conflict_id=row["conflict_id"],
         )
 
     def write(self, record: MemoryRecord) -> MemoryRecord:
@@ -163,8 +181,9 @@ class MemoryStore:
                 """
                 INSERT OR REPLACE INTO memories
                     (id, key, value, origin, trust_level, agent_id, confidence,
-                     version, archived, retrieval_count, created_at, entities)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     version, archived, retrieval_count, created_at, entities,
+                     last_retrieved, conflict_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     record.id,
@@ -179,6 +198,8 @@ class MemoryStore:
                     record.retrieval_count,
                     record.created_at.isoformat(),
                     json.dumps(record.entities),
+                    record.last_retrieved.isoformat() if record.last_retrieved else None,
+                    record.conflict_id,
                 ),
             )
         self._by_id[record.id] = record
@@ -212,6 +233,8 @@ class MemoryStore:
         if record:
             record.retrieval_count += 1
             self._persist_field(record_id, "retrieval_count", record.retrieval_count)
+            record.last_retrieved = _utcnow()
+            self._persist_field(record_id, "last_retrieved", record.last_retrieved.isoformat())
 
     def update_confidence(self, record_id: str, new_confidence: float) -> None:
         record = self._by_id.get(record_id)
@@ -575,6 +598,7 @@ class AgentDB:
 
         # Session tracking: session_id -> list of record ids retrieved
         self._session_record_ids: dict[str, list[str]] = {}
+        self._ranker = MultiSignalRanker()
 
         # Reconciliation handlers
         self._reconciliation_handlers: dict[str, list[Callable]] = {}
@@ -683,14 +707,16 @@ class AgentDB:
         session_id: Optional[str] = None,
         external_context: Optional[list[dict]] = None,
     ) -> RetrievalResult:
-        records = self._store.search(query, limit=limit)
+        candidates = self._store.search(query, limit=max(limit, 50))
+        ranked = self._ranker.rank(query, candidates, agent_id=agent_id)[:limit]
+        records = [rr.record for rr in ranked]
 
         # Increment retrieval counts
         for record in records:
             self._store.increment_retrieval_count(record.id)
 
         record_ids = [r.id for r in records]
-        signal_scores = {r.id: 1.0 for r in records}
+        signal_scores = {rr.record.id: rr.composite_score for rr in ranked}
 
         # Track for outcome recording
         if session_id is not None:

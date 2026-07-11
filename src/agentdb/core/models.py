@@ -55,6 +55,8 @@ class MemoryRecord:
     retrieval_count: int = 0
     created_at: datetime = field(default_factory=_utcnow)
     entities: list = field(default_factory=list)
+    last_retrieved: Optional[datetime] = None
+    conflict_id: Optional[str] = None
 
 
 @dataclass
