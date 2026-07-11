@@ -43,8 +43,8 @@ class AgentDBBackend:
         return record.value
 
     def delete(self, key: str) -> None:
-        """Delete/archive a record by key."""
-        self.db._store.delete_by_key(key)
+        """Delete/archive a record by key. Raises PermissionDenied if not allowed."""
+        self.db.delete(key, agent_id=self._agent_id, trust_zone=self._trust_zone)
 
     def list(self, prefix: str) -> list[str]:
         """List all keys that start with prefix."""

@@ -22,6 +22,7 @@ from ..skills.skill_store import SkillStore
 # ---------------------------------------------------------------------------
 
 EVENT_MEMORY_WRITE = "memory_write"
+EVENT_MEMORY_DELETE = "memory_delete"
 EVENT_MEMORY_RETRIEVE = "memory_retrieve"
 EVENT_MEMORY_OUTCOME = "memory_outcome"
 EVENT_EXTERNAL_CONFLICT_DETECTED = "external_conflict_detected"
@@ -650,6 +651,29 @@ class AgentDB:
     def read(self, key: str, agent_id: Optional[str] = None) -> Optional[MemoryRecord]:
         """Raw read by key, no permission check."""
         return self._store.get_by_key(key)
+
+    def delete(self, key: str, agent_id: str, trust_zone: str) -> None:
+        """Archive a record by key. Raises PermissionDenied if not allowed."""
+        if self._permissions is not None:
+            try:
+                self._permissions.check_write(key, agent_id, trust_zone)
+            except PermissionDenied as e:
+                self.audit_log.append(
+                    EVENT_PERMISSION_DENIED,
+                    {
+                        "key": key,
+                        "agent_id": agent_id,
+                        "trust_zone": trust_zone,
+                        "reason": str(e),
+                    },
+                )
+                raise
+
+        self._store.delete_by_key(key)
+        self.audit_log.append(
+            EVENT_MEMORY_DELETE,
+            {"key": key, "agent_id": agent_id},
+        )
 
     def retrieve(
         self,
