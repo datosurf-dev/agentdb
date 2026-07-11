@@ -10,9 +10,9 @@ AgentDB is designed to improve agent behavior without becoming another layer of 
 
 The architecture below is confirmed as the project baseline and target direction, aligned with the canonical superpowers plan and context documents:
 
-- Global agent instructions: `/Users/jm-nx/Documents/GitHub/agentdb/AGENTS.md`
-- Project context document: `/Users/jm-nx/Documents/GitHub/agentdb/docs/context/agentdb-context.md`
-- Plan: `/Users/jm-nx/Documents/GitHub/agentdb/docs/superpowers/plans/2026-06-06-agentdb-revised.md`
+- Global agent instructions: `/Users/jm/Documents/github/agentdb/AGENTS.md`
+- Project context document: `/Users/jm/Documents/github/agentdb/docs/context/agentdb-context.md`
+- Plan: `/Users/jm/Documents/github/agentdb/docs/superpowers/plans/2026-06-06-agentdb-revised.md`
 
 - AgentDB complements existing runtime memory instead of replacing it by default; its job is to make memory more trustworthy, more relevant, and more actionable.
 - The framework-agnostic `AgentDBBackend` interface is the integration contract, with runtime adapters responsible for bringing governed memory into agent context at the right moment.

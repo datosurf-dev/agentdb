@@ -6,9 +6,9 @@ Provide a single reusable project-level context document that summarizes code fe
 
 ## Source Of Truth
 
-- Primary: `/Users/jm-nx/Documents/GitHub/agentdb/docs/context/agentdb-context.md`
-- Supporting plan: `/Users/jm-nx/Documents/GitHub/agentdb/docs/superpowers/plans/2026-06-06-agentdb-revised.md`
-- Testing strategy: `/Users/jm-nx/Documents/GitHub/agentdb/docs/context/testing-strategy.md`
+- Primary: `/Users/jm/Documents/github/agentdb/docs/context/agentdb-context.md`
+- Supporting plan: `/Users/jm/Documents/github/agentdb/docs/superpowers/plans/2026-06-06-agentdb-revised.md`
+- Testing strategy: `/Users/jm/Documents/github/agentdb/docs/context/testing-strategy.md`
 
 If conflicts exist between planning notes, treat the canonical superpowers plan as authoritative for technical behavior and delivery scope.
 

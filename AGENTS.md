@@ -6,10 +6,10 @@ These instructions are repository-level and apply to all agent work in this repo
 
 ## Canonical Context Sources
 
-1. Global instructions: `/Users/jm-nx/Documents/GitHub/agentdb/AGENTS.md`
-2. Project context document: `/Users/jm-nx/Documents/GitHub/agentdb/docs/context/agentdb-context.md`
-3. Superpowers plan: `/Users/jm-nx/Documents/GitHub/agentdb/docs/superpowers/plans/2026-06-06-agentdb-revised.md`
-4. Algorithm review skill (when touching ranking/reinforcement surfaces): `/Users/jm-nx/Documents/GitHub/agentdb/.claude/skills/agentdb-algorithm-review/SKILL.md`
+1. Global instructions: `/Users/jm/Documents/github/agentdb/AGENTS.md`
+2. Project context document: `/Users/jm/Documents/github/agentdb/docs/context/agentdb-context.md`
+3. Superpowers plan: `/Users/jm/Documents/github/agentdb/docs/superpowers/plans/2026-06-06-agentdb-revised.md`
+4. Algorithm review skill (when touching ranking/reinforcement surfaces): `/Users/jm/Documents/github/agentdb/.claude/skills/agentdb-algorithm-review/SKILL.md`
 
 If guidance conflicts, follow this file first, then the superpowers plan.
 
@@ -17,7 +17,7 @@ If guidance conflicts, follow this file first, then the superpowers plan.
 
 When changes touch algorithm-related surfaces (for example retrieval ranking, lifecycle reinforcement, retrieval/outcome flows in client, or corpus stats), run the repository skill at:
 
-- `/Users/jm-nx/Documents/GitHub/agentdb/.claude/skills/agentdb-algorithm-review/SKILL.md`
+- `/Users/jm/Documents/github/agentdb/.claude/skills/agentdb-algorithm-review/SKILL.md`
 
 ## Architecture Intent (Always-On)
 
