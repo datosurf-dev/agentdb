@@ -8,19 +8,12 @@ AgentDB is designed to improve agent behavior without becoming another layer of 
 
 ## Architecture Confirmation
 
-The architecture below is confirmed as the project baseline and target direction, aligned with the canonical superpowers plan and context documents:
+The full architecture pitch and the numbered design principles (now including Principle 12's real-time-enforcement vs. async-integrity-check split for adapters) live in one canonical place — this section just points to it instead of repeating it:
 
+- Architecture & design principles: `/Users/jm/Documents/github/agentdb/docs/context/architecture-principles.md`
 - Global agent instructions: `/Users/jm/Documents/github/agentdb/AGENTS.md`
 - Project context document: `/Users/jm/Documents/github/agentdb/docs/context/agentdb-context.md`
 - Plan: `/Users/jm/Documents/github/agentdb/docs/superpowers/plans/2026-06-06-agentdb-revised.md`
-
-- AgentDB complements existing runtime memory instead of replacing it by default; its job is to make memory more trustworthy, more relevant, and more actionable.
-- The framework-agnostic `AgentDBBackend` interface is the integration contract, with runtime adapters responsible for bringing governed memory into agent context at the right moment.
-- Write-time governance is mandatory through the permission router, enforcing hard boundaries between human-approved and agent-inferred zones.
-- The core product loop is: track relevant memory assets, reconcile them proactively, rank what matters, and inject compact context or instructions before or during action.
-- Retrieval follows a multi-signal ranking approach (provenance, recency, confidence, causal; semantic activated only when it improves action quality in the designated phase).
-- Skills are first-class governed instruction records with versioning and health scoring, so agents can rely on maintained guidance instead of stale prompt fragments.
-- Memory assets such as embeddings, JSONL transcripts, databases, and graphs are implementation assets, not product features; they matter only when they improve context quality, reduce conflicts, or increase execution accuracy.
 
 ## Current Repository Status (As Of 2026-07-11)
 

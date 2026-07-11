@@ -10,6 +10,7 @@ Global instruction layer (always loaded when supported by the agent runtime):
 
 - Canonical plan: `/Users/jm/Documents/github/agentdb/docs/superpowers/plans/2026-06-06-agentdb-revised.md`
 - Canonical feature-context document: `/Users/jm/Documents/github/agentdb/docs/context/agentdb-context.md`
+- Architecture & design principles: `/Users/jm/Documents/github/agentdb/docs/context/architecture-principles.md`
 - Database schema and memory assets: `/Users/jm/Documents/github/agentdb/docs/context/database-schema.md`
 
 When documentation differs, treat `AGENTS.md` first, then this file and the context document above.
@@ -96,33 +97,7 @@ Full audit against this plan, done by reading every current `src/agentdb` module
 
 ## Design Principles
 
-These principles define the implementation constraints for superpowers execution:
-
-1. **Database-first identity.** The product is a memory database with governance built in — not a governance framework with storage attached. API surface mirrors database conventions: `SELECT`-style retrieval, `GRANT`/`REVOKE`-style permissions, system tables for introspection.
-
-1a. **Actionability over asset accumulation.** AgentDB should not add memory-related overhead unless it improves the timing, quality, or trustworthiness of context supplied to an agent action.
-
-2. **Framework-agnostic backend interface first.** AgentDB defines a generic pluggable backend interface (`AgentDBBackend`). Frameworks adopt it — AgentDB does not adapt to them. deepagents is the flagship integration and named first-class example, but the interface is not deepagents-specific.
-
-3. **Skills are database objects, not prompt files.** Skills (versioned instruction records) are first-class database primitives with computed health scores. A skill with a health score that degrades when underlying knowledge drifts is a database feature — not prompt management.
-
-4. **Algorithm as foundation, not feature.** The multi-signal ranking algorithm (provenance weight + causal WAL signal) is the technical moat. It is not marketed as a differentiator — it is what makes the database worth using.
-
-4a. **Algorithm + skills blend.** The ranking algorithm and governed skills are a single development foundation: memory records capture facts and prior outcomes, the algorithm ranks what matters now, and skills add maintained instructions the runtime can inject with that context.
-
-5. **Three providers at launch.** Anthropic, OpenAI, Google (Vertex AI Agent Engine MemoryBankService). All three ship in Phase 3.
-
-6. **Org knowledge is a memory tier, not an expiry policy.** Institutional knowledge (team structures, product names, decision logs) lives under `memory/org/` prefix with its own retrieval priority. It is not an ExpiryPolicy enum value — ExpiryPolicy governs TTL, not knowledge category.
-
-7. **WAL split.** Audit trail (append-only, immutable) and event bus (subscriptions, delivery guarantees) are separate subsystems. They share a sequence counter but are not the same file.
-
-8. **Conflict detection is either real or silent.** Phase 1 ships temporal + authority conflict detection (exact key + origin comparison). Semantic conflict detection is not shipped until embeddings are active (Phase 4). The system never pretends to detect semantic conflicts it cannot detect.
-
-9. **Budget manager safety fix.** Conflict flags are assembled BEFORE human-approved memories, not after. An agent must know a memory is contested before it receives the memory content.
-
-10. **Narrow-first delivery.** Prioritize proving the governed retrieval/improvement loop before broad integration breadth. Provider ingestion, MCP surface expansion, and adapter hardening should follow only after the core loop has measurable quality signals and stable tests.
-
-11. **Memory assets are subordinate.** Embeddings, JSONL transcripts, databases, graphs, and derived indexes are productively in scope only when they improve recall, reduce conflicting guidance, infer reusable instructions, or otherwise raise action accuracy.
+Moved to `docs/context/architecture-principles.md` (2026-07-11) — the canonical, single-source numbered list (now 1–12, including Principle 12's real-time vs. async-integrity-check split for adapter enforcement). Read it there; don't duplicate it here.
 
 ---
 
@@ -310,6 +285,8 @@ Weighted sum decays older outcomes. Recent outcomes count more.
 ## Phase 2 (remaining) — Lifecycle Manager
 
 ### Task 9: Lifecycle Manager
+
+**Type: 12b, async integrity check** (per `docs/context/architecture-principles.md` Principle 12) — runs independent of any agent's turn; must be auditable and have a named trigger (a sweep call, not silent).
 
 **Status: not started. Scope narrowed 2026-07-11 — reconsider the confidence-decay half before implementing.**
 
@@ -1027,16 +1004,20 @@ Outline of what Task 11 will deliver:
 
 ### Task 12: MCP Server
 
+**Type: `memory_write`/`memory_retrieve` are thin transport over already-real-time-enforced operations; `conflict_queue` and the deferred `memory_subscribe` are 12b, async integrity checks** (per `docs/context/architecture-principles.md` Principle 12) — they must have a named consumer (a human reviewer, a dashboard), not just a publish call.
+
 **Files:**
 - Create: `agentdb/interface/mcp_server.py`
 
 **Scope narrowed 2026-07-11:** ship 3 tools first — `memory_write`, `memory_retrieve`, `conflict_queue` — all of which map to functionality that already exists (`write()`, `retrieve()`, and once built, the conflict queue). Defer the 4th tool, `memory_subscribe`, along with the event bus subsystem it depends on (see Design Principle 7 — never built, no schema, no task spec ever written for it, confirmed via full git-history search 2026-07-11).
 
-The event bus's most concrete justification, if it gets built: push-notifying a consumer the instant a new conflict is queued for human review, or the instant a shared human-approved skill/memory changes — sparing a consumer from polling `agentdb_stats()` or replaying the audit log. That's a real, differentiated use case tied to the governance/conflict-queue story (not a generic pub/sub bolt-on), but there's no evidence yet that anyone needs it. Build `memory_subscribe` + the event bus only when a concrete consumer shows up wanting exactly that notification, and scope it to that use case rather than a general-purpose bus.
+The event bus's most concrete justification, if it gets built: push-notifying a consumer the instant a new conflict is queued for human review, or the instant a shared human-approved skill/memory changes — sparing a consumer from polling `agentdb_stats()` or replaying the audit log. That's a real, differentiated 12b (async integrity check) use case: it catches what real-time enforcement structurally cannot — a different agent, in a different session, changing something the current agent relies on, with no upcoming hook checkpoint to pick it up. It is not a generic pub/sub bolt-on, and it is not a substitute for real-time enforcement — every current hook call is already a live query, so a single agent's own next action is already as fresh as it can be without any bus at all. Build `memory_subscribe` + the event bus only when a concrete consumer shows up wanting exactly that notification, and scope it to that use case rather than a general-purpose bus. It is also blocked on Task 6's real conflict detection existing in the first place — there's nothing meaningful to publish until stored records actually get flagged.
 
 Full task expansion after Phase 3 is complete.
 
 ### Task 13: Framework Adapters
+
+**Type: 12a, real-time enforcement.** Per `docs/context/architecture-principles.md` Principle 12, this adapter is not "done" on API existence alone — it must name the exact point in deepagents' own control flow where AgentDB governance executes (the equivalent of Claude SDK's `PreToolUse` + `prepare_turn`), and a test must prove that framework-triggered point changes what context/instructions reach the agent.
 
 **Files:**
 - Create: `agentdb/adapters/deepagents.py`
