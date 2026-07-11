@@ -2,6 +2,7 @@
 Tests AgentDBClaudeMiddleware runtime contract for Claude-style integrations.
 No claude SDK dependency required.
 """
+import json
 import pytest
 from pathlib import Path
 from types import SimpleNamespace
@@ -38,6 +39,36 @@ def test_prepare_turn_enforces_retrieve_and_builds_messages(tmp_path):
     assert any(entry.event_type == EVENT_MEMORY_RETRIEVE for entry in entries)
 
 
+def test_prepare_turn_conversation_started_trigger_can_influence_retrieval(tmp_path):
+    workspace_root = tmp_path / "memory-home"
+    db = AgentDB(memory_dir=workspace_root, permissions_path=PERMS)
+    middleware = AgentDBClaudeMiddleware(
+        db=db,
+        agent_id="research_agent",
+        profile="budget_optimized",
+        conversation_started_callback=lambda **kwargs: kwargs["db"].write(
+            key="memory/working/turn_start_hint",
+            value="always mention the tracked workspace note",
+            origin="agent_inferred",
+            agent_id=kwargs["agent_id"],
+            session_id=kwargs["session_id"],
+        ),
+    )
+
+    messages, retrieval = middleware.prepare_turn(
+        user_query="tracked workspace note",
+        session_id="sess-trigger-1",
+        system_prompt="You are a helpful assistant.",
+    )
+
+    assert any(record.key == "memory/working/turn_start_hint" for record in retrieval.records)
+    assert any(
+        "turn_start_hint" in message["content"]
+        for message in messages
+        if message["role"] == "system"
+    )
+
+
 def test_run_turn_full_storage_auto_persists_and_records_outcome(tmp_path):
     db = AgentDB(path=tmp_path / "test.db", permissions_path=PERMS)
     middleware = AgentDBClaudeMiddleware(db=db, agent_id="research_agent", profile="full_storage")
@@ -72,6 +103,44 @@ def test_budget_optimized_no_auto_persist_without_explicit_writes(tmp_path):
 
     records = db._store.list_by_agent("research_agent")
     assert not any(record.key.startswith("memory/episodic/claude/") for record in records)
+
+
+def test_finalize_turn_tags_persisted_records_with_touched_entities(tmp_path):
+    db = AgentDB(path=tmp_path / "test.db", permissions_path=PERMS)
+    middleware = AgentDBClaudeMiddleware(db=db, agent_id="research_agent", profile="full_storage")
+
+    middleware.finalize_turn(
+        session_id="sess-claude-entities-1",
+        model_response="stored response",
+        touched_entities=["models/marts/core/report_model.sql", "report_model"],
+    )
+
+    records = db._store.list_by_agent("research_agent")
+    persisted = [record for record in records if record.key.startswith("memory/episodic/claude/")]
+    assert len(persisted) == 1
+    assert persisted[0].entities == ["models/marts/core/report_model.sql", "report_model"]
+
+
+def test_finalize_turn_applies_touched_entities_to_explicit_memory_writes(tmp_path):
+    db = AgentDB(path=tmp_path / "test.db", permissions_path=PERMS)
+    middleware = AgentDBClaudeMiddleware(db=db, agent_id="research_agent", profile="budget_optimized")
+
+    middleware.finalize_turn(
+        session_id="sess-claude-entities-2",
+        model_response="not auto persisted",
+        touched_entities=["report_model"],
+        memory_writes=[
+            {
+                "key": "memory/episodic/research_agent/notes/report_model",
+                "value": "remember downstream contract",
+                "origin": "agent_inferred",
+            }
+        ],
+    )
+
+    stored = db.read("memory/episodic/research_agent/notes/report_model", agent_id="research_agent")
+    assert stored is not None
+    assert stored.entities == ["report_model"]
 
 
 def test_finalize_turn_persists_explicit_memory_writes(tmp_path):
@@ -151,6 +220,64 @@ def test_finalize_turn_uses_agentdb_default_tracking_directories(tmp_path):
     assert snapshot["file_count"] == 1
 
 
+def test_finalize_turn_writes_conversation_jsonl_when_enabled(tmp_path):
+    workspace_root = tmp_path / "memory-home"
+    config_dir = workspace_root / "config"
+    config_dir.mkdir(parents=True)
+    (config_dir / "memory.yaml").write_text(
+        "\n".join(
+            [
+                "mode: budget_optimized",
+                "tracked_directories: []",
+                "capture:",
+                "  conversation_jsonl: true",
+                "reconciliation:",
+                "  triggers:",
+                "    - conversation_started",
+                "database:",
+                "  mode: embedded",
+                "  path: database/agentdb.sqlite",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    db = AgentDB(memory_dir=workspace_root, permissions_path=PERMS)
+    middleware = AgentDBClaudeMiddleware(db=db, agent_id="research_agent", profile="budget_optimized")
+
+    middleware.finalize_turn(
+        session_id="sess-jsonl-1",
+        user_query="summarize the change",
+        model_response="Here is the summary.",
+        message_id="msg-jsonl-1",
+    )
+
+    output_path = workspace_root / "conversations" / "research_agent--sess-jsonl-1.jsonl"
+    assert output_path.exists() is True
+    lines = output_path.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 1
+    payload = json.loads(lines[0])
+    assert payload["session_id"] == "sess-jsonl-1"
+    assert payload["message_id"] == "msg-jsonl-1"
+    assert payload["user_query"] == "summarize the change"
+    assert payload["model_response"] == "Here is the summary."
+
+
+def test_finalize_turn_skips_conversation_jsonl_when_disabled(tmp_path):
+    workspace_root = tmp_path / "memory-home"
+    db = AgentDB(memory_dir=workspace_root, permissions_path=PERMS)
+    middleware = AgentDBClaudeMiddleware(db=db, agent_id="research_agent", profile="budget_optimized")
+
+    middleware.finalize_turn(
+        session_id="sess-jsonl-2",
+        user_query="summarize the change",
+        model_response="Here is the summary.",
+        message_id="msg-jsonl-2",
+    )
+
+    output_path = workspace_root / "conversations" / "research_agent--sess-jsonl-2.jsonl"
+    assert output_path.exists() is False
+
+
 def test_runtime_wrapper_from_claude_client_minimal_flow(tmp_path):
     db = AgentDB(path=tmp_path / "test.db", permissions_path=PERMS)
 
@@ -180,6 +307,141 @@ def test_runtime_wrapper_from_claude_client_minimal_flow(tmp_path):
     assert any(e.event_type == EVENT_MEMORY_RETRIEVE for e in entries)
     assert any(e.event_type == EVENT_MEMORY_OUTCOME for e in entries)
     assert any(e.event_type == EVENT_MEMORY_WRITE for e in entries)
+
+
+def test_build_action_context_uses_edit_file_path_and_model_name(tmp_path):
+    db = AgentDB(path=tmp_path / "test.db", permissions_path=PERMS)
+    db.write(
+        key="memory/working/dbt/model_hint",
+        value="run this model with full-refresh",
+        origin="agent_inferred",
+        agent_id="research_agent",
+        entities=["models/marts/core/report_model.sql", "report_model"],
+    )
+    middleware = AgentDBClaudeMiddleware(db=db, agent_id="research_agent", profile="budget_optimized")
+
+    context = middleware.build_action_context(
+        tool_name="Edit",
+        tool_input={"file_path": "models/marts/core/report_model.sql"},
+        session_id="sess-action-1",
+    )
+
+    assert "Governed action context" in context
+    assert "model_hint" in context
+
+
+def test_build_action_context_uses_bash_dbt_select_target(tmp_path):
+    db = AgentDB(path=tmp_path / "test.db", permissions_path=PERMS)
+    db.write(
+        key="memory/working/dbt/model_hint",
+        value="always validate downstream exposures",
+        origin="agent_inferred",
+        agent_id="research_agent",
+        entities=["report_model"],
+    )
+    middleware = AgentDBClaudeMiddleware(db=db, agent_id="research_agent", profile="budget_optimized")
+
+    context = middleware.build_action_context(
+        tool_name="Bash",
+        tool_input={"command": "dbt build --select report_model"},
+        session_id="sess-action-2",
+    )
+
+    assert "Governed action context" in context
+    assert "validate downstream exposures" in context
+
+
+def test_build_action_context_is_noop_when_tool_has_no_entity(tmp_path):
+    db = AgentDB(path=tmp_path / "test.db", permissions_path=PERMS)
+    middleware = AgentDBClaudeMiddleware(db=db, agent_id="research_agent", profile="budget_optimized")
+
+    context = middleware.build_action_context(
+        tool_name="Bash",
+        tool_input={"command": "echo hello"},
+        session_id="sess-action-3",
+    )
+
+    assert context == ""
+
+
+def test_pre_tool_use_returns_additional_context_and_touched_entities(tmp_path):
+    db = AgentDB(path=tmp_path / "test.db", permissions_path=PERMS)
+    db.write(
+        key="memory/working/dbt/model_hint",
+        value="review downstream contracts before editing",
+        origin="agent_inferred",
+        agent_id="research_agent",
+        entities=["models/marts/core/report_model.sql", "report_model"],
+    )
+    middleware = AgentDBClaudeMiddleware(db=db, agent_id="research_agent", profile="budget_optimized")
+
+    payload = middleware.pre_tool_use(
+        tool_name="Edit",
+        tool_input={"file_path": "models/marts/core/report_model.sql"},
+        session_id="sess-pretool-1",
+    )
+
+    assert payload["touchedEntities"] == ["models/marts/core/report_model.sql", "report_model"]
+    assert "Governed action context" in payload["additionalContext"]
+    assert "review downstream contracts" in payload["additionalContext"]
+
+
+def test_pre_tool_use_is_noop_when_no_matching_context(tmp_path):
+    db = AgentDB(path=tmp_path / "test.db", permissions_path=PERMS)
+    middleware = AgentDBClaudeMiddleware(db=db, agent_id="research_agent", profile="budget_optimized")
+
+    payload = middleware.pre_tool_use(
+        tool_name="Edit",
+        tool_input={"file_path": "models/marts/core/unknown_model.sql"},
+        session_id="sess-pretool-2",
+    )
+
+    assert payload == {}
+
+
+def test_build_hook_handlers_exposes_pre_tool_use_contract(tmp_path):
+    db = AgentDB(path=tmp_path / "test.db", permissions_path=PERMS)
+    db.write(
+        key="memory/working/dbt/model_hint",
+        value="review downstream contracts before editing",
+        origin="agent_inferred",
+        agent_id="research_agent",
+        entities=["models/marts/core/report_model.sql", "report_model"],
+    )
+    middleware = AgentDBClaudeMiddleware(db=db, agent_id="research_agent", profile="budget_optimized")
+
+    hooks = middleware.build_hook_handlers()
+
+    assert "PreToolUse" in hooks
+    payload = hooks["PreToolUse"](
+        tool_name="Edit",
+        tool_input={"file_path": "models/marts/core/report_model.sql"},
+        session_id="sess-hook-1",
+    )
+    assert payload["touchedEntities"] == ["models/marts/core/report_model.sql", "report_model"]
+    assert "Governed action context" in payload["additionalContext"]
+
+
+def test_runtime_get_sdk_hooks_delegates_to_middleware(tmp_path):
+    db = AgentDB(path=tmp_path / "test.db", permissions_path=PERMS)
+
+    class FakeMessagesAPI:
+        def create(self, **kwargs):
+            return SimpleNamespace(content=[SimpleNamespace(text="runtime wrapper response")])
+
+    fake_client = SimpleNamespace(messages=FakeMessagesAPI())
+    runtime = AgentDBClaudeRuntime.from_claude_client(
+        db=db,
+        agent_id="research_agent",
+        client=fake_client,
+        model="claude-sonnet-test",
+        profile="budget_optimized",
+    )
+
+    hooks = runtime.get_sdk_hooks()
+
+    assert "PreToolUse" in hooks
+    assert callable(hooks["PreToolUse"])
 
 
 @pytest.mark.asyncio

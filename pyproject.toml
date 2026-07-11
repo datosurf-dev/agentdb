@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=45", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agentdb"
+version = "0.1.0"
+description = "Governed memory database for AI agents"
+requires-python = ">=3.11"
+dependencies = [
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "pytest-asyncio>=0.23"]
+langgraph = ["langgraph-checkpoint>=0.4"]
+openai-agents = ["openai-agents>=0.1"]
+google-adk = ["google-adk>=1.0"]
+autogen = ["autogen-core>=0.4"]
+crewai = ["crewai>=0.80"]
+adapters = [
+    "langgraph-checkpoint>=0.4",
+    "openai-agents>=0.1",
+    "google-adk>=1.0",
+    "autogen-core>=0.4",
+    "crewai>=0.80",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]

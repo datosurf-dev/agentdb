@@ -1,0 +1,765 @@
+# AgentDB
+
+**A governed memory layer that keeps agent memory actionable.**
+
+AgentDB is designed to improve agent behavior without becoming another layer of operational overhead. It governs what memory is trusted, keeps relevant memory assets in sync, and injects the right context or instructions when an agent is about to act. Every write is validated before it lands. Every read returns a governed context package. The boundary is enforced at the memory layer — not by convention, not by prompt instructions, not by hoping agents behave.
+
+> Every other memory product stores context. AgentDB governs it.
+
+## Architecture Confirmation
+
+The architecture below is confirmed as the project baseline and target direction, aligned with the canonical superpowers plan and context documents:
+
+- Global agent instructions: `/Users/jm-nx/Documents/GitHub/agentdb/AGENTS.md`
+- Project context document: `/Users/jm-nx/Documents/GitHub/agentdb/docs/context/agentdb-context.md`
+- Plan: `/Users/jm-nx/Documents/GitHub/agentdb/docs/superpowers/plans/2026-06-06-agentdb-revised.md`
+
+- AgentDB complements existing runtime memory instead of replacing it by default; its job is to make memory more trustworthy, more relevant, and more actionable.
+- The framework-agnostic `AgentDBBackend` interface is the integration contract, with runtime adapters responsible for bringing governed memory into agent context at the right moment.
+- Write-time governance is mandatory through the permission router, enforcing hard boundaries between human-approved and agent-inferred zones.
+- The core product loop is: track relevant memory assets, reconcile them proactively, rank what matters, and inject compact context or instructions before or during action.
+- Retrieval follows a multi-signal ranking approach (provenance, recency, confidence, causal; semantic activated only when it improves action quality in the designated phase).
+- Skills are first-class governed instruction records with versioning and health scoring, so agents can rely on maintained guidance instead of stale prompt fragments.
+- Memory assets such as embeddings, JSONL transcripts, databases, and graphs are implementation assets, not product features; they matter only when they improve context quality, reduce conflicts, or increase execution accuracy.
+
+## Current Repository Status (As Of 2026-07-10)
+
+Current implementation is functional for the governed memory loop and adapter integrations, with initial proactive-memory slices now in place and later-phase hardening still pending.
+
+### Feature State Matrix
+
+#### Track
+
+| Feature area | State | Notes |
+|---|---|---|
+| Package entrypoint (`from agentdb import AgentDB`) | Implemented | Available in `src/agentdb/__init__.py`. |
+| Core client loop (`write`, `read`, `retrieve`, `record_outcome`) | Implemented | Includes audit events and confidence updates. |
+| Backend contract (`AgentDBBackend`) | Implemented | Framework-agnostic read/write/list/grep/glob contract. |
+| Adapter surfaces (deepagents, Claude SDK, LangGraph, CrewAI, OpenAI Agents, Google ADK, AutoGen) | Implemented | Integration tests present for adapters. |
+| Claude SDK async runtime (`from_sdk_client`, `handle_turn_async`) | Implemented | Async turn wrapper available in adapter runtime. |
+| Directory tracking capture (Claude middleware) | Implemented | Optional tracked-directory snapshots persisted as memories. |
+| Package memory workspace (`~/.agentdb/memory`, `config/memory.yaml`) | Implemented (initial) | Workspace resolution, default materialization, config loading, and backward-compatible `path=` override are in place. |
+| Conversation JSONL capture | Implemented (initial) | Config-driven JSONL capture is available when `capture.conversation_jsonl` is enabled. |
+
+#### Reconcile
+
+| Feature area | State | Notes |
+|---|---|---|
+| Permission routing boundaries | Implemented | Write-time enforcement via `PermissionRouter`. |
+| Priority enforcement additive fields | Implemented | External conflict flags + override instructions in retrieval output. |
+| Reconciliation trigger orchestration (`conversation_started`, `file_modified`, `cron`) | Implemented (initial) | Internal dispatcher plus `conversation_started` path are in place; broader trigger coverage remains pending. |
+| Embedding-backed semantic retrieval/conflicts | Planned (Phase 4) | Current retrieval is keyword/provenance/confidence/recency based; embeddings are only justified if they improve action quality. |
+
+#### Rank
+
+| Feature area | State | Notes |
+|---|---|---|
+| Algorithm + skills blend for action quality | Implemented (initial) | Retrieval ranks memory; governed skills add maintained guidance during retrieval results. |
+| Skills store + health warnings | Implemented | Versioned skills, staleness-based health scoring, warnings on retrieve. |
+| System stats surface | Implemented (initial) | Includes retrieval/outcome/conflict-rate aggregates. |
+| Entity-aware retrieval core (`entities`, `retrieve_by_entities`) | Implemented (initial) | Additive entity tagging and keyword-based entity retrieval are available in core. |
+| Provider ingestors (Anthropic/OpenAI/Google sync) | Planned (Phase 3) | Architecture intent documented; module surface pending. |
+
+#### Inject
+
+| Feature area | State | Notes |
+|---|---|---|
+| Query-driven retrieval into turn context | Implemented | Current Claude and deepagents paths retrieve at turn start. |
+| Action-driven retrieval (`entities`, `retrieve_by_entities`, `PreToolUse` hook) | Implemented (initial) | Core entity retrieval, adapter `pre_tool_use(...)`, and downstream hook-registration surface are implemented; automatic SDK attachment remains downstream integration work. |
+| MCP server surface | Planned (Phase 5) | Not implemented in current source tree. |
+| Hardening and production controls | Planned (Phase 6) | Roadmap-only at this snapshot. |
+
+Validation status:
+- Editable install and package-style imports are validated via `pip install -e '.[dev]'` and `python -m pytest -q`.
+
+The rest of this README describes architecture intent and phased roadmap behavior.
+
+## Execution Strategy
+
+To keep delivery aligned with the architecture goals and avoid over-engineering, implementation should follow a narrow-first sequence:
+
+1. Prove the governed core loop first:
+   - write permission enforcement
+   - audit emission
+   - conflict-first retrieval
+   - outcome recording
+   - confidence updates
+   - stats visibility
+2. Expand integration breadth only after the core loop is stable and test-validated:
+   - provider ingestion
+   - MCP surface
+   - broader adapter hardening
+3. Preserve phase gates:
+   - do not claim semantic retrieval/conflict behavior before embeddings are active
+   - keep conflict metadata assembled before memory content
+
+This sequencing keeps AgentDB focused on its differentiated value: governed, low-overhead memory that improves action quality at the right time.
+
+## Developer Quickstart
+
+Use a repo-local virtual environment and editable install:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -e '.[dev]'
+```
+
+Run tests:
+
+```bash
+python -m pytest -q
+```
+
+Run a minimal local smoke check in Python:
+
+```python
+from agentdb import AgentDB
+
+db = AgentDB()
+db.write(
+    key="memory/working/hello",
+    value="world",
+    origin="agent_inferred",
+    agent_id="research_agent",
+)
+print(db.read("memory/working/hello", agent_id="research_agent").value)
+```
+
+Expected output:
+
+```text
+world
+```
+
+Integration manuals:
+
+- Index: `docs/integrations/README.md`
+- Google ADK: `docs/integrations/google-adk.md`
+- Local LLM and Claude wiring: `docs/integrations/model-and-runtime-wiring.md`
+
+### Available Now (Current Snapshot)
+
+These are the developer-facing surfaces you can use immediately in the current implementation:
+
+- `AgentDB` client (`from agentdb import AgentDB`)
+  - `write(key, value, origin, agent_id, ...)`
+  - `read(key, agent_id)`
+  - `retrieve(query, agent_id, limit=..., external_context=..., session_id=...)`
+  - `record_outcome(session_id, agent_id, outcome_type, outcome_value)`
+  - `system.agentdb_stats()`
+  - `audit_log.replay(from_sequence=0)`
+  - `skills_api` for skill lifecycle/drift workflows:
+    - `create_skill`, `update_skill_version`, `list_skills_for_agent`,
+      `list_stale_skills_for_agent`, `list_skill_warnings_for_agent`
+  - optional initialization policy for directory tracking:
+    - `tracking_directories`
+    - `tracking_root`
+    - `tracking_max_files_per_directory`
+- `AgentDBBackend` (`from agentdb.backend import AgentDBBackend`)
+  - `read`, `write`, `delete`, `list`, `grep`, `glob`
+- Adapters currently implemented under `src/agentdb/adapters/`
+  - Deepagents, Claude Agent SDK middleware, LangGraph, CrewAI, OpenAI Agents, Google ADK, AutoGen
+
+Example using the current retrieval/improvement loop:
+
+```python
+from agentdb import AgentDB
+
+db = AgentDB()
+agent_id = "research_agent"
+session_id = "sess-demo"
+
+db.write(
+    key="memory/working/style_pref",
+    value="prefer concise bullet points",
+    origin="agent_inferred",
+    agent_id=agent_id,
+    session_id=session_id,
+)
+
+result = db.retrieve(
+    query="bullet points",
+    agent_id=agent_id,
+    session_id=session_id,
+)
+print([r.key for r in result.records])
+
+db.record_outcome(
+    session_id=session_id,
+    agent_id=agent_id,
+    outcome_type="task_complete",
+    outcome_value=1.0,
+)
+
+print(db.system.agentdb_stats())
+```
+
+Example using the current Claude middleware action loop:
+
+```python
+from agentdb import AgentDB
+from agentdb.adapters.claude_agent_sdk import AgentDBClaudeMiddleware
+
+db = AgentDB()
+middleware = AgentDBClaudeMiddleware(
+    db=db,
+    agent_id="analytics_agent",
+    profile="budget_optimized",
+)
+
+# Seed governed memory tied to a file/entity the tool is about to touch.
+db.write(
+    key="memory/working/models/orders_sql_guidance",
+    value="Use the normalized orders model and preserve customer_id joins.",
+    origin="human_approved",
+    agent_id="analytics_agent",
+    entities=["models/orders.sql", "orders"],
+)
+
+# Turn-start retrieval still happens before the model responds.
+messages, retrieval = middleware.prepare_turn(
+    user_query="Update the orders model to add the new revenue field.",
+    session_id="sess-42",
+)
+
+# Action-time retrieval can add targeted memory right before a tool call.
+hook_payload = middleware.pre_tool_use(
+    tool_name="Edit",
+    tool_input={"file_path": "models/orders.sql"},
+    session_id="sess-42",
+)
+print(hook_payload["additionalContext"])
+
+# Persist the turn and tag the touched entity for future retrieval.
+middleware.finalize_turn(
+    session_id="sess-42",
+    user_query="Update the orders model to add the new revenue field.",
+    model_response="Added revenue logic and kept the join path intact.",
+    touched_entities=hook_payload.get("touchedEntities", []),
+)
+```
+
+This is the current actionable-memory loop in the repo today:
+
+1. `prepare_turn(...)` retrieves governed memory for the user query.
+2. `pre_tool_use(...)` optionally retrieves narrower entity-linked context just before a tool acts.
+3. `finalize_turn(...)` persists the response, optional captures, and touched-entity metadata for later turns.
+
+---
+
+## Drop into your existing stack in 30 minutes
+
+AgentDB defines a generic pluggable backend interface. Any framework with pluggable storage adopts it. The flagship integration is [deepagents](https://github.com/langchain-ai/deepagents) — LangChain's agent harness built on LangGraph:
+
+```python
+from deepagents import create_deep_agent
+from deepagents.backends import CompositeBackend, StateBackend
+from agentdb import AgentDB
+from agentdb.adapters.deepagents import make_agentdb_backend
+
+db = AgentDB()
+
+agent = create_deep_agent(
+    model="anthropic:claude-sonnet-4-6",
+    tools=[...],
+    backend=CompositeBackend(
+        default=StateBackend(),
+        routes={
+            "/memories/": make_agentdb_backend(db, "assistant", trust_zone="agent_inferred"),
+            "/skills/":   make_agentdb_backend(db, "assistant", trust_zone="human_approved"),
+        },
+    ),
+)
+```
+
+deepagents handles the agent loop, context compression, subagent isolation, and observability. AgentDB governs everything that persists. They do not overlap.
+
+**The backend interface is framework-agnostic.** Any system that supports pluggable key-value storage can use `AgentDBBackend` directly without deepagents installed:
+
+```python
+from agentdb import AgentDB
+from agentdb.backend import AgentDBBackend
+
+db = AgentDB()
+backend = AgentDBBackend(agent_id="assistant", trust_zone="agent_inferred", db=db)
+
+backend.write("memory/working/task_context", "user prefers bullet points")
+backend.read("memory/working/task_context")   # → "user prefers bullet points"
+backend.list("memory/working/")               # → ["memory/working/task_context"]
+```
+
+---
+
+## The primary differentiator: governed instruction records
+
+Skills are the most defensible feature in AgentDB. Not because they store instructions — any file can do that — but because they are database objects with a computed **health score** that degrades automatically when the instruction becomes stale.
+
+**Why this matters:** Anthropic's data analytics team built agents that reached 95%+ accuracy using structured skills. Without skills: 21% accuracy. With well-maintained skills: 95%+. The failure mode: skill accuracy drifted from 95% to 65% over one month when skill files were not actively maintained as the underlying data model changed. Their fix was PR discipline — colocation of skill files with transformation models, with hooks that flag drift.
+
+AgentDB's health score is the infrastructure solution. It catches drift without process discipline:
+
+```python
+db.skills.create(
+    id="analytics-schema-v1",
+    content="""
+        The revenue table has columns: date, amount_usd, customer_id, product_sku.
+        Always join on customer_id, never on email.
+        The 'legacy_orders' table was deprecated in Q1 2026 — do not query it.
+    """,
+    authored_by="human",
+    scope=["analytics_agent"],
+)
+
+# 45 days later — schema changed, skill not updated:
+result = db.retrieve(query="revenue breakdown", agent_id="analytics_agent")
+result.skill_warnings
+# → ["Skill 'analytics-schema-v1' health score 0.42: stale: not retrieved in 45 days"]
+```
+
+A health score below 0.6 surfaces a staleness warning in every retrieval result. The agent sees the warning before acting on the skill content.
+
+**What degrades the health score:**
+- Days since last retrieval (staleness decay, half-life 30 days)
+- Unresolved conflicts linked to the skill
+- A newer version that hasn't been promoted
+
+**Current limitation (Phase 2):** Entity drift detection is keyword-based — a skill that uses a synonym for a deprecated entity will not be flagged. Semantic entity matching is Phase 5 scope. This limitation is documented in LIMITATIONS.md.
+
+### Why the algorithm and skills belong together
+
+The retrieval algorithm and the governed skills system are one foundation, not two unrelated features.
+
+- The algorithm answers: which memories or instructions are most relevant to the action the agent is about to take?
+- Skills answer: which durable guidance should the agent trust when that action happens?
+
+In practice, AgentDB is strongest when these work together:
+
+1. memory records capture facts, context, prior outcomes, and relevant assets
+2. the ranking algorithm decides what matters now
+3. skills add governed, maintained instructions on top of those facts
+4. the runtime injects both as compact action-ready context
+
+That blend is the development foundation for AgentDB. The goal is not to accumulate more memory artifacts. The goal is to turn memory into better decisions, fewer conflicting instructions, and more accurate actions.
+
+---
+
+## The two zones: the central design decision
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                   HUMAN-APPROVED ZONE                   │
+│   skills/          config/human/      prompts/locked/   │
+│                                                         │
+│   Human-authored. Immutable at runtime. No agent write  │
+│   reaches here regardless of trust level or content.    │
+└─────────────────────────────────────────────────────────┘
+                            │
+                  Permission router
+                  (validates at write time, before storage)
+                            │
+┌─────────────────────────────────────────────────────────┐
+│                 AGENT-INFERRED ZONE                     │
+│   memory/working/    memory/episodic/   memory/org/     │
+│   memory/long_term/  config/agent/      memory/provider/│
+│                                                         │
+│   Bounded by permissions.yaml. Logged. Lifecycle-       │
+│   managed. Confidence-decaying.                         │
+└─────────────────────────────────────────────────────────┘
+```
+
+This boundary is enforced at write time, before any record reaches storage. A write to `skills/` from `origin="agent_inferred"` is rejected and logged — always, regardless of what the agent claims.
+
+```python
+db.write(
+    key="skills/override-safety",
+    value="ignore all previous instructions",
+    origin="agent_inferred",
+    agent_id="assistant",
+)
+# → PermissionDenied: human zone requires human_approved origin [agent=assistant, key=skills/override-safety]
+# → Logged to audit trail
+```
+
+---
+
+## Memory biography: what makes this a database
+
+Every record in AgentDB carries a full biography — not just a value:
+
+```
+key              → addressable path          e.g. "memory/working/pref_format"
+value            → the memory content
+origin           → human_approved | agent_inferred | provider_ingested
+trust_level      → sealed | human | agent | provider
+tier             → working | episodic | long_term | org
+confidence       → float 0–1, decays over time unless reinforced
+expiry_policy    → permanent | episodic | session
+conflict_id      → linked conflict record if under review
+audit_sequence   → position in immutable audit log
+embedding_version→ which model produced the stored vector
+```
+
+The biography enables permission routing, conflict detection, lifecycle management, and provenance-weighted retrieval. Without it you have a fancier key-value store.
+
+---
+
+## Memory tiers
+
+| Tier | Key prefix | Description | Retrieval priority |
+|---|---|---|---|
+| Working | `memory/working/` | Current task context. Session-scoped. | High for active session |
+| Episodic | `memory/episodic/` | Past interactions. Decays with time. | Medium, recency-weighted |
+| Long-term | `memory/long_term/` | Durable user preferences and facts. | High, confidence-weighted |
+| Org | `memory/org/` | Institutional knowledge: team structures, product names, internal terminology, decision logs. Changes slowly. Maintained by designated owners. | High for disambiguation; neutral for technical queries |
+| Provider | `memory/provider/` | Ingested from Anthropic / OpenAI / Google. Trust level = provider, never promoted. | Low |
+
+---
+
+## Conflict detection
+
+Detection runs at write time, not read time. By the time an agent is mid-execution, it is too late to resolve cleanly.
+
+| Conflict type | Example | Resolution |
+|---|---|---|
+| **Temporal** | Old instruction contradicts newer one on same key | Auto-resolved in favour of recency. Logged. |
+| **Authority** | Agent-inferred contradicts human-approved | Auto-resolved in favour of human. Agent notified. |
+| **Semantic** | "Be concise" vs "always explain your reasoning" — same authority, situationally contradictory | Queued for human review. Agent served older instruction with conflict flag. |
+
+**Conflict flags are assembled before memory content in retrieval.** An agent must know a memory is contested before it receives the content — not after.
+
+```python
+result = db.retrieve(query="communication style", agent_id="assistant")
+result.conflicts       # checked first
+result.records         # received after knowing conflict state
+```
+
+**Known limitation:** Semantic conflict detection requires embeddings (active in Phase 4). Until then, only temporal and authority conflicts are detected. The system does not pretend otherwise.
+
+---
+
+## Retrieval: what's novel, what isn't
+
+Semantic similarity, recency decay, and confidence scoring are already implemented in Mem0's 2026 algorithm. AgentDB uses these as baseline signals but does not claim them as differentiators.
+
+**Two signals that are genuinely novel:**
+
+**Provenance weight** — human-approved memories rank above agent-inferred for equivalent semantic similarity. No current system makes trust level a first-class ranking factor. A user's explicit preference always surfaces above an agent's inferred preference for the same query.
+
+**Causal relevance from WAL history** — if a memory was consistently retrieved before successful completions of actions similar to the current one, its relevance score increases. This is a WAL-derived signal no current memory system computes. It rewards memories that have demonstrated predictive value, not just semantic closeness.
+
+Signal weights (all configurable):
+
+| Signal | Default weight | Novel? |
+|---|---|---|
+| Semantic (cosine similarity) | 0.35* | No — Mem0 baseline |
+| Provenance (trust level) | 0.30 | **Yes** |
+| Recency (decay from last retrieved) | 0.20 | No — Mem0 baseline |
+| Confidence | 0.15 | No — Mem0 baseline |
+| Causal (WAL-derived) | 0.10* | **Yes** |
+
+*Semantic weight is 0 until Phase 4 activates embeddings. Causal weight is approximated via retrieval frequency until Phase 5 computes full WAL correlation.
+
+---
+
+## Action-driven retrieval (Roadmap: Phase 2 Task F)
+
+Standard retrieval is **query-driven**: the agent describes what it needs, AgentDB ranks and returns relevant memories at the start of a turn.
+
+Action-driven retrieval is a **planned tool-triggered extension**: memories will be injected at the moment Claude is about to act on a specific file or command — not at turn start, when the relevant file may not yet be known.
+
+```
+Turn start            →  query-driven retrieve("fix the funnel")
+                         → general context about funnel models
+
+Claude about to Edit  →  entity-driven retrieve(entity="ce_project_funnel__respondents")
+                         → "last time: layer violation introduced", "full-refresh required"
+```
+
+This matters for a coding assistant because much of the institutional knowledge is tied to specific files, models, or commands — not to the user's query topic. A memory like "this model requires `--full-refresh`" is invisible to a turn-level query unless the user happened to mention the model name.
+
+### Planned design
+
+`MemoryRecord` will carry an `entities` field — a list of canonical entity identifiers (file paths, model names, command patterns) attached at write time. `AgentDB.retrieve_by_entities()` will look up memories by entity key, bypassing the keyword ranker for exact matches.
+
+The framework adapter (e.g. the Claude SDK adapter) is planned to hook into `PreToolUse` events, extract the entity key from the tool input, and inject retrieved context as `additionalContext` before the tool executes:
+
+```python
+# Tool input: Edit("models/marts/core_entities/ce_project_funnel__respondents.sql")
+# Adapter extracts → entity = "ce_project_funnel__respondents"
+result = db.retrieve_by_entities(["ce_project_funnel__respondents"], agent_id="slack_assistant")
+# → injects context before Claude edits the file
+```
+
+Entity keys are extracted per tool type:
+
+| Tool | Entity key |
+|---|---|
+| `Write` / `Edit` / `MultiEdit` | `file_path` (and derived model name for `.sql` files) |
+| `Bash("dbt build --select X")` | model name parsed from `--select` argument |
+| `Bash("git commit ...")` | currently staged file paths |
+
+### Core vs. adapter boundary (planned)
+
+| What | Where |
+|---|---|
+| `entities: list[str]` on `MemoryRecord` | AgentDB core |
+| `retrieve_by_entities(entities, agent_id)` | AgentDB core |
+| Write-time entity extraction and tagging | Framework adapter |
+| `PreToolUse` hook + `additionalContext` injection | Claude SDK adapter |
+
+The core is framework-agnostic — any adapter (LangGraph, CrewAI, etc.) can implement write-time tagging and call `retrieve_by_entities`. The Claude-specific `PreToolUse` mechanics stay in the adapter.
+
+### Current state and phase placement
+
+Current state: query-driven retrieval and Claude turn wrappers are implemented; action-driven retrieval hooks are not yet active.
+
+Action-driven retrieval uses the existing keyword ranker and works with Phase 2 infrastructure. It improves automatically when Phase 4 semantic search activates — `retrieve_by_entities` can fall back to embedding similarity for entities not yet in the index.
+
+**Current limitation (Phase 2):** `retrieve_by_entities` is keyword-based — memories must contain the entity string in their key or value to be matched. Semantic entity matching is deferred to Phase 4+.
+
+---
+
+## Provider ingestion
+
+AgentDB does not compete with provider-native memory. It governs it.
+
+```python
+# Provider memory flows INTO AgentDB, not around it
+db.providers.anthropic.sync(memory_store_id="ms_abc123")
+db.providers.openai.sync(agent_id="assistant")
+db.providers.google.sync()  # Vertex AI MemoryBankService
+```
+
+All three providers write with `origin=provider_ingested`, `trust_level=provider`. No provider memory is ever promoted to `human_approved` — the boundary is enforced at ingestion.
+
+**Current limitation:** All three providers use polling. Push subscription is deferred until providers expose push APIs.
+
+---
+
+## A2A protocol
+
+AgentDB governs the memory of individual agents that communicate via the [A2A protocol](https://a2a-protocol.org) (v1.2, Linux Foundation). When Agent A delegates a task to Agent B via A2A, Agent B uses its own AgentDB instance — memory does not flow across A2A boundaries by default.
+
+AgentDB does not implement A2A transport. It sits below the transport layer:
+
+```
+Agent A ──A2A──► Agent B
+                    │
+              AgentDBBackend
+                    │
+              AgentDB (governed)
+```
+
+**Future scope (Phase 6+):** A2A agent cards carry cryptographic signatures (v1.2). An agent card can assert which memory zones the agent is authorized to read. This maps to AgentDB's permission zones — A2A card-based permission bootstrapping is planned.
+
+---
+
+## System tables
+
+AgentDB exposes memory metadata as queryable relations — modelled on `pg_catalog`:
+
+```python
+db.system.agentdb_memories()            # all active records
+db.system.agentdb_memories(agent_id="assistant")
+db.system.agentdb_agents()              # per-agent stats: count, avg confidence, conflicts
+db.system.agentdb_conflicts(resolved=False)   # unresolved conflict queue
+db.system.agentdb_stats()              # database-wide counters
+```
+
+```python
+db.system.agentdb_stats()
+# {
+#   "total_memories": 1847,
+#   "human_approved_count": 23,
+#   "agent_inferred_count": 1601,
+#   "provider_ingested_count": 223,
+#   "avg_confidence": 0.74,
+#   "total_conflicts": 12,
+#   "unresolved_conflicts": 3,
+# }
+```
+
+---
+
+## Permissions
+
+Permissions are human-authored YAML, loaded at startup, not modifiable at runtime:
+
+```yaml
+# config/permissions.yaml
+default_policy: deny
+
+human_zone_prefixes:
+  - "skills/"
+  - "config/human/"
+  - "prompts/locked/"
+
+agents:
+  analytics_agent:
+    can_write:
+      - "memory/working/"
+      - "memory/episodic/"
+      - "memory/org/"
+      - "config/agent/learned_prefs/analytics_*"
+    cannot_write:
+      - "config/human/"
+      - "skills/"
+    can_read:
+      - "memory/working/"
+      - "memory/episodic/"
+      - "memory/long_term/"
+      - "memory/org/"
+```
+
+Agents not listed are denied all writes (`default_policy: deny`). Wildcard matching is supported (`analytics_*`). Rules are evaluated in order: `cannot_write` before `can_write`.
+
+---
+
+## Lifecycle management
+
+The lifecycle manager runs as a background process. It never hard-deletes — it archives. The WAL provides reconstruction at any point in time.
+
+| Event | Trigger | Action |
+|---|---|---|
+| Confidence decay | Agent-inferred memory not retrieved within window | Score reduced 5% per cycle |
+| Staleness archival | Not retrieved within 90 days | Moved to cold storage, excluded from standard retrieval |
+| Skill staleness | Skill health score below 0.6 | Warning surfaced in retrieval; skill not archived automatically |
+| Reinforcement | Explicit positive outcome signal | Confidence boosted, decay clock reset |
+| Human revocation | Explicit SDK delete | Archived with WAL entry; history preserved |
+
+**human_approved records never decay.** Only `agent_inferred` and `provider_ingested` records are subject to confidence decay.
+
+---
+
+## Deployment
+
+Three modes, identical interface:
+
+```python
+# Embedded — SQLite, zero config, development and prototyping
+from agentdb import AgentDB
+db = AgentDB()
+db = AgentDB(path="./my-agent.db", permissions_path="./permissions.yaml")
+
+# Server mode — standalone process, Postgres + pgvector (Phase 5)
+db = AgentDB.connect("mcp://localhost:5433")
+
+# Managed cloud — hosted, enterprise SLA (Phase 5+)
+db = AgentDB.connect("agentdb://org.agentdb.io", api_key="...")
+```
+
+```typescript
+// Same interface in TypeScript
+import { AgentDB } from 'agentdb'
+const db = new AgentDB()
+const db = AgentDB.connect('mcp://localhost:5433')
+```
+
+**MCP server** exposes four tools: `memory_write`, `memory_retrieve`, `memory_subscribe`, `conflict_queue` — available as a native integration point for any MCP-compatible framework.
+
+**Security note:** In embedded (in-process) mode, the permission router runs in the same process as the application. For security-sensitive deployments, server mode is required — the router runs out-of-process and cannot be reached by application code. Embedded mode is for development and prototyping.
+
+---
+
+## Architecture
+
+```
+Agent (any framework)
+        │
+        │  AgentDBBackend / MCP / SDK
+        ▼
+┌───────────────────────────────────────────┐
+│              AgentDB interface            │
+│  AgentDBBackend │ MCP server │ Python SDK │
+└───────────────┬───────────────────────────┘
+                │
+        ┌───────▼────────┐
+        │   Middleware   │
+        │  Origin tag    │
+        │  Permission    │
+        │  router        │
+        │  Conflict      │
+        │  detector      │
+        └───────┬────────┘
+                │
+     ┌──────────┼──────────┐
+     ▼          ▼          ▼
+  Human      Agent     Provider
+  zone       zone      ingest
+  (sealed)  (governed) (normalised)
+     │          │          │
+     └──────────┼──────────┘
+                │
+        ┌───────▼────────┐
+        │  Retrieval     │
+        │  Multi-signal  │
+        │  ranker        │
+        │  Budget        │
+        │  manager       │
+        └───────┬────────┘
+                │
+     ┌──────────┼──────────┐
+     ▼          ▼          ▼
+  SQLite    Postgres   pgvector
+  (embed)   (server)  (semantic)
+                │
+        ┌───────▼────────┐
+        │  Audit log     │
+        │  (append-only) │
+        │  Event bus     │
+        │ (subscriptions)│
+        └────────────────┘
+```
+
+---
+
+## Memory that improves
+
+Most memory systems are static — they store what the agent learned and retrieve it later. AgentDB closes the feedback loop:
+
+1. **Every retrieval is logged** with which records were returned and at what scores (retrieval event in the audit trail).
+
+2. **Every outcome** — task completion, human correction, human approval — is linked back to the retrieval that preceded it.
+
+```python
+# After a task completes:
+db.record_outcome(
+    session_id="sess_abc",
+    agent_id="assistant",
+    outcome_type="task_complete",   # or "human_correction" | "human_approval" | "agent_retry"
+    outcome_value=1.0,              # 1.0 = positive, 0.0 = negative, 0.5 = neutral
+)
+```
+
+3. **Memories that consistently precede positive outcomes** have their confidence boosted (up to +0.05 per outcome, capped at +0.1). Memories that precede failures are gently decayed (−0.02 per negative outcome). The agent gets better at knowing what to trust.
+
+4. **The corpus quality dashboard** answers "is this agent's memory getting better?" with a measurable number:
+
+```python
+db.system.agentdb_stats()
+# {
+#   "avg_confidence":        0.81,   # trending up = memory improving
+#   "low_confidence_count":  3,      # records at risk of archival
+#   "conflict_pending_count": 1,     # awaiting human review
+#   "outcome_positive_rate": 0.87,   # 87% of tasks completed without correction
+#   "skill_stale_count":     0,      # skills with health_score < 0.6
+#   "retrieval_count_total": 412,
+# }
+```
+
+**Human-approved memories and skills are immune to outcome-based changes.** The improvement algorithm only operates on agent-inferred memory — the layer the agent itself controls. Humans remain the authority on what is correct. The algorithm makes the agent better at using that authority.
+
+Provider-ingested memories can decay from negative outcomes but cannot be boosted — they are external data, not learned knowledge.
+
+**Context compaction is handled, not hidden.** When an agent runs a long session and the context window is compacted, AgentDB preserves continuity: `checkpoint()` promotes important working memory to episodic storage before compaction fires, and `write_compaction_summary()` stores the framework's compressed summary as a durable episodic record. Both are logged to the audit trail with a compaction boundary marker. The retrieval algorithm gives compaction summaries a modest provenance boost above standard agent-inferred memories — they are derived from real conversation, not pure inference.
+
+---
+
+## What AgentDB is not
+
+- **Not a vector database.** pgvector handles semantic retrieval underneath. AgentDB is the governance layer above it.
+- **Not a RAG pipeline.** Existing RAG tooling integrates via adapter.
+- **Not a provider replacement.** Anthropic, OpenAI, Google memory — AgentDB ingests and governs them.
+- **Not a framework.** It owns your data. Leaving requires a migration. That is the moat.

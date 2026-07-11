@@ -2,12 +2,13 @@
 Reproducible Slack-style integration example for AgentDB + ClaudeSDKClient async runtime.
 
 This shows the minimal app-layer wiring for the agentic subprocess path:
-  - one AgentDB instance
-  - one AgentDBClaudeRuntime built with from_sdk_client()
-  - one async handler function per incoming thread message
+    - one AgentDB instance
+    - one app-owned get_or_create_client(thread_id)
+    - one AgentDBClaudeRuntime built with from_sdk_client()
+    - one async handler function per incoming thread message
 
 The example uses a fake SDK client so it runs locally without credentials.
-Replace FakeSdkClient / fake_sdk_factory with your real ClaudeSDKClient in production.
+Replace FakeSdkClient with your real ClaudeSDKClient in production.
 """
 from __future__ import annotations
 
@@ -54,6 +55,20 @@ class FakeSdkClient:
     def __init__(self, thread_id: str) -> None:
         self._thread_id = thread_id
         self._prompt: str = ""
+        self._hooks: dict[str, Any] = {}
+
+    def register_hook(self, name: str, handler: Any) -> None:
+        self._hooks[name] = handler
+
+    def invoke_pre_tool_use(self, *, tool_name: str, tool_input: dict[str, Any]) -> dict[str, Any]:
+        handler = self._hooks.get("PreToolUse")
+        if handler is None:
+            return {}
+        return handler(
+            tool_name=tool_name,
+            tool_input=tool_input,
+            session_id=self._thread_id,
+        )
 
     async def query(self, prompt: str) -> None:
         self._prompt = prompt
@@ -63,21 +78,61 @@ class FakeSdkClient:
         yield FakeResultMessage(session_id=self._thread_id)
 
 
-def fake_sdk_factory(thread_id: str) -> FakeSdkClient:
-    """
-    In production, return the ClaudeSDKClient for this thread_id.
-    The slack-assistant's claude_runner already manages one client per thread —
-    pass claude_runner.get_or_create_client(thread_id, ...) here.
-    """
-    return FakeSdkClient(thread_id)
-
-
-# ---------------------------------------------------------------------------
-# Handler
-# ---------------------------------------------------------------------------
 class SlackAgentHandler:
-    def __init__(self, runtime: AgentDBClaudeRuntime) -> None:
-        self.runtime = runtime
+    def __init__(self, db_path: str = "./agentdb.db") -> None:
+        self.db = AgentDB(
+            path=db_path,
+            tracking_directories=["docs", ".claude/skills", "agent-sessions"],
+            tracking_root=".",
+            tracking_max_files_per_directory=200,
+        )
+        self._clients: dict[str, FakeSdkClient] = {}
+
+        # Seed durable memory for demo relevance.
+        self.db.write(
+            key="memory/working/slack/preferences",
+            value="respond in concise bullets for routine updates",
+            origin="agent_inferred",
+            agent_id="research_agent",
+            session_id="demo-thread-1",
+        )
+        self.db.write(
+            key="memory/working/slack/report_model_guidance",
+            value="Preserve the customer_id join when editing report_model.",
+            origin="human_approved",
+            agent_id="research_agent",
+            entities=["models/marts/core/report_model.sql", "report_model"],
+            session_id="demo-thread-1",
+        )
+
+        self.runtime = AgentDBClaudeRuntime.from_sdk_client(
+            db=self.db,
+            agent_id="research_agent",
+            sdk_client_factory=self.get_or_create_client,
+            profile="budget_optimized",
+            system_prompt="You are the engineering Slack assistant.",
+        )
+
+    def get_or_create_client(self, thread_id: str) -> FakeSdkClient:
+        """
+        In production, return the ClaudeSDKClient for this thread_id.
+        The Slack assistant's claude_runner already manages one client per thread;
+        attach AgentDB's hooks at client creation time.
+        """
+        client = self._clients.get(thread_id)
+        if client is None:
+            client = FakeSdkClient(thread_id)
+            for hook_name, handler in self.runtime.get_sdk_hooks().items():
+                client.register_hook(hook_name, handler)
+            self._clients[thread_id] = client
+        return client
+
+    def pre_tool_use(self, tool_name: str, tool_input: dict[str, Any], thread_id: str) -> dict[str, Any]:
+        """
+        This mirrors the downstream SDK callback that fires immediately before a tool runs.
+        """
+        client = self.get_or_create_client(thread_id)
+        return client.invoke_pre_tool_use(tool_name=tool_name, tool_input=tool_input)
 
     async def handle_event(self, event: IncomingSlackEvent) -> str:
         result = await self.runtime.handle_turn_async(
@@ -90,35 +145,16 @@ class SlackAgentHandler:
         return result["response_text"]
 
 
-def build_runtime(db_path: str = "./agentdb.db") -> AgentDBClaudeRuntime:
-    db = AgentDB(
-        path=db_path,
-        tracking_directories=["docs", ".claude/skills", "agent-sessions"],
-        tracking_root=".",
-        tracking_max_files_per_directory=200,
-    )
-
-    # Seed a durable memory record for demo relevance.
-    db.write(
-        key="memory/working/slack/preferences",
-        value="respond in concise bullets for routine updates",
-        origin="agent_inferred",
-        agent_id="research_agent",
-        session_id="demo-thread-1",
-    )
-
-    return AgentDBClaudeRuntime.from_sdk_client(
-        db=db,
-        agent_id="research_agent",
-        sdk_client_factory=fake_sdk_factory,
-        profile="budget_optimized",
-        system_prompt="You are the engineering Slack assistant.",
-    )
-
-
 async def main() -> None:
-    runtime = build_runtime()
-    handler = SlackAgentHandler(runtime)
+    handler = SlackAgentHandler()
+
+    # Example of downstream pre-tool hook usage.
+    pre_tool_payload = handler.pre_tool_use(
+        "Edit",
+        {"file_path": "models/marts/core/report_model.sql"},
+        "demo-thread-1",
+    )
+    print(pre_tool_payload)
 
     event = IncomingSlackEvent(
         channel="C123",

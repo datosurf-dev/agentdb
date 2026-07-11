@@ -1,0 +1,17 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit|MultiEdit|Create|Delete|apply_patch|create_file",
+        "hooks": [
+          {
+            "type": "agent",
+            "prompt": "A code change was just made. Check if the modified file is one of the AgentDB algorithm files (algorithm.py, lifecycle_manager.py, system_tables.py, or client.py). The tool input is: $ARGUMENTS\n\nIf the file matches, invoke the agentdb-algorithm-review skill and run the full review checklist against the change. If the file does not match, do nothing.",
+            "statusMessage": "Reviewing algorithm change...",
+            "timeout": 120
+          }
+        ]
+      }
+    ]
+  }
+}
