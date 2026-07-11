@@ -26,6 +26,8 @@ def test_memory_record_defaults() -> None:
     assert r.archived is False
     assert r.retrieval_count == 0
     assert isinstance(r.created_at, datetime)
+    assert r.last_retrieved is None
+    assert r.conflict_id is None
 
 
 def test_memory_record_requires_key_value_origin() -> None:

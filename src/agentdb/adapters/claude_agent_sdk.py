@@ -113,9 +113,11 @@ class AgentDBClaudeMiddleware:
         profile: str = "budget_optimized",
         retrieve_limit: Optional[int] = None,
         memory_budget_chars: Optional[int] = None,
+        conversation_started_callback: Optional[Callable[..., Any]] = None,
     ):
         self._db = db
         self._agent_id = agent_id
+        self._conversation_started_callback = conversation_started_callback
         if profile == "full_storage":
             base = FULL_STORAGE_PROFILE
         else:
@@ -142,6 +144,14 @@ class AgentDBClaudeMiddleware:
         Enforced pre-response hook: always retrieves governed memory first.
         Returns model messages and raw retrieval result for optional inspection.
         """
+        if self._conversation_started_callback is not None:
+            self._conversation_started_callback(
+                db=self._db,
+                agent_id=self._agent_id,
+                session_id=session_id,
+                user_query=user_query,
+            )
+
         retrieval = self._db.retrieve(
             query=user_query,
             agent_id=self._agent_id,
@@ -187,6 +197,8 @@ class AgentDBClaudeMiddleware:
         max_files_per_directory: Optional[int] = None,
         outcome_type: Optional[str] = None,
         outcome_value: Optional[float] = None,
+        touched_entities: Optional[list[str]] = None,
+        user_query: Optional[str] = None,
     ) -> None:
         """
         Post-response hook: persist memory updates and optional outcome signal.
@@ -212,7 +224,30 @@ class AgentDBClaudeMiddleware:
                 origin=item.get("origin", "agent_inferred"),
                 agent_id=self._agent_id,
                 session_id=session_id,
+                entities=touched_entities or [],
             )
+
+        # Write conversation JSONL if enabled
+        if user_query is not None:
+            memory_config = getattr(self._db, "memory_config", {})
+            capture_cfg = memory_config.get("capture", {}) if memory_config else {}
+            if capture_cfg.get("conversation_jsonl", False):
+                memory_dir = getattr(self._db, "memory_dir", None)
+                if memory_dir is not None:
+                    import json as _json
+                    from pathlib import Path as _Path
+                    conv_dir = _Path(memory_dir) / "conversations"
+                    conv_dir.mkdir(parents=True, exist_ok=True)
+                    filename = f"{self._agent_id}--{session_id}.jsonl"
+                    filepath = conv_dir / filename
+                    entry = _json.dumps({
+                        "session_id": session_id,
+                        "message_id": message_id,
+                        "user_query": user_query,
+                        "model_response": model_response,
+                    })
+                    with filepath.open("a", encoding="utf-8") as f:
+                        f.write(entry + "\n")
 
         normalized_snapshots = list(directory_snapshots or [])
         effective_tracked_directories = (
@@ -336,6 +371,8 @@ class AgentDBClaudeMiddleware:
         max_files_per_directory: Optional[int] = None,
         outcome_type: Optional[str] = None,
         outcome_value: Optional[float] = None,
+        touched_entities: Optional[list[str]] = None,
+        user_query: Optional[str] = None,
     ) -> None:
         self.finalize_turn(
             session_id=session_id,
@@ -348,6 +385,8 @@ class AgentDBClaudeMiddleware:
             max_files_per_directory=max_files_per_directory,
             outcome_type=outcome_type,
             outcome_value=outcome_value,
+            touched_entities=touched_entities,
+            user_query=user_query,
         )
 
     async def run_turn_async(
@@ -411,6 +450,132 @@ class AgentDBClaudeMiddleware:
             chunks.append(line)
             remaining -= len(line)
         return "\n".join(chunks)
+
+    def _extract_entities_from_tool(
+        self, tool_name: str, tool_input: dict[str, Any]
+    ) -> list[str]:
+        """
+        Extract entity strings from a tool call.
+
+        Edit -> file_path
+        Bash -> parse --select X flag or model names from command
+        """
+        entities: list[str] = []
+        if tool_name == "Edit":
+            file_path = tool_input.get("file_path")
+            if file_path:
+                entities.append(str(file_path))
+        elif tool_name == "Bash":
+            command = tool_input.get("command", "")
+            # Parse --select <value> (dbt-style)
+            import re
+            select_match = re.search(r"--select\s+(\S+)", command)
+            if select_match:
+                entities.append(select_match.group(1))
+            # Also look for model names in the command (words that look like identifiers)
+            # Extract words that are likely model/file references (not flags)
+            words = command.split()
+            for word in words:
+                if word.startswith("-"):
+                    continue
+                # Skip common shell commands and dbt subcommands
+                if word in ("dbt", "build", "run", "test", "compile", "echo", "ls",
+                            "cat", "grep", "python", "pip", "cd", "export"):
+                    continue
+                # Accept words that look like identifiers (letters, digits, underscores, dots, slashes)
+                if re.match(r"^[a-zA-Z][a-zA-Z0-9_./]*$", word):
+                    entities.append(word)
+        return entities
+
+    def build_action_context(
+        self, tool_name: str, tool_input: dict[str, Any], session_id: str
+    ) -> str:
+        """
+        Build governed action context for a tool call.
+
+        Returns a formatted context string if matching memories are found,
+        otherwise returns empty string.
+        """
+        entities = self._extract_entities_from_tool(tool_name, tool_input)
+        if not entities:
+            return ""
+
+        retrieval = self._db.retrieve_by_entities(
+            entities=entities,
+            agent_id=self._agent_id,
+            session_id=session_id,
+        )
+
+        if not retrieval.records:
+            return ""
+
+        lines = ["Governed action context:"]
+        for record in retrieval.records:
+            value = record.value
+            if isinstance(value, (dict, list)):
+                value_text = json.dumps(value, ensure_ascii=True)
+            else:
+                value_text = str(value)
+            lines.append(f"- {record.key}: {value_text}")
+
+        return "\n".join(lines)
+
+    def pre_tool_use(
+        self, tool_name: str, tool_input: dict[str, Any], session_id: str
+    ) -> dict[str, Any]:
+        """
+        Pre-tool-use hook: extract context and touched entities.
+
+        Returns:
+            {"additionalContext": str, "touchedEntities": list[str]}
+            or {} if no matching context.
+        """
+        entities = self._extract_entities_from_tool(tool_name, tool_input)
+        if not entities:
+            return {}
+
+        retrieval = self._db.retrieve_by_entities(
+            entities=entities,
+            agent_id=self._agent_id,
+            session_id=session_id,
+        )
+
+        if not retrieval.records:
+            return {}
+
+        lines = ["Governed action context:"]
+        touched: list[str] = []
+        for record in retrieval.records:
+            value = record.value
+            if isinstance(value, (dict, list)):
+                value_text = json.dumps(value, ensure_ascii=True)
+            else:
+                value_text = str(value)
+            lines.append(f"- {record.key}: {value_text}")
+            touched.extend(record.entities or [])
+
+        # Also include the original entities we searched for
+        all_touched = list(dict.fromkeys(entities + touched))
+
+        return {
+            "additionalContext": "\n".join(lines),
+            "touchedEntities": all_touched,
+        }
+
+    def build_hook_handlers(self) -> dict[str, Any]:
+        """
+        Build a dict of hook handlers for use with Claude SDK.
+
+        Returns:
+            {"PreToolUse": callable(tool_name, tool_input, session_id) -> dict}
+        """
+        return {
+            "PreToolUse": lambda tool_name, tool_input, session_id: self.pre_tool_use(
+                tool_name=tool_name,
+                tool_input=tool_input,
+                session_id=session_id,
+            )
+        }
 
 
 class AgentDBClaudeRuntime:
@@ -636,3 +801,12 @@ class AgentDBClaudeRuntime:
             "retrieval": retrieval,
             "messages": messages,
         }
+
+    def get_sdk_hooks(self) -> dict[str, Any]:
+        """
+        Return hook handlers from the middleware for Claude SDK integration.
+
+        Returns:
+            {"PreToolUse": callable}
+        """
+        return self._middleware.build_hook_handlers()

@@ -1,3 +1,5 @@
+import sqlite3
+from datetime import datetime, timezone
 from pathlib import Path
 
 from agentdb import AgentDB
@@ -94,6 +96,122 @@ def test_record_outcome_applies_origin_sensitive_confidence_rules(tmp_path):
     assert db._store._by_id[agent_rec.id].confidence == 0.53
     assert db._store._by_id[provider_rec.id].confidence == 0.48
     assert db._store._by_id[human_rec.id].confidence == 0.50
+
+
+def test_last_retrieved_and_conflict_id_persist_across_store_reload(tmp_path):
+    db_path = tmp_path / "test.db"
+    db = AgentDB(path=db_path, permissions_path=PERMS)
+    record = db.write(
+        key="memory/working/x", value="v", origin="agent_inferred", agent_id="research_agent"
+    )
+    record.last_retrieved = datetime.now(timezone.utc)
+    record.conflict_id = "conf-1"
+    db._store.write(record)
+
+    reloaded_db = AgentDB(path=db_path, permissions_path=PERMS)
+    reloaded = reloaded_db.read("memory/working/x")
+    assert reloaded.last_retrieved is not None
+    assert reloaded.conflict_id == "conf-1"
+
+
+def test_store_tolerates_legacy_schema_missing_new_columns(tmp_path):
+    db_path = tmp_path / "legacy.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.execute(
+        """
+        CREATE TABLE memories (
+            id TEXT PRIMARY KEY,
+            key TEXT NOT NULL,
+            value TEXT NOT NULL,
+            origin TEXT NOT NULL,
+            trust_level TEXT NOT NULL,
+            agent_id TEXT NOT NULL,
+            confidence REAL NOT NULL DEFAULT 1.0,
+            version INTEGER NOT NULL DEFAULT 1,
+            archived INTEGER NOT NULL DEFAULT 0,
+            retrieval_count INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL,
+            entities TEXT NOT NULL DEFAULT '[]'
+        )
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    db = AgentDB(path=db_path, permissions_path=PERMS)
+    db.write(key="memory/working/x", value="v", origin="agent_inferred", agent_id="research_agent")
+    assert db.read("memory/working/x").value == "v"
+
+
+def test_retrieve_ranks_human_approved_above_agent_inferred(tmp_path):
+    perms = tmp_path / "permissions.allow.skills.yaml"
+    perms.write_text(
+        "\n".join(
+            [
+                "default_policy: deny",
+                "human_zone_prefixes:",
+                "  - \"skills/\"",
+                "agents:",
+                "  research_agent:",
+                "    can_write:",
+                "      - \"memory/working/\"",
+                "      - \"skills/\"",
+                "    can_read:",
+                "      - \"memory/working/\"",
+                "      - \"skills/\"",
+            ]
+        )
+    )
+    db = AgentDB(path=tmp_path / "test.db", permissions_path=perms)
+    db.write(
+        key="memory/working/agent_note",
+        value="dbt model naming convention",
+        origin="agent_inferred",
+        agent_id="research_agent",
+    )
+    db.write(
+        key="skills/dbt-convention",
+        value="dbt model naming convention: prefix with stg_",
+        origin="human_approved",
+        agent_id="research_agent",
+    )
+
+    result = db.retrieve(query="convention", agent_id="research_agent")
+
+    assert len(result.records) == 2
+    assert result.records[0].origin == "human_approved"
+
+
+def test_retrieve_logs_real_composite_signal_scores(tmp_path):
+    db = AgentDB(path=tmp_path / "test.db", permissions_path=PERMS)
+    db.write(
+        key="memory/working/task_context",
+        value="user prefers concise bullet points",
+        origin="agent_inferred",
+        agent_id="research_agent",
+    )
+
+    db.retrieve(query="bullet", agent_id="research_agent")
+
+    entries = db.audit_log.replay(from_sequence=0)
+    retrieve_entry = next(e for e in entries if e.event_type == "memory_retrieve")
+    scores = list(retrieve_entry.payload["signal_scores"].values())
+    assert scores[0] != 1.0
+
+
+def test_retrieve_updates_last_retrieved_for_recency_scoring(tmp_path):
+    db = AgentDB(path=tmp_path / "test.db", permissions_path=PERMS)
+    db.write(
+        key="memory/working/task_context",
+        value="user prefers concise bullet points",
+        origin="agent_inferred",
+        agent_id="research_agent",
+    )
+    assert db.read("memory/working/task_context").last_retrieved is None
+
+    db.retrieve(query="bullet", agent_id="research_agent")
+
+    assert db.read("memory/working/task_context").last_retrieved is not None
 
 
 def test_agentdb_tracking_configuration_is_initialized(tmp_path):

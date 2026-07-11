@@ -4,9 +4,9 @@ This directory contains implementation-focused guides for wiring AgentDB into sp
 
 ## Available Guides
 
-- Google ADK: `docs/integrations/google-adk.md`
-- Model/runtime wiring (local LLM and Claude): `docs/integrations/model-and-runtime-wiring.md`
+- Model/runtime wiring (local LLM and Claude): `docs/integrations/model-and-runtime-wiring.md` — the only guide describing something you can run today (Claude SDK middleware, section A.1)
 - Functional demo checklist: `docs/integrations/functional-demo.md`
+- Google ADK: `docs/integrations/google-adk.md` — **planned, not yet implemented**; describes the target design for an adapter that doesn't exist yet
 
 The model/runtime wiring guide includes:
 

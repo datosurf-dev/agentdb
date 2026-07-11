@@ -27,6 +27,52 @@ def test_delete_removes_record(backend):
     assert backend.read("memory/working/to_delete") is None
 
 
+def test_delete_appends_to_audit_log(backend):
+    backend.write("memory/working/audit_delete", "value")
+    backend.delete("memory/working/audit_delete")
+    entries = backend.db.audit_log.replay(from_sequence=0)
+    assert any(entry.event_type == "memory_delete" for entry in entries)
+
+
+def test_delete_denied_for_key_outside_permission(backend):
+    with pytest.raises(PermissionDenied):
+        backend.delete("skills/blocked")
+
+
+def test_delete_denied_appends_permission_event(backend):
+    with pytest.raises(PermissionDenied):
+        backend.delete("skills/blocked")
+    entries = backend.db.audit_log.replay(from_sequence=0)
+    assert any(entry.event_type == "permission_denied" for entry in entries)
+
+
+def test_delete_denied_leaves_record_intact(tmp_path):
+    perms = tmp_path / "permissions.allow.skills.yaml"
+    perms.write_text(
+        "\n".join(
+            [
+                "default_policy: deny",
+                "human_zone_prefixes:",
+                "  - \"skills/\"",
+                "agents:",
+                "  research_agent:",
+                "    can_write:",
+                "      - \"skills/\"",
+                "    can_read:",
+                "      - \"skills/\"",
+            ]
+        )
+    )
+    db = AgentDB(path=tmp_path / "test.db", permissions_path=perms)
+    human_backend = AgentDBBackend(agent_id="research_agent", trust_zone="human_approved", db=db)
+    human_backend.write("skills/python-style", "use type hints")
+
+    agent_backend = AgentDBBackend(agent_id="research_agent", trust_zone="agent_inferred", db=db)
+    with pytest.raises(PermissionDenied):
+        agent_backend.delete("skills/python-style")
+    assert human_backend.read("skills/python-style") == "use type hints"
+
+
 def test_list_returns_matching_paths(backend):
     backend.write("memory/working/a", "v1")
     backend.write("memory/working/b", "v2")
