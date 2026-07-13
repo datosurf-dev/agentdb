@@ -7,6 +7,7 @@ This directory contains implementation-focused guides for wiring AgentDB into sp
 - Model/runtime wiring (local LLM and Claude): `docs/integrations/model-and-runtime-wiring.md` — the only guide describing something you can run today (Claude SDK middleware, section A.1)
 - Functional demo checklist: `docs/integrations/functional-demo.md`
 - Google ADK: `docs/integrations/google-adk.md` — **planned, not yet implemented**; describes the target design for an adapter that doesn't exist yet
+- OpenClaw: `docs/integrations/openclaw.md` — **planned, not yet implemented**; design brief for hooking any OpenClaw agent (data-helper first) into AgentDB, open questions flagged for whoever builds it
 
 The model/runtime wiring guide includes:
 
