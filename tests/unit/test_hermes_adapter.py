@@ -85,3 +85,45 @@ def test_gateway_adapter_gateway_reference(provider, db):
 def test_backup_paths_returns_list(provider):
     paths = provider.backup_paths()
     assert isinstance(paths, list)
+
+
+def test_principle_12a_prefetch_via_framework_caller(db):
+    """Principle 12a: framework-driven call (not direct) triggers governed retrieval."""
+    db.write(key="fw/test", value="framework governed", origin="agent_inferred", agent_id="fw-agent")
+
+    provider = AgentDBHermesProvider(db=db, agent_id="fw-agent")
+    provider.initialize("fw-session")
+
+    # Simulate Hermes MemoryManager invoking prefetch (framework path)
+    class HermesMemoryManagerShim:
+        def __init__(self, p): self._provider = p
+        def call_prefetch(self, query, session_id):
+            return self._provider.prefetch(query, session_id=session_id)
+
+    mm = HermesMemoryManagerShim(provider)
+    records = mm.call_prefetch("framework governed", session_id="fw-session")
+
+    # Governed retrieval happened: verify AgentDB state changed (retrieval_count bumped)
+    assert isinstance(records, list)
+    stored = db.read("fw/test", agent_id="fw-agent")
+    assert stored.retrieval_count > 0  # proves governance executed, not just callable
+
+
+def test_principle_12a_sync_turn_via_framework_caller(db):
+    """Principle 12a: framework-driven sync_turn call writes a governed record."""
+    provider = AgentDBHermesProvider(db=db, agent_id="fw-agent2")
+    provider.initialize("fw-session2")
+
+    class HermesMemoryManagerShim:
+        def __init__(self, p): self._provider = p
+        def call_sync_turn(self, user, asst, session_id):
+            return self._provider.sync_turn(user, asst, session_id=session_id)
+
+    mm = HermesMemoryManagerShim(provider)
+    mm.call_sync_turn("user msg", "assistant governed response", session_id="fw-session2")
+
+    # Prove the framework caller path wrote a verifiable governed record
+    record = db.read("memory/hermes/fw-agent2/fw-session2/turn", agent_id="fw-agent2")
+    assert record is not None
+    assert record.value == "assistant governed response"
+    assert record.origin == "agent_inferred"

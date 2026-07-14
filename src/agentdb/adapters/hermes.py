@@ -17,6 +17,7 @@ covers AgentDB's own records only, not Hermes-native storage.
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Optional
 
 try:
@@ -208,7 +209,7 @@ class AgentDBHermesProvider(MemoryProvider, GatewayAdapter):
         high-frequency ephemeral daily notes are skipped.
         """
         governed_targets = {"MEMORY.md", "DREAMS.md"}
-        if target not in governed_targets:
+        if Path(target).name not in governed_targets:
             return
         # Write a mirror record to AgentDB for audit/retrieval
         self._db.write(
@@ -233,12 +234,8 @@ class AgentDBHermesProvider(MemoryProvider, GatewayAdapter):
 
     def backup_paths(self) -> list[str]:
         """Return the AgentDB file path for backup tooling."""
-        try:
-            db_path = self._db._path
-            if db_path and str(db_path) != ":memory:":
-                return [str(db_path)]
-        except AttributeError:
-            pass
+        if hasattr(self._db, "_path") and self._db._path and str(self._db._path) != ":memory:":
+            return [str(self._db._path)]
         return []
 
     # ------------------------------------------------------------------
