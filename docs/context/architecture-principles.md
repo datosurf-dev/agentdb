@@ -45,3 +45,20 @@ These principles define the implementation constraints for all AgentDB work.
     - **12b. Async integrity checks** — decoupled from any single agent's turn: conflict-queue notifications, corpus-wide staleness/lifecycle sweeps (Task 9), reconciliation triggers (`file_modified`, `cron`), the skill draft reconciliation pipeline (Task 13 — proposing/flagging is 12b; the actual commit to a skill is write-time governance, a separate, more restrictive gate), cross-agent "something you rely on just changed" notices. The concrete mechanism is `AgentDB.register_reconciliation_handler(trigger, handler)` / `dispatch_reconciliation_trigger(trigger, **kwargs)` (see Design Principle 7) — a live, in-memory register/dispatch pair already implemented, not a new subsystem to build. What's missing today is dispatch call sites for new trigger types (e.g. `conflict_detected`, `skill_stale`) at the places those events actually happen, and consumers (an MCP tool, a Slack/Telegram notifier in a host app) registering handlers against them. These exist to catch what real-time enforcement structurally cannot: a different agent, in a different session, changing something the current agent is relying on, with no upcoming hook checkpoint to pick it up. Done means: it runs independent of any agent's turn, it's auditable (an audit-log entry, not silent), and it has a named consumer (a queue, a dispatcher, a notification target) registered via this mechanism. Publishing an event with no subscriber wired to an enforcement point is telemetry, not enforcement.
 
     Every adapter, and every new memory-freshness capability, must state which of these two types it is and meet that type's bar before being marked done.
+
+13. **Surface consolidation over API proliferation.** When new capabilities serve the same consumer type — human reviewer, framework adapter, lifecycle governor, provider sync — they belong on a named sub-surface rather than as scattered top-level methods on `AgentDB`. A proliferation of top-level methods serving the same consumer is the signal a sub-surface is needed.
+
+    The sub-surface is a property on `AgentDB`, not a separate process or package — Principle 1's database-first identity still applies; sub-surfaces are namespaces, not architectural seams. Standard shape: a lightweight class initialized once in `AgentDB.__init__`, exposed via a property, with `AgentDB` keeping backward-compatible pass-through aliases on any methods that were public before the sub-surface existed.
+
+    Confirmed sub-surfaces and their owners:
+
+    | Sub-surface | Consumer | Status |
+    |---|---|---|
+    | `db.gateway` | Reconciliation dispatcher + proposal workflow + conflict queue + adapter base | Task 16 — not started |
+    | `db.lifecycle` | Archival sweep + outcome reinforcement | Task 9 — not started |
+    | `db.providers` | Anthropic / OpenAI / Google provider sync | Task 10 — not started |
+    | `db.system` | Introspection tables | Implemented (partial) |
+    | `db.skills_api` | Skill CRUD | Implemented |
+    | `db.audit_log` | Audit trail replay | Implemented |
+
+    New capabilities that span more than one method and serve a distinct consumer must land on the matching sub-surface or open a discussion about adding one — not on the `AgentDB` top-level namespace.

@@ -299,8 +299,25 @@ The spec below (kept for the archival mechanics, which are still needed) origina
 
 Note before implementing whichever version is built: this spec's test fixtures import `SQLiteMemoryStore` from `agentdb.core.memory_store` and `SystemTables` from `agentdb.core.system_tables` — neither module exists. The actual equivalents are `MemoryStore` and `SystemStats`, both defined inline in `agentdb/interface/client.py` (see "Store + audit log" and "System tables" under Current Status → Partial). Adapt constructor signatures and imports accordingly before following this spec literally — the same kind of drift Task 7 had to work around.
 
+**Surface requirement (Principle 13 — added 2026-07-13):** `LifecycleManager` must be exposed as `db.lifecycle` on `AgentDB`, consistent with `db.gateway`, `db.system`, and `db.skills_api`. The existing top-level `db.record_outcome()` stays as a backward-compatible alias pointing to `db.lifecycle.record_outcome()`. `db.lifecycle.run_sweep()` is the only new entry point — not a top-level method.
+
+```python
+# agentdb/interface/client.py — wire-up
+from agentdb.governance.lifecycle_manager import LifecycleManager
+
+class AgentDB:
+    def __init__(self, ...):
+        ...
+        self.lifecycle = LifecycleManager(store=self._store, system=self._system)
+
+    # backward-compat alias
+    def record_outcome(self, session_id, agent_id, outcome_type, outcome_value):
+        return self.lifecycle.record_outcome(session_id, agent_id, outcome_type, outcome_value)
+```
+
 **Files:**
 - Create: `agentdb/governance/lifecycle_manager.py`
+- Modify: `agentdb/interface/client.py` (add `self.lifecycle` property + alias)
 - Create: `tests/unit/test_lifecycle.py`
 
 - [ ] **Step 1: Write failing tests**
@@ -1195,7 +1212,7 @@ Items (detail deferred to closer to Phase 4 completion):
 
 ## Decisions Log
 
-### Resolved (2026-07-13)
+### Resolved (2026-07-14)
 
 | Decision | Resolution |
 |---|---|
@@ -1210,6 +1227,7 @@ Items (detail deferred to closer to Phase 4 completion):
 | Conflict similarity threshold | 0.85 default. Configurable in `memory.yaml` under `retrieval.conflict_threshold`. |
 | Summarisation | Configurable callable: `AgentDB(summarizer=fn)`. Default `None` (truncation fallback). Attached to budget manager. `on_pre_compress` in Hermes adapter is the primary call site. |
 | Conflict queue UI format | `db.gateway.conflict_queue()` is the foundation. First concrete consumer: slack-assistant notification hook via `db.gateway.subscribe("conflict_detected", handler)`. No separate CLI/web surface in Phase 5. |
+| Surface consolidation pattern | Principle 13 added to architecture-principles.md. All future multi-method capabilities serving a distinct consumer must land on a named sub-surface (`db.X`), not top-level `AgentDB`. Confirmed table: `db.gateway` (Task 16), `db.lifecycle` (Task 9), `db.providers` (Task 10), `db.system`/`db.skills_api`/`db.audit_log` (implemented). `db.lifecycle` specifically requires `LifecycleManager` exposed as `db.lifecycle`; `db.record_outcome()` becomes a backward-compat alias. |
 
 ### Open (resolve before starting the relevant phase)
 
