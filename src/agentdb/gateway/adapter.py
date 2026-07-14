@@ -20,6 +20,10 @@ class GatewayAdapter:
 
     Subclasses should call super().__init__(db, agent_id, profile) and may
     override prepare_turn, pre_tool_use, and finalize_turn.
+
+    ``self.profile_name`` holds the raw profile string passed at construction.
+    Subclasses that resolve it to a typed object (e.g. ClaudeAdapterProfile)
+    should store that resolved form in ``self.profile``, shadowing this base.
     """
 
     def __init__(
@@ -30,7 +34,7 @@ class GatewayAdapter:
     ) -> None:
         self._db = db
         self._agent_id = agent_id
-        self._profile = profile
+        self.profile_name: str = profile
         self.gateway: "Gateway" = db.gateway
 
     def prepare_turn(self, user_query: str, session_id: str) -> None:  # pragma: no cover

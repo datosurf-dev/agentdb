@@ -4,6 +4,7 @@ import json
 import os
 import sqlite3
 import uuid
+import warnings
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -601,11 +602,19 @@ class AgentDB:
         self._session_record_ids: dict[str, list[str]] = {}
         self._ranker = MultiSignalRanker()
 
-        # Reconciliation handlers (kept for backward-compat; delegates to gateway)
-        self._reconciliation_handlers: dict[str, list[Callable]] = {}
-
         # Gateway surface (initialized after all dependencies are ready)
         self._gateway: Optional[Gateway] = None
+
+    @property
+    def _reconciliation_handlers(self) -> dict[str, list[Callable]]:  # type: ignore[override]
+        """Deprecated — handlers now live in db.gateway._handlers."""
+        warnings.warn(
+            "AgentDB._reconciliation_handlers is deprecated and will be removed in a future version. "
+            "Use db.gateway._handlers instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return self.gateway._handlers
 
     @property
     def gateway(self) -> Gateway:
