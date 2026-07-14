@@ -91,10 +91,10 @@ See `docs/superpowers/plans/completed-tasks.md` for the full synthesized record 
 2. ~~Fix the skill health-score bug (Task 8)~~ — done 2026-07-11.
 3. ~~Wire `delete()` through the permission router + audit log~~ — done 2026-07-11 (`list()` per-agent scoping gap remains).
 4. ~~Build Task 7 (multi-signal ranking)~~ — done 2026-07-11 (semantic signal still deferred to Phase 3; budget/conflict-detection pieces remain Task 6 gaps).
-5. **Build `db.gateway` package (Task 16, updated 2026-07-13):** create `agentdb/gateway/__init__.py` (`Gateway` class) and `agentdb/gateway/adapter.py` (`GatewayAdapter` base class); add `db.gateway` property to `AgentDB`; keep `register_reconciliation_handler`/`dispatch_reconciliation_trigger` as pass-through aliases (no breaking change); migrate `AgentDBClaudeMiddleware` to inherit `GatewayAdapter` (one-line class declaration change). This is the foundation all subsequent adapters and the proposal workflow build on.
-6. **Public client gap — real conflict detection + budgeted retrieval (top functional priority, updated 2026-07-13):** `conflicts=[]` is hardcoded, `conflict_id` is never populated, no `budget_tokens` param. Blocks Task 9's per-record lifecycle decisions, `db.gateway.conflict_queue()`, and the dead `override_instructions` field. When built, conflict detection must also call `db.gateway.dispatch("conflict_detected", ...)` so 12b consumers (slack-assistant, Hermes adapter) are notified.
-7. **Task 9 — lifecycle manager (scope updated 2026-07-13):** on-demand `db.lifecycle.run_sweep()` only — no background scheduler. Includes both archival (records below threshold or stale past `STALENESS_DAYS`) and configurable confidence decay (off by default, gentle rate, `agent_inferred`/`provider_ingested` only, human-approved immune). See Task 9 spec below for the full design; note the module path drift warning there applies.
-8. **Hermes adapter — `agentdb/adapters/hermes.py` (updated 2026-07-13):** implement Hermes's `MemoryProvider` ABC as a `GatewayAdapter` subclass. Direct Python import, no sidecar. Full hook mapping and open questions in `docs/integrations/hermes.md`. Build before OpenClaw.
+5. ~~Build `db.gateway` package (Task 16)~~ — done 2026-07-14 (commits 00dd95e..5bc0848 + a1f6c4d). `Gateway` + `GatewayAdapter`; proposal workflow; conflict queue wired to real store; `AgentDBClaudeMiddleware` migrated.
+6. ~~Public client gap — real conflict detection + budgeted retrieval~~ — done 2026-07-14 (commits bbe7ffb..ab4e6aa). `ConflictDetector` (temporal + authority); `budget_tokens` on `retrieve()`; `token_estimate`/`truncated` on `RetrievalResult`; conflict dispatch via `db.gateway`.
+7. ~~Task 9 — lifecycle manager~~ — done 2026-07-14 (commit 7e315e1). `db.lifecycle.run_sweep()`; archival + reinforce + `record_outcome`; `MemoryStore`/`SystemStats` extracted to `agentdb/core/`.
+8. ~~Hermes adapter — `agentdb/adapters/hermes.py`~~ — done 2026-07-14 (commits 4ba16eb..6940fa7). `AgentDBHermesProvider`; 14 hooks; Principle 12a proven via shim tests.
 9. ~~deepagents.py~~ — deprioritized 2026-07-13. `AgentDBBackend` already covers it generically. Build the OpenClaw adapter instead once Hermes is done (`docs/integrations/openclaw.md`).
 10. **OpenClaw adapter — `agentdb/adapters/openclaw.py`:** local Python sidecar (HTTP); points at the same `AgentDB` instance the Hermes adapter uses. Three open questions in `docs/integrations/openclaw.md` must be resolved before writing code.
 
@@ -291,7 +291,7 @@ Weighted sum decays older outcomes. Recent outcomes count more.
 
 **Type: 12b, async integrity check** (per `docs/context/architecture-principles.md` Principle 12) — runs independent of any agent's turn; must be auditable and have a named trigger (a sweep call, not silent).
 
-**Status: not started. Scope narrowed 2026-07-11 — reconsider the confidence-decay half before implementing.**
+**Status: complete (2026-07-14). Commits 7e315e1. Decay off by default (CONFIDENCE_DECAY_RATE=0.0); archival + reinforce + record_outcome implemented. MemoryStore/SystemStats extracted to agentdb/core/. Exposed as db.lifecycle; db.record_outcome() kept as backward-compat alias.**
 
 The spec below (kept for the archival mechanics, which are still needed) originally paired two behaviors: (1) scheduled confidence decay on unretrieved records, and (2) archival of records that fall below a confidence/staleness threshold. (1) is likely redundant now: the ranking algorithm (Task 7, shipped) already applies exponential recency decay to a record's *effective* relevance at every `retrieve()` call (`exp(-λ·days)`, see Algorithm Reference above) — a stale record already sinks in ranking without anyone mutating its stored `confidence`. Skills already use the better pattern for this: health score is computed at read time and never stored (per the algorithm-review skill's own rule). A scheduled background job that mutates stored `confidence` on a timer is exactly the kind of memory-asset bookkeeping Design Principle 1a/11 says to avoid unless it demonstrably improves action quality — and nothing here has been shown to.
 
@@ -522,7 +522,7 @@ git commit -m "feat: lifecycle manager — confidence decay, staleness archival,
 ## Phase 3 — Provider Ingestion
 **Exit criterion: all three provider ingestors sync. Org knowledge tier documented and queryable via system tables.**
 
-**Status: not started.** Gated behind the core loop stabilizing per Design Principle 10 — the ranking algorithm (Task 7) is now in place, but the "biggest remaining gap" (budgeted retrieval + real conflict detection, see Current Status) should land before this phase starts.
+**Status: not started.** Gate cleared 2026-07-14 — budgeted retrieval + real conflict detection shipped (commits bbe7ffb..ab4e6aa). Phase 3 is now unblocked.
 
 ### Task 10: Provider Ingestors (Anthropic, OpenAI, Google)
 
@@ -1108,6 +1108,8 @@ Full task expansion after Phase 3 is complete.
 
 **Build order updated 2026-07-13:** Hermes first, then OpenClaw. deepagents deprioritized — `AgentDBBackend` already covers it generically and no real consumer has asked for the dedicated adapter. All adapters must subclass `GatewayAdapter` (Task 16) — never call `db.register_reconciliation_handler`/`dispatch_reconciliation_trigger` directly.
 
+**Hermes status: complete (2026-07-14). Commits 4ba16eb..6940fa7 + a1f6c4d. AgentDBHermesProvider implements MemoryProvider ABC + GatewayAdapter; 14 hooks; Principle 12a proven via HermesMemoryManagerShim tests. OpenClaw not started.**
+
 **Files:**
 - Create: `agentdb/adapters/hermes.py` — implement Hermes's `MemoryProvider` ABC as a `GatewayAdapter` subclass. Direct Python import, no sidecar. Full design in `docs/integrations/hermes.md`. **Build this first.**
 - Create: `agentdb/adapters/openclaw.py` — local Python sidecar (HTTP). Governance wrapper approach (C). Three open questions in `docs/integrations/openclaw.md` must be resolved before writing code. **Build after Hermes.**
@@ -1118,7 +1120,7 @@ Full task expansion after Phase 3 is complete.
 
 ### Task 16: `db.gateway` Package
 
-**Status: not started. Designed 2026-07-13.**
+**Status: complete (2026-07-14). Commits 00dd95e..5bc0848 (impl) + a1f6c4d (final fixes). Gateway class + GatewayAdapter base; proposal workflow; conflict queue wired to real store.list_conflicts(). AgentDBClaudeMiddleware updated to inherit GatewayAdapter.**
 
 **Type:** Conceptual unification — not a new runtime process. `Gateway` wraps the existing in-memory reconciliation dispatcher and adds the proposal workflow surface. No new event bus, no new storage.
 
@@ -1214,7 +1216,7 @@ Items (detail deferred to closer to Phase 4 completion):
 | Org knowledge tier (`memory/org/`) has no automated ingestion in v1 | Phase 1 | Content must be written manually or via SDK; automated ingestion from internal wikis/docs is post-launch scope |
 | numpy not installed by default | Phase 1–3 | `pip install agentdb[embeddings]` activates numpy-backed semantic scoring; pure Python fallback is always available |
 | Google Vertex AI provider is experimental | Phase 3 | MemoryBankService API is less stable than Anthropic/OpenAI equivalents. Treat as beta. Pin to specific API version in provider code. |
-| Real conflict detection not active (`conflicts=[]` hardcoded, `conflict_id` never populated) | Phase 1–4 | Public client Task 6 gap — see Current Status → Partial → Public client |
+| ~~Real conflict detection not active~~ | ~~Phase 1–4~~ | Done 2026-07-14 — `ConflictDetector` wired into `write()`/`retrieve()` |
 | No budgeted context assembly (`budget_tokens`/`token_estimate`/`truncated`) | Phase 1–4 | Public client Task 6 gap — see Current Status → Partial → Public client |
 
 ---
@@ -1225,7 +1227,7 @@ Items (detail deferred to closer to Phase 4 completion):
 
 | Decision | Resolution |
 |---|---|
-| Recommended next actions ordering | `db.gateway` (Task 16) → public client gap → Task 9 → Hermes adapter → OpenClaw adapter |
+| Recommended next actions ordering | ~~`db.gateway` → public client gap → Task 9 → Hermes adapter~~ all done 2026-07-14 → **OpenClaw adapter** → Phase 3 (Task 10 provider ingestors) |
 | Adapter order | Hermes first (`MemoryProvider` ABC, direct Python), OpenClaw second (sidecar). deepagents deprioritized. |
 | OpenClaw integration shape | (C) governance wrapper — not backend replacement (A) or additive layer (B). See `docs/integrations/openclaw-hermes-assessment.md`. |
 | Task 9 scope | Configurable on-demand sweep (`db.lifecycle.run_sweep()`): archival + gentle decay (off by default). No background scheduler. |
