@@ -91,8 +91,12 @@ See `docs/superpowers/plans/completed-tasks.md` for the full synthesized record 
 2. ~~Fix the skill health-score bug (Task 8)~~ — done 2026-07-11.
 3. ~~Wire `delete()` through the permission router + audit log~~ — done 2026-07-11 (`list()` per-agent scoping gap remains).
 4. ~~Build Task 7 (multi-signal ranking)~~ — done 2026-07-11 (semantic signal still deferred to Phase 3; budget/conflict-detection pieces remain Task 6 gaps).
-5. **Build `deepagents.py` only** (not yet started; scope narrowed 2026-07-11 — see Task 15): flagship per Design Principle 2, using `tests/integration/test_deepagents_adapter.py` as acceptance criteria. The other five adapters (`langgraph.py`, `autogen.py`, `crewai.py`, `openai_agents.py`, `google_adk.py`) are deferred until a specific framework's users actually ask for one — `AgentDBBackend` already covers any framework generically without a dedicated adapter, per the README's own working example.
-6. After the adapter re-plan, the next highest-value gap is the public client's budgeted retrieval + real conflict detection (see "Public client" under Partial, above) — it blocks Task 9's per-record lifecycle decisions and the dead `override_instructions` field.
+5. **Build `db.gateway` package (Task 16, updated 2026-07-13):** create `agentdb/gateway/__init__.py` (`Gateway` class) and `agentdb/gateway/adapter.py` (`GatewayAdapter` base class); add `db.gateway` property to `AgentDB`; keep `register_reconciliation_handler`/`dispatch_reconciliation_trigger` as pass-through aliases (no breaking change); migrate `AgentDBClaudeMiddleware` to inherit `GatewayAdapter` (one-line class declaration change). This is the foundation all subsequent adapters and the proposal workflow build on.
+6. **Public client gap — real conflict detection + budgeted retrieval (top functional priority, updated 2026-07-13):** `conflicts=[]` is hardcoded, `conflict_id` is never populated, no `budget_tokens` param. Blocks Task 9's per-record lifecycle decisions, `db.gateway.conflict_queue()`, and the dead `override_instructions` field. When built, conflict detection must also call `db.gateway.dispatch("conflict_detected", ...)` so 12b consumers (slack-assistant, Hermes adapter) are notified.
+7. **Task 9 — lifecycle manager (scope updated 2026-07-13):** on-demand `db.lifecycle.run_sweep()` only — no background scheduler. Includes both archival (records below threshold or stale past `STALENESS_DAYS`) and configurable confidence decay (off by default, gentle rate, `agent_inferred`/`provider_ingested` only, human-approved immune). See Task 9 spec below for the full design; note the module path drift warning there applies.
+8. **Hermes adapter — `agentdb/adapters/hermes.py` (updated 2026-07-13):** implement Hermes's `MemoryProvider` ABC as a `GatewayAdapter` subclass. Direct Python import, no sidecar. Full hook mapping and open questions in `docs/integrations/hermes.md`. Build before OpenClaw.
+9. ~~deepagents.py~~ — deprioritized 2026-07-13. `AgentDBBackend` already covers it generically. Build the OpenClaw adapter instead once Hermes is done (`docs/integrations/openclaw.md`).
+10. **OpenClaw adapter — `agentdb/adapters/openclaw.py`:** local Python sidecar (HTTP); points at the same `AgentDB` instance the Hermes adapter uses. Three open questions in `docs/integrations/openclaw.md` must be resolved before writing code.
 
 ## Design Principles
 
@@ -999,7 +1003,7 @@ Outline of what Task 12 will deliver:
 
 **Status: not started. Designed 2026-07-11, out of a session-long discussion about whether AgentDB's own async (12b) capabilities could help this repo remember its own process rules** (specifically: migrate completed plan tasks to `completed-tasks.md`, delete fully-completed plan files). That discussion concluded the answer for *this repo's own maintenance* is "no" — no Claude Code session working on agentdb is wired to retrieve from an AgentDB instance, so there's no attachment point for a hook or a dispatch to reach. But the underlying capability — turn a recurring, human-approved instruction into a governed skill, with conflict-aware reconciliation before it's committed — is a real, general AgentDB feature in its own right, useful for any deployment where an agent is wired to AgentDB (e.g. slack-assistant). This task builds that feature, not something specific to this repo.
 
-**Dependencies (why this sits here, not earlier):** Task 12 (semantic conflict detection) for reconciling drafts against existing skills/other drafts/changed files by meaning, not just exact keyword overlap; Task 11 (embeddings) as Task 12's own prerequisite; the skill store (`skills/skill_store.py`, done) and skill-store governance fix below; the notifier dispatcher (`register_reconciliation_handler`/`dispatch_reconciliation_trigger`, done); `agentdb_stats()` (done).
+**Dependencies (why this sits here, not earlier):** Task 12 (semantic conflict detection) for reconciling drafts against existing skills/other drafts/changed files by meaning, not just exact keyword overlap; Task 11 (embeddings) as Task 12's own prerequisite; the skill store (`skills/skill_store.py`, done) and skill-store governance fix below; `db.gateway` (Task 16) for the `propose`/`approve`/`reject` surface and the `dispatch` call; `agentdb_stats()` (done).
 
 **Design directive: recycle methods, don't invent parallel ones.** Every piece of this pipeline reuses an existing mechanism rather than adding a new subsystem next to it — that's not a style preference, it's the point of the design. Reuse map:
 
@@ -1009,7 +1013,7 @@ Outline of what Task 12 will deliver:
 | Classify update-vs-create | Same keyword/entity matching `retrieve_by_entities()` already does, against existing skills' `scope`/content | No new matcher |
 | Detect draft-vs-draft / draft-vs-skill conflicts | Task 12's conflict detector, applied to drafts as well as stored memories | No draft-specific conflict engine |
 | Detect draft-vs-changed-file conflicts | `core/file_integrity.py` (built 2026, never wired to anything — see `docs/context/capabilities.md`) as a cheap hash pre-filter, then Task 12's embeddings only when the hash actually changed | No new file-watching mechanism |
-| Notify a human reviewer | `dispatch_reconciliation_trigger("skill_draft_proposed"/"skill_draft_conflict", ...)` — the existing 12b mechanism (Design Principle 12b) | No new pub/sub |
+| Notify a human reviewer | `db.gateway.dispatch("skill_draft_proposed"/"skill_draft_conflict", ...)` — the existing 12b mechanism (Design Principle 12b), now accessed via `db.gateway` | No new pub/sub |
 | Metric-driven triggers | New fields on `agentdb_stats()` (repeated-correction cluster count, pending-draft backlog count), computed from the existing `outcomes` table and `memory/skill_drafts/*` records | No new stats surface |
 | Commit a draft | `skills_api.create_skill()` / `update_skill_version()` (existing) | No new skill-writing path |
 
@@ -1018,7 +1022,7 @@ Outline of what Task 12 will deliver:
 **Pipeline:**
 
 ```
-propose_skill_draft(name, content, scope, agent_id, entities=None, session_id=None)
+db.gateway.propose(name, content, scope, agent_id, entities=None, session_id=None)
     → classify: match content/entities against existing skills (reuse retrieve_by_entities matching)
         → action="update"(target_skill_id) if a good match, else action="create"
     → reconcile (batch, not isolated to this one draft):
@@ -1027,27 +1031,27 @@ propose_skill_draft(name, content, scope, agent_id, entities=None, session_id=No
         - vs. files tagged with the same entities: file_integrity hash changed since draft/skill was last touched?
           → if yes, escalate to Task 12's semantic comparison to decide if the change is meaningfully conflicting
     → write memory/skill_drafts/{draft_id}  (status="pending"|"conflicted", action, target_skill_id, conflicts=[...])
-    → dispatch_reconciliation_trigger("skill_draft_proposed" | "skill_draft_conflict", draft_id=..., agent_id=..., session_id=...)
+    → db.gateway.dispatch("skill_draft_proposed" | "skill_draft_conflict", draft_id=..., agent_id=..., session_id=...)
 
 [metric triggers, computed from existing data, not a new scheduler]
     → agentdb_stats() gains: repeated_correction_cluster_count (human_correction outcomes sharing entities, in a window),
       skill_draft_backlog_count (pending drafts)
-    → either crossing a threshold → dispatch_reconciliation_trigger("skill_candidate_threshold_reached" | "skill_draft_backlog_high", ...)
+    → either crossing a threshold → db.gateway.dispatch("skill_candidate_threshold_reached" | "skill_draft_backlog_high", ...)
 
-approve_skill_draft(draft_id, resolution=None)
+db.gateway.approve(draft_id, resolution=None)
     → if status == "conflicted": require an explicit resolution argument, refuse otherwise
     → action="create" → skills_api.create_skill(...); action="update" → skills_api.update_skill_version(...)
     → archive the draft record, audit-log skill_draft_approved
 
-reject_skill_draft(draft_id, reason=None)
+db.gateway.reject(draft_id, reason=None)
     → archive the draft record, audit-log skill_draft_rejected, skills.sqlite untouched
 ```
 
-**Open question, decide before implementing:** whether `approve_skill_draft`/`reject_skill_draft`/`propose_skill_draft` live directly on `AgentDB`, or on a new small `SkillDraftsAPI` parallel to `SkillsAPI` — leaning toward the latter for the same reason `SkillsAPI` exists as its own surface rather than more methods on `AgentDB`.
+**Decision resolved 2026-07-13:** `propose`/`approve`/`reject` live on `db.gateway` — a unified `Gateway` class (see Task 16) that also owns `subscribe`/`dispatch`/`conflict_queue`. Not on `AgentDB` directly and not a separate `SkillDraftsAPI` — `db.gateway` is the single surface for all routing, notification, and proposal workflow concerns.
 
 **Implementation order** (per this repo's TDD convention — tests first for each slice):
 1. `SkillStore.update()` governance fix (prerequisite, standalone, no dependency on the rest).
-2. `propose_skill_draft`/`approve_skill_draft`/`reject_skill_draft` with classification, no conflict-checking yet (draft always `status="pending"`).
+2. `db.gateway.propose`/`approve`/`reject` with classification, no conflict-checking yet (draft always `status="pending"`).
 3. Conflict reconciliation (depends on Task 12 existing — do not build a bespoke keyword-only conflict heuristic here as a stand-in; wait for Task 12 rather than duplicating it in a phase-inconsistent way, per Design Principle 8).
 4. Metric-driven triggers.
 
@@ -1064,22 +1068,93 @@ reject_skill_draft(draft_id, reason=None)
 **Files:**
 - Create: `agentdb/interface/mcp_server.py`
 
-**Reframed 2026-07-11 — this is not an event-bus-subsystem build.** All 4 tools map to functionality that already exists or is already planned: `memory_write`/`memory_retrieve` wrap `write()`/`retrieve()`; `conflict_queue` and `memory_subscribe` both just call `db.register_reconciliation_handler(trigger, handler)` — the existing live, in-memory dispatcher (see Current Status → Done, and `docs/context/capabilities.md`) — to register an MCP-side callback against `conflict_detected` (and any other trigger a consumer wants). There is no separate "event bus subsystem" to design or build; the durable/sequence-numbered version Design Principle 7 originally implied is explicitly *not* the default and should only be added later if a specific consumer would lose real value from a missed notification during a restart.
+**Reframed 2026-07-11 — this is not an event-bus-subsystem build.** All 4 tools map to functionality that already exists or is already planned: `memory_write`/`memory_retrieve` wrap `write()`/`retrieve()`; `conflict_queue` and `memory_subscribe` both just call `db.gateway.subscribe(trigger, handler)` — the existing live, in-memory dispatcher now accessed via `db.gateway` (Task 16, see `docs/context/capabilities.md`) — to register an MCP-side callback against `conflict_detected` (and any other trigger a consumer wants). There is no separate "event bus subsystem" to design or build; the durable/sequence-numbered version Design Principle 7 originally implied is explicitly *not* the default and should only be added later if a specific consumer would lose real value from a missed notification during a restart.
 
-**Sequencing:** ship `memory_write`/`memory_retrieve` first (no new dependency). `conflict_queue`/`memory_subscribe` are blocked on Task 6's real conflict detection dispatching a `conflict_detected` trigger in the first place — there's nothing meaningful to subscribe to until stored records actually get flagged. Once that exists, `conflict_queue`/`memory_subscribe` are a few lines of MCP-side handler registration, not new plumbing.
+**Sequencing:** ship `memory_write`/`memory_retrieve` first (no new dependency). `conflict_queue`/`memory_subscribe` are blocked on Task 6's real conflict detection dispatching a `conflict_detected` trigger in the first place — there's nothing meaningful to subscribe to until stored records actually get flagged. Once that exists, `conflict_queue`/`memory_subscribe` are a few lines of MCP-side handler registration against `db.gateway`, not new plumbing.
 
-Note this also means a Slack/Telegram notifier doesn't need MCP or this task at all — a host app (e.g. slack-assistant) can call `db.register_reconciliation_handler("conflict_detected", ...)` directly once Task 6 dispatches that trigger, entirely independent of whether Task 14 ever ships.
+Note this also means a Slack/Telegram notifier doesn't need MCP or this task at all — a host app (e.g. slack-assistant, or the Hermes adapter) can call `db.gateway.subscribe("conflict_detected", handler)` directly once Task 6 dispatches that trigger, entirely independent of whether Task 14 ever ships.
 
 Full task expansion after Phase 3 is complete.
 
 ### Task 15: Framework Adapters
 
-**Type: 12a, real-time enforcement.** Per `docs/context/architecture-principles.md` Principle 12, this adapter is not "done" on API existence alone — it must name the exact point in deepagents' own control flow where AgentDB governance executes (the equivalent of Claude SDK's `PreToolUse` + `prepare_turn`), and a test must prove that framework-triggered point changes what context/instructions reach the agent.
+**Type: 12a, real-time enforcement.** Per `docs/context/architecture-principles.md` Principle 12, an adapter is not "done" on API existence alone — it must name the exact point in the framework's own control flow where AgentDB governance executes, and a test must prove that framework-triggered point changes what context/instructions reach the agent.
+
+**Build order updated 2026-07-13:** Hermes first, then OpenClaw. deepagents deprioritized — `AgentDBBackend` already covers it generically and no real consumer has asked for the dedicated adapter. All adapters must subclass `GatewayAdapter` (Task 16) — never call `db.register_reconciliation_handler`/`dispatch_reconciliation_trigger` directly.
 
 **Files:**
-- Create: `agentdb/adapters/deepagents.py`
+- Create: `agentdb/adapters/hermes.py` — implement Hermes's `MemoryProvider` ABC as a `GatewayAdapter` subclass. Direct Python import, no sidecar. Full design in `docs/integrations/hermes.md`. **Build this first.**
+- Create: `agentdb/adapters/openclaw.py` — local Python sidecar (HTTP). Governance wrapper approach (C). Three open questions in `docs/integrations/openclaw.md` must be resolved before writing code. **Build after Hermes.**
+- Defer: `agentdb/adapters/deepagents.py` — deprioritized; `AgentDBBackend` covers it generically today.
+- Defer: `langgraph.py`, `crewai.py`, `openai_agents.py`, `google_adk.py`, `autogen.py` — build only when a specific framework's users ask for one.
 
-**Scope narrowed 2026-07-11:** build `deepagents.py` only, for now. Design Principle 2 names it the flagship integration; README's own "drop into your stack in 30 minutes" pitch already demonstrates full deepagents integration using the generic `AgentDBBackend` with no dedicated adapter module at all. Committing to 5 more full adapters (`langgraph.py`, `crewai.py`, `openai_agents.py`, `google_adk.py`, `autogen.py`) before any of them has a real consumer is exactly the integration-breadth-before-core-loop-stable pattern Design Principle 10 / the README's "Execution Strategy" warns against — `AgentDBBackend` already covers any framework with pluggable key-value storage without a bespoke adapter. Build the next one only when a specific framework's users actually ask for it, using its existing `test_*_adapter.py` file as acceptance criteria.
+---
+
+### Task 16: `db.gateway` Package
+
+**Status: not started. Designed 2026-07-13.**
+
+**Type:** Conceptual unification — not a new runtime process. `Gateway` wraps the existing in-memory reconciliation dispatcher and adds the proposal workflow surface. No new event bus, no new storage.
+
+**Why now (before the public client gap):** the public client gap will need to call `db.gateway.dispatch("conflict_detected", ...)` when it lands. All new adapters (Hermes, OpenClaw) and the Task 13 proposal workflow build on `db.gateway`. Building this first keeps everything downstream consistent and avoids a second migration later.
+
+**Files:**
+- Create: `agentdb/gateway/__init__.py` — `Gateway` class
+- Create: `agentdb/gateway/adapter.py` — `GatewayAdapter` base class
+- Modify: `agentdb/interface/client.py` — add `db.gateway` property; keep `register_reconciliation_handler`/`dispatch_reconciliation_trigger` as pass-through aliases (no breaking change)
+- Modify: `agentdb/adapters/claude_agent_sdk.py` — inherit `GatewayAdapter` (one-line class declaration change); use `self.gateway.subscribe`/`dispatch` for any new notification wiring
+- Create: `tests/unit/test_gateway.py`
+
+**`Gateway` class surface:**
+
+```python
+class Gateway:
+    # Reconciliation (moved from AgentDB top-level — aliases kept there)
+    def subscribe(self, trigger: str, handler: Callable) -> None: ...
+    def dispatch(self, trigger: str, **kwargs) -> None: ...
+
+    # Conflict queue (was planned for MCP Task 14 — now lives here)
+    def conflict_queue(self, resolved: bool = False) -> list[dict]: ...
+
+    # Proposal workflow (was Task 13's open question — now resolved)
+    def propose(self, name, content, scope, agent_id, entities=None, session_id=None) -> str: ...
+    def approve(self, proposal_id: str, resolution=None) -> None: ...
+    def reject(self, proposal_id: str, reason=None) -> None: ...
+    def list_proposals(self, status: str = "pending") -> list[dict]: ...
+```
+
+**`GatewayAdapter` base class:**
+
+```python
+class GatewayAdapter:
+    def __init__(self, db: "AgentDB", agent_id: str, profile: str = "budget_optimized"):
+        self._db = db
+        self._agent_id = agent_id
+        self._profile = profile
+        self.gateway = db.gateway  # direct reference, no extra wiring
+
+    # Subclasses implement these (pattern follows Hermes MemoryProvider — not enforced as ABC)
+    def prepare_turn(self, user_query: str, session_id: str): ...
+    def pre_tool_use(self, tool_name: str, tool_input: dict, session_id: str): ...
+    def finalize_turn(self, session_id: str, **kwargs): ...
+```
+
+**Backward compatibility:** `AgentDB.register_reconciliation_handler` and `AgentDB.dispatch_reconciliation_trigger` remain as pass-through aliases to `db.gateway.subscribe`/`dispatch`. No existing call sites break. Aliases are not deprecated yet — remove them only when all known consumers have migrated.
+
+**`propose`/`approve`/`reject` in this task:** implement the surface and storage only (write draft as `agent_inferred` memory record, archive on approve/reject, audit-log each step). Conflict reconciliation is Task 13 scope (depends on Task 12). In this task, drafts always start as `status="pending"`.
+
+**Tests to write:**
+```python
+# tests/unit/test_gateway.py
+def test_subscribe_and_dispatch_fires_handler()
+def test_conflict_queue_empty_before_any_conflicts()
+def test_propose_writes_memory_record()
+def test_approve_calls_skills_api()
+def test_reject_archives_draft_without_touching_skills()
+def test_list_proposals_filters_by_status()
+def test_gateway_adapter_inherits_gateway_reference()
+def test_claude_middleware_still_works_after_migration()  # regression
+```
 
 ---
 
@@ -1118,11 +1193,29 @@ Items (detail deferred to closer to Phase 4 completion):
 
 ---
 
-## Decisions Required Before Proceeding
+## Decisions Log
 
-| Decision | Needed before | Options |
+### Resolved (2026-07-13)
+
+| Decision | Resolution |
+|---|---|
+| Recommended next actions ordering | `db.gateway` (Task 16) → public client gap → Task 9 → Hermes adapter → OpenClaw adapter |
+| Adapter order | Hermes first (`MemoryProvider` ABC, direct Python), OpenClaw second (sidecar). deepagents deprioritized. |
+| OpenClaw integration shape | (C) governance wrapper — not backend replacement (A) or additive layer (B). See `docs/integrations/openclaw-hermes-assessment.md`. |
+| Task 9 scope | Configurable on-demand sweep (`db.lifecycle.run_sweep()`): archival + gentle decay (off by default). No background scheduler. |
+| SkillDraftsAPI vs AgentDB | Resolved as `db.gateway.propose`/`approve`/`reject`/`list_proposals` — unified `Gateway` surface (Task 16). |
+| Conflict queue UI | `db.gateway.conflict_queue()` — foundation for any consumer (MCP, CLI, Slack/Telegram notifier). |
+| `register_reconciliation_handler` / `dispatch` placement | Moved to `db.gateway.subscribe` / `db.gateway.dispatch`. Pass-through aliases kept on `AgentDB`. |
+| Embedding model default | `nomic-embed-text-v1.5` (768 dims, Apache 2.0). Configurable in `memory.yaml` under `embeddings.model`. |
+| Conflict similarity threshold | 0.85 default. Configurable in `memory.yaml` under `retrieval.conflict_threshold`. |
+| Summarisation | Configurable callable: `AgentDB(summarizer=fn)`. Default `None` (truncation fallback). Attached to budget manager. `on_pre_compress` in Hermes adapter is the primary call site. |
+| Conflict queue UI format | `db.gateway.conflict_queue()` is the foundation. First concrete consumer: slack-assistant notification hook via `db.gateway.subscribe("conflict_detected", handler)`. No separate CLI/web surface in Phase 5. |
+
+### Open (resolve before starting the relevant phase)
+
+| Decision | Needed before | Notes |
 |---|---|---|
-| Embedding model | Phase 4 | local:all-MiniLM-L6-v2 / openai:text-embedding-3-small / voyage:voyage-3 |
-| Conflict similarity threshold | Phase 4 | Start at 0.85, needs labelled test set to tune |
-| Conflict queue UI format | Phase 6 | CLI / web / Slack |
-| Summarisation model | Phase 4+ | Only if summarisation opted in |
+| OpenClaw hook names | `openclaw.py` adapter | Exact turn-lifecycle hook name(s) for pre-response/post-response unverified — confirm via OpenClaw plugin SDK docs. See `docs/integrations/openclaw.md` open questions. |
+| OpenClaw sidecar latency | `openclaw.py` adapter | Confirm latency cost of sidecar call inside `before_tool_call`'s inline path is acceptable. |
+| OpenClaw memory-core migration | `openclaw.py` adapter | Backfill story from memory-core's existing SQLite index for opted-in agents. |
+| Conflict similarity threshold tuning | Phase 4 | 0.85 is the starting default; needs a labelled test set to tune against real conflict pairs. |
