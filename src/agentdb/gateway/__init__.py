@@ -118,7 +118,7 @@ class Gateway:
             scope=payload["scope"],
         )
 
-        # Mark approved in a new record then archive via delete
+        # Archive the proposal record now that the skill has been created
         self._db._store.delete_by_key(f"proposal/{proposal_id}")
 
         self._db.audit_log.append(

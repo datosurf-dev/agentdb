@@ -114,7 +114,7 @@ class LifecycleManager:
     def reinforce(self, record_id: str) -> None:
         """Boost confidence toward 1.0 and reset last_retrieved."""
         record = self._store.get_by_id(record_id)
-        if record is None:
+        if record is None or record.archived:
             return
         if _origin_value(record.origin) == Origin.HUMAN_APPROVED.value:
             return  # immune

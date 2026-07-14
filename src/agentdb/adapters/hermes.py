@@ -211,7 +211,9 @@ class AgentDBHermesProvider(MemoryProvider, GatewayAdapter):
         governed_targets = {"MEMORY.md", "DREAMS.md"}
         if Path(target).name not in governed_targets:
             return
-        # Write a mirror record to AgentDB for audit/retrieval
+        # Permission check is intentionally skipped here: this is a governance mirror of a
+        # Hermes-native write that already passed Hermes's own permission checks. AgentDB
+        # records the write for provenance tracking but cannot and should not re-gate it.
         self._db.write(
             key=f"memory/hermes-mirror/{self._agent_id}/{target}",
             value=content,

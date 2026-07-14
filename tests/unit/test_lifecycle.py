@@ -87,3 +87,12 @@ def test_decay_applied_when_rate_nonzero(store, manager):
     updated = store.get_by_id(r.id)
     assert updated is not None
     assert updated.confidence < 1.0
+
+
+def test_reinforce_skips_archived_record(store, manager):
+    r = store.write(_rec(confidence=0.5))
+    store.archive_record(r.id)
+    manager.reinforce(r.id)
+    updated = store.get_by_id(r.id)
+    # confidence must be unchanged after reinforcing an archived record
+    assert updated.confidence == 0.5

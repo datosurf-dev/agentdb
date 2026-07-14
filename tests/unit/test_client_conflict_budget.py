@@ -165,7 +165,7 @@ def test_no_budget_tokens_returns_all_records(tmp_path):
 
     result = db.retrieve("value", agent_id="agent-a", limit=5)
     assert result.truncated is False
-    assert result.token_estimate >= 0  # may be 0 if no records match, but field exists
+    assert result.token_estimate > 0
 
 
 def test_retrieval_result_has_new_fields(tmp_path):
