@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable, Optional
 import json
 
 from ..core.directory_tracking import collect_directory_snapshots
+from ..gateway.adapter import GatewayAdapter
 
 if TYPE_CHECKING:
     from ..interface.client import AgentDB, RetrievalResult
@@ -99,11 +100,12 @@ class ClaudeRuntimeConfig:
     max_tokens: int = 1024
 
 
-class AgentDBClaudeMiddleware:
+class AgentDBClaudeMiddleware(GatewayAdapter):
     """
     Middleware-style helper for Claude Agent SDK integrations.
 
     Model calls are supplied as callbacks so this module stays runtime-agnostic.
+    Inherits GatewayAdapter for access to db.gateway (reconciliation, proposals).
     """
 
     def __init__(
@@ -115,8 +117,7 @@ class AgentDBClaudeMiddleware:
         memory_budget_chars: Optional[int] = None,
         conversation_started_callback: Optional[Callable[..., Any]] = None,
     ):
-        self._db = db
-        self._agent_id = agent_id
+        super().__init__(db, agent_id, profile)
         self._conversation_started_callback = conversation_started_callback
         if profile == "full_storage":
             base = FULL_STORAGE_PROFILE

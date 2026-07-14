@@ -13,6 +13,7 @@ from typing import Any, Callable, Optional
 import yaml
 
 from ..core.models import MemoryRecord, Skill
+from ..gateway import Gateway
 from ..governance.permission_router import PermissionDenied, PermissionRouter
 from ..retrieval.algorithm import MultiSignalRanker
 from ..skills.skill_store import SkillStore
@@ -600,8 +601,18 @@ class AgentDB:
         self._session_record_ids: dict[str, list[str]] = {}
         self._ranker = MultiSignalRanker()
 
-        # Reconciliation handlers
+        # Reconciliation handlers (kept for backward-compat; delegates to gateway)
         self._reconciliation_handlers: dict[str, list[Callable]] = {}
+
+        # Gateway surface (initialized after all dependencies are ready)
+        self._gateway: Optional[Gateway] = None
+
+    @property
+    def gateway(self) -> Gateway:
+        """Unified governance surface: reconciliation, conflict queue, proposals."""
+        if self._gateway is None:
+            self._gateway = Gateway(self)
+        return self._gateway
 
     def _init_outcomes_table(self) -> None:
         with self._store._connect() as conn:
@@ -923,12 +934,9 @@ class AgentDB:
         return len(adjusted_ids)
 
     def register_reconciliation_handler(self, trigger: str, handler: Callable) -> None:
-        if trigger not in self._reconciliation_handlers:
-            self._reconciliation_handlers[trigger] = []
-        self._reconciliation_handlers[trigger].append(handler)
+        """Backward-compat alias → db.gateway.subscribe(trigger, handler)."""
+        self.gateway.subscribe(trigger, handler)
 
     def dispatch_reconciliation_trigger(self, trigger: str, **kwargs) -> int:
-        handlers = self._reconciliation_handlers.get(trigger, [])
-        for handler in handlers:
-            handler(**kwargs)
-        return len(handlers)
+        """Backward-compat alias → db.gateway.dispatch(trigger, **kwargs)."""
+        return self.gateway.dispatch(trigger, **kwargs)
