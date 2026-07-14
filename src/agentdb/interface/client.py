@@ -224,7 +224,13 @@ class AgentDB:
         tracking_directories: Optional[list[str]] = None,
         tracking_root: Any = ".",
         tracking_max_files_per_directory: int = 200,
+        db_path: Optional[Any] = None,
+        summarizer: Optional[Callable] = None,
     ) -> None:
+        # db_path is an alias for path (used by adapter tests)
+        if db_path is not None and path is None:
+            path = db_path
+        self._summarizer = summarizer
         # Resolve memory_dir from args or env vars
         resolved_memory_dir: Optional[Path] = None
         if memory_dir is not None:
