@@ -32,6 +32,7 @@ class ClaudeAdapterProfile:
     retrieve_limit: int
     memory_budget_chars: int
     auto_persist_response: bool
+    memory_budget_tokens: Optional[int] = None
 
 
 FULL_STORAGE_PROFILE = ClaudeAdapterProfile(
@@ -115,10 +116,12 @@ class AgentDBClaudeMiddleware(GatewayAdapter):
         profile: str = "budget_optimized",
         retrieve_limit: Optional[int] = None,
         memory_budget_chars: Optional[int] = None,
+        memory_budget_tokens: Optional[int] = None,
         conversation_started_callback: Optional[Callable[..., Any]] = None,
     ):
         super().__init__(db, agent_id, profile)
         self._conversation_started_callback = conversation_started_callback
+        self.gateway.subscribe("conflict_detected", self._on_conflict)
         if profile == "full_storage":
             base = FULL_STORAGE_PROFILE
         else:
@@ -130,6 +133,9 @@ class AgentDBClaudeMiddleware(GatewayAdapter):
                 memory_budget_chars if memory_budget_chars is not None else base.memory_budget_chars
             ),
             auto_persist_response=base.auto_persist_response,
+            memory_budget_tokens=(
+                memory_budget_tokens if memory_budget_tokens is not None else base.memory_budget_tokens
+            ),
         )
 
     def prepare_turn(
@@ -152,6 +158,7 @@ class AgentDBClaudeMiddleware(GatewayAdapter):
                 session_id=session_id,
                 user_query=user_query,
             )
+        self.gateway.dispatch("conversation_started", session_id=session_id)
 
         retrieval = self._db.retrieve(
             query=user_query,
@@ -159,6 +166,7 @@ class AgentDBClaudeMiddleware(GatewayAdapter):
             limit=self.profile.retrieve_limit,
             external_context=external_context,
             session_id=session_id,
+            budget_tokens=self.profile.memory_budget_tokens,
         )
 
         messages: list[dict[str, str]] = []
@@ -430,6 +438,47 @@ class AgentDBClaudeMiddleware(GatewayAdapter):
         )
         return response_text
 
+    def _on_conflict(self, **payload) -> None:
+        """
+        Platform-agnostic conflict handler.
+        Concrete notification wiring is platform-specific (Slack, Telegram, etc.).
+        """
+        pass
+
+    def pending_conflicts(self, resolved: bool = False) -> list:
+        """Read-only view into db.gateway's conflict queue."""
+        return self.gateway.conflict_queue(resolved=resolved)
+
+    def propose_skill(
+        self,
+        name: str,
+        content: str,
+        scope: list[str],
+        entities: Optional[list[str]] = None,
+        session_id: Optional[str] = None,
+    ) -> str:
+        """Draft a skill proposal via db.gateway.propose(), scoped to this adapter's agent_id."""
+        return self.gateway.propose(
+            name=name,
+            content=content,
+            scope=scope,
+            agent_id=self._agent_id,
+            entities=entities,
+            session_id=session_id,
+        )
+
+    def approve_proposal(self, proposal_id: str, resolution: Optional[str] = None) -> None:
+        """Approve a pending proposal via db.gateway.approve()."""
+        self.gateway.approve(proposal_id, resolution=resolution)
+
+    def reject_proposal(self, proposal_id: str, reason: Optional[str] = None) -> None:
+        """Reject a pending proposal via db.gateway.reject()."""
+        self.gateway.reject(proposal_id, reason=reason)
+
+    def list_proposals(self, status: str = "pending") -> list[dict]:
+        """List proposals by status via db.gateway.list_proposals()."""
+        return self.gateway.list_proposals(status=status)
+
     def _response_key(self, session_id: str) -> str:
         ts = _utcnow().strftime("%Y%m%dT%H%M%S%f")
         return f"memory/episodic/claude/{self._agent_id}/{session_id}/{ts}"
@@ -613,6 +662,7 @@ class AgentDBClaudeRuntime:
         system_prompt: Optional[str] = None,
         retrieve_limit: Optional[int] = None,
         memory_budget_chars: Optional[int] = None,
+        memory_budget_tokens: Optional[int] = None,
         max_tokens: int = 1024,
     ) -> "AgentDBClaudeRuntime":
         middleware = AgentDBClaudeMiddleware(
@@ -621,6 +671,7 @@ class AgentDBClaudeRuntime:
             profile=profile,
             retrieve_limit=retrieve_limit,
             memory_budget_chars=memory_budget_chars,
+            memory_budget_tokens=memory_budget_tokens,
         )
 
         def _invoke(messages: list[dict[str, str]]) -> Any:
@@ -659,6 +710,7 @@ class AgentDBClaudeRuntime:
         system_prompt: Optional[str] = None,
         retrieve_limit: Optional[int] = None,
         memory_budget_chars: Optional[int] = None,
+        memory_budget_tokens: Optional[int] = None,
     ) -> "AgentDBClaudeRuntime":
         """
         Build a runtime that wraps a ClaudeSDKClient (agentic subprocess).
@@ -674,6 +726,7 @@ class AgentDBClaudeRuntime:
             profile=profile,
             retrieve_limit=retrieve_limit,
             memory_budget_chars=memory_budget_chars,
+            memory_budget_tokens=memory_budget_tokens,
         )
         instance = cls(
             middleware=middleware,

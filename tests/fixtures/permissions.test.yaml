@@ -12,6 +12,7 @@ agents:
       - "memory/episodic/"
       - "memory/provider/"
       - "config/agent/learned_prefs/research_*"
+      - "proposal/"
     cannot_write:
       - "config/human/"
       - "prompts/locked/"

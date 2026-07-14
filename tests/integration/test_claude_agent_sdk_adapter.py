@@ -91,6 +91,124 @@ def test_run_turn_full_storage_auto_persists_and_records_outcome(tmp_path):
     assert any(entry.event_type == EVENT_MEMORY_WRITE for entry in entries)
 
 
+def test_prepare_turn_passes_memory_budget_tokens_and_reports_truncation(tmp_path):
+    db = AgentDB(path=tmp_path / "test.db", permissions_path=PERMS)
+    for i in range(5):
+        db.write(
+            key=f"memory/working/note_{i}",
+            value="note " + ("x" * 200),
+            origin="agent_inferred",
+            agent_id="research_agent",
+            session_id="sess-budget-1",
+        )
+
+    middleware = AgentDBClaudeMiddleware(
+        db=db,
+        agent_id="research_agent",
+        profile="full_storage",
+        memory_budget_tokens=60,
+    )
+
+    _, retrieval = middleware.prepare_turn(
+        user_query="note",
+        session_id="sess-budget-1",
+    )
+
+    assert retrieval.truncated is True
+    assert retrieval.token_estimate <= 60
+
+
+def test_prepare_turn_without_memory_budget_tokens_does_not_truncate(tmp_path):
+    db = AgentDB(path=tmp_path / "test.db", permissions_path=PERMS)
+    db.write(
+        key="memory/working/note_0",
+        value="note " + ("x" * 200),
+        origin="agent_inferred",
+        agent_id="research_agent",
+        session_id="sess-budget-2",
+    )
+
+    middleware = AgentDBClaudeMiddleware(db=db, agent_id="research_agent", profile="full_storage")
+
+    _, retrieval = middleware.prepare_turn(
+        user_query="note",
+        session_id="sess-budget-2",
+    )
+
+    assert retrieval.truncated is False
+
+
+def test_middleware_init_registers_conflict_handler(tmp_path):
+    db = AgentDB(path=tmp_path / "test.db", permissions_path=PERMS)
+    AgentDBClaudeMiddleware(db=db, agent_id="research_agent", profile="budget_optimized")
+    assert "conflict_detected" in db.gateway._handlers
+
+
+def test_prepare_turn_dispatches_conversation_started_trigger(tmp_path):
+    db = AgentDB(path=tmp_path / "test.db", permissions_path=PERMS)
+    dispatched = []
+    db.gateway.subscribe("conversation_started", lambda **kw: dispatched.append(kw))
+    middleware = AgentDBClaudeMiddleware(db=db, agent_id="research_agent", profile="budget_optimized")
+
+    middleware.prepare_turn(user_query="hi", session_id="sess-gateway-1")
+
+    assert len(dispatched) >= 1
+    assert dispatched[0]["session_id"] == "sess-gateway-1"
+
+
+def test_pending_conflicts_returns_gateway_conflict_queue(tmp_path):
+    db = AgentDB(path=tmp_path / "test.db", permissions_path=PERMS)
+    middleware = AgentDBClaudeMiddleware(db=db, agent_id="research_agent", profile="budget_optimized")
+
+    assert middleware.pending_conflicts() == db.gateway.conflict_queue(resolved=False)
+
+
+def test_propose_skill_creates_pending_proposal(tmp_path):
+    db = AgentDB(path=tmp_path / "test.db", permissions_path=PERMS)
+    middleware = AgentDBClaudeMiddleware(db=db, agent_id="research_agent", profile="budget_optimized")
+
+    proposal_id = middleware.propose_skill(
+        name="dbt-style",
+        content="Use concise bullet points.",
+        scope=["research_agent"],
+    )
+
+    pending = middleware.list_proposals(status="pending")
+    assert any(p["proposal_id"] == proposal_id for p in pending)
+
+
+def test_approve_proposal_creates_skill(tmp_path):
+    db = AgentDB(path=tmp_path / "test.db", permissions_path=PERMS)
+    middleware = AgentDBClaudeMiddleware(db=db, agent_id="research_agent", profile="budget_optimized")
+    proposal_id = middleware.propose_skill(
+        name="dbt-style",
+        content="Use concise bullet points.",
+        scope=["research_agent"],
+    )
+
+    middleware.approve_proposal(proposal_id)
+
+    skills = db.skills.get_for_agent("research_agent")
+    assert any(s.id == proposal_id for s in skills)
+
+
+def test_reject_proposal_does_not_create_skill(tmp_path):
+    db = AgentDB(path=tmp_path / "test.db", permissions_path=PERMS)
+    middleware = AgentDBClaudeMiddleware(db=db, agent_id="research_agent", profile="budget_optimized")
+    proposal_id = middleware.propose_skill(
+        name="dbt-style",
+        content="Use concise bullet points.",
+        scope=["research_agent"],
+    )
+
+    middleware.reject_proposal(proposal_id, reason="not needed")
+
+    skills = db.skills.get_for_agent("research_agent")
+    assert not any(s.id == proposal_id for s in skills)
+    rejected = middleware.list_proposals(status="rejected")
+    assert any(p["proposal_id"] == proposal_id for p in rejected)
+
+
 def test_budget_optimized_no_auto_persist_without_explicit_writes(tmp_path):
     db = AgentDB(path=tmp_path / "test.db", permissions_path=PERMS)
     middleware = AgentDBClaudeMiddleware(db=db, agent_id="research_agent", profile="budget_optimized")
@@ -307,6 +425,39 @@ def test_runtime_wrapper_from_claude_client_minimal_flow(tmp_path):
     assert any(e.event_type == EVENT_MEMORY_RETRIEVE for e in entries)
     assert any(e.event_type == EVENT_MEMORY_OUTCOME for e in entries)
     assert any(e.event_type == EVENT_MEMORY_WRITE for e in entries)
+
+
+def test_runtime_wrapper_from_claude_client_threads_memory_budget_tokens(tmp_path):
+    db = AgentDB(path=tmp_path / "test.db", permissions_path=PERMS)
+    for i in range(5):
+        db.write(
+            key=f"memory/working/note_{i}",
+            value="note " + ("x" * 200),
+            origin="agent_inferred",
+            agent_id="research_agent",
+            session_id="sess-runtime-budget-1",
+        )
+
+    class FakeMessagesAPI:
+        def create(self, **kwargs):
+            return SimpleNamespace(content=[SimpleNamespace(text="runtime wrapper response")])
+
+    fake_client = SimpleNamespace(messages=FakeMessagesAPI())
+    runtime = AgentDBClaudeRuntime.from_claude_client(
+        db=db,
+        agent_id="research_agent",
+        client=fake_client,
+        model="claude-sonnet-test",
+        profile="full_storage",
+        memory_budget_tokens=60,
+    )
+    result = runtime.handle_turn(
+        user_query="note",
+        session_id="sess-runtime-budget-1",
+    )
+
+    assert result["retrieval"].truncated is True
+    assert result["retrieval"].token_estimate <= 60
 
 
 def test_build_action_context_uses_edit_file_path_and_model_name(tmp_path):
@@ -556,3 +707,51 @@ async def test_from_sdk_client_handle_turn_async(tmp_path):
     entries = db.audit_log.replay(from_sequence=0)
     assert any(e.event_type == EVENT_MEMORY_RETRIEVE for e in entries)
     assert any(e.event_type == EVENT_MEMORY_OUTCOME for e in entries)
+
+
+@pytest.mark.asyncio
+async def test_from_sdk_client_threads_memory_budget_tokens(tmp_path):
+    db = AgentDB(path=tmp_path / "test.db", permissions_path=PERMS)
+    for i in range(5):
+        db.write(
+            key=f"memory/working/note_{i}",
+            value="note " + ("x" * 200),
+            origin="agent_inferred",
+            agent_id="research_agent",
+            session_id="sess-sdk-budget-1",
+        )
+
+    class FakeAssistantMessage:
+        def __init__(self, text):
+            self.content = [type("Block", (), {"text": text})()]
+
+    class FakeResultMessage:
+        is_error = False
+        result = None
+
+    class FakeSdkClient:
+        async def query(self, prompt):
+            self._last_prompt = prompt
+
+        async def receive_response(self):
+            yield FakeAssistantMessage("sdk agentic response")
+            yield FakeResultMessage()
+
+    def sdk_client_factory(thread_id):
+        return FakeSdkClient()
+
+    runtime = AgentDBClaudeRuntime.from_sdk_client(
+        db=db,
+        agent_id="research_agent",
+        sdk_client_factory=sdk_client_factory,
+        profile="full_storage",
+        memory_budget_tokens=60,
+    )
+
+    result = await runtime.handle_turn_async(
+        user_query="note",
+        session_id="sess-sdk-budget-1",
+    )
+
+    assert result["retrieval"].truncated is True
+    assert result["retrieval"].token_estimate <= 60
