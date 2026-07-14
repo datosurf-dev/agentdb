@@ -316,11 +316,15 @@ class AgentDB:
 ```
 
 **Files:**
+- Create: `agentdb/core/store.py` — extract `MemoryStore` from `interface/client.py` (pre-step, avoids circular import)
+- Create: `agentdb/core/system.py` — extract `SystemStats` from `interface/client.py` (pre-step)
+- Modify: `agentdb/interface/client.py` — update imports to pull from new core modules; add `self.lifecycle` property + `record_outcome()` alias
 - Create: `agentdb/governance/lifecycle_manager.py`
-- Modify: `agentdb/interface/client.py` (add `self.lifecycle` property + alias)
 - Create: `tests/unit/test_lifecycle.py`
 
 - [ ] **Step 1: Write failing tests**
+
+> **Import note (verified 2026-07-14):** The spec originally referenced `SQLiteMemoryStore` from `agentdb.core.memory_store` and `SystemTables` from `agentdb.core.system_tables` — neither module exists. The real classes are `MemoryStore` and `SystemStats`, both defined in `agentdb/interface/client.py`. Before implementing, extract them to `agentdb/core/store.py` and `agentdb/core/system.py` respectively, then update the `client.py` imports — this avoids a circular import between `lifecycle_manager.py` and `client.py`. Tests and `LifecycleManager` itself should import from those new core modules, not from `interface.client`.
 
 ```python
 # tests/unit/test_lifecycle.py
@@ -328,17 +332,17 @@ import pytest
 from datetime import datetime, timedelta
 from pathlib import Path
 from agentdb.core.models import MemoryRecord, Origin, TrustLevel
-from agentdb.core.memory_store import SQLiteMemoryStore
-from agentdb.core.system_tables import SystemTables
+from agentdb.core.store import MemoryStore          # extracted from interface/client.py
+from agentdb.core.system import SystemStats         # extracted from interface/client.py
 from agentdb.governance.lifecycle_manager import LifecycleManager
 
 @pytest.fixture
 def store(tmp_path):
-    return SQLiteMemoryStore(db_path=tmp_path / "test.db")
+    return MemoryStore(db_path=tmp_path / "test.db")
 
 @pytest.fixture
 def manager(store, tmp_path):
-    sys = SystemTables(store=store)
+    sys = SystemStats(db_path=tmp_path / "test.db")
     return LifecycleManager(store=store, system=sys)
 
 def _rec(agent_id="a1", key="k", origin=Origin.AGENT_INFERRED,
@@ -407,9 +411,9 @@ import sqlite3
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from ..core.memory_store import SQLiteMemoryStore
+from ..core.store import MemoryStore          # extracted from interface/client.py pre-Task 9
 from ..core.models import Origin
-from ..core.system_tables import SystemTables
+from ..core.system import SystemStats         # extracted from interface/client.py pre-Task 9
 
 
 class LifecycleManager:
@@ -419,7 +423,7 @@ class LifecycleManager:
     STALENESS_DAYS        = 90
     REINFORCE_RATE        = 0.10   # confidence boost per reinforce call
 
-    def __init__(self, store: SQLiteMemoryStore, system: SystemTables):
+    def __init__(self, store: MemoryStore, system: SystemStats):
         self._store  = store
         self._system = system
 
@@ -1094,6 +1098,11 @@ Note this also means a Slack/Telegram notifier doesn't need MCP or this task at 
 Full task expansion after Phase 3 is complete.
 
 ### Task 15: Framework Adapters
+
+> **Read before implementing:**
+> - **Hermes:** `docs/integrations/hermes.md` — full design brief: 14-hook mapping table (verified against Hermes source), session key mapping, skill coexistence, `on_pre_compress` summarizer wiring, `db.gateway.subscribe` conflict notification pattern, open questions. This is the spec; what follows is the plan.
+> - **OpenClaw:** `docs/integrations/openclaw.md` — sidecar shape, four open questions that must be resolved before writing code.
+> - **Assessment:** `docs/integrations/openclaw-hermes-assessment.md` — why Hermes first, governance wrapper strategy (C) for both.
 
 **Type: 12a, real-time enforcement.** Per `docs/context/architecture-principles.md` Principle 12, an adapter is not "done" on API existence alone — it must name the exact point in the framework's own control flow where AgentDB governance executes, and a test must prove that framework-triggered point changes what context/instructions reach the agent.
 
