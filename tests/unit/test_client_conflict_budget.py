@@ -176,3 +176,14 @@ def test_retrieval_result_has_new_fields(tmp_path):
     assert hasattr(result, "truncated")
     assert result.token_estimate == 0 or result.token_estimate >= 0
     assert isinstance(result.truncated, bool)
+
+
+def test_existing_tests_still_pass(tmp_path):
+    """Backward-compat: write() and retrieve() with no new params behave identically to pre-change behavior."""
+    db = AgentDB(path=tmp_path / "test.db")
+    db.write(key="k", value="v", origin="agent_inferred", agent_id="a1")
+    result = db.retrieve("v", agent_id="a1")
+    assert result.truncated is False
+    assert result.token_estimate >= 0
+    assert isinstance(result.conflicts, list)
+    assert isinstance(result.override_instructions, list)

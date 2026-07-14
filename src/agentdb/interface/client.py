@@ -384,12 +384,20 @@ class MemoryStore:
         ]
 
     def list_conflicts(self, resolved: bool = False) -> list[ConflictRecord]:
+        """
+        Return conflict records from the conflicts table.
+
+        resolved=False (default) → pending only (resolved = 0).
+        resolved=True → all conflicts (pending + resolved).
+        """
+        query = (
+            "SELECT id, record_a_id, record_b_id, conflict_type, resolved, auto_resolved "
+            "FROM conflicts"
+        )
         with self._connect() as conn:
-            rows = conn.execute(
-                "SELECT id, record_a_id, record_b_id, conflict_type, resolved, auto_resolved "
-                "FROM conflicts WHERE resolved = ?",
-                (int(resolved),),
-            ).fetchall()
+            if not resolved:
+                query += " WHERE resolved = 0"
+            rows = conn.execute(query).fetchall()
         return [
             ConflictRecord(
                 id=row["id"],

@@ -40,24 +40,24 @@ class ConflictDetector:
         new_origin = str(new_record.origin)
         existing_origin = str(existing.origin)
 
-        # Human write supersedes anything — not a conflict
-        if new_origin == "human_approved":
+        # Authority conflict: agent/provider overwriting human_approved
+        if existing_origin == "human_approved" and new_origin in _AGENT_TIER_ORIGINS:
+            return ConflictRecord(
+                record_a_id=existing.id,
+                record_b_id=new_record.id,
+                conflict_type="authority",
+            )
+
+        # Human supersedes lower-trust: no conflict (only when existing is NOT also human_approved)
+        if new_origin == "human_approved" and existing_origin in _AGENT_TIER_ORIGINS:
             return None
 
-        # Same origin → temporal conflict
+        # Same origin → temporal conflict (covers human_approved vs human_approved too)
         if new_origin == existing_origin:
             return ConflictRecord(
                 record_a_id=existing.id,
                 record_b_id=new_record.id,
                 conflict_type="temporal",
-            )
-
-        # Agent-tier trying to overwrite human-approved → authority conflict
-        if new_origin in _AGENT_TIER_ORIGINS and existing_origin == "human_approved":
-            return ConflictRecord(
-                record_a_id=existing.id,
-                record_b_id=new_record.id,
-                conflict_type="authority",
             )
 
         return None
