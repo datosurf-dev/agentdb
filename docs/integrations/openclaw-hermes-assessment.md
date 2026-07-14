@@ -250,3 +250,13 @@ same sidecar. One governed memory store, two adapter surfaces.
 
 Both adapters share the governance wrapper approach (C), the summarizer callable, the
 optional lifecycle sweep, and the conflict notification handler pattern.
+
+## Adapter Design Briefs
+
+Full implementation design briefs — hook mappings, open questions, Principle 12
+compliance bars, and session/key mappings — live in dedicated docs:
+
+- **Hermes:** `docs/integrations/hermes.md` — direct Python integration via
+  `MemoryProvider` ABC; all hook names verified against Hermes source. Build first.
+- **OpenClaw:** `docs/integrations/openclaw.md` — Node/TypeScript sidecar integration;
+  several hook names still need confirmation against OpenClaw plugin SDK. Build second.

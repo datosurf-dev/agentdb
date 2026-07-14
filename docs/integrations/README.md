@@ -9,6 +9,7 @@ This directory contains implementation-focused guides for wiring AgentDB into sp
 - Google ADK: `docs/integrations/google-adk.md` — **planned, not yet implemented**; describes the target design for an adapter that doesn't exist yet
 - OpenClaw: `docs/integrations/openclaw.md` — **planned, not yet implemented**; design brief for hooking any OpenClaw agent (data-helper first) into AgentDB, open questions flagged for whoever builds it
 - OpenClaw & Hermes assessment: `docs/integrations/openclaw-hermes-assessment.md` — codebase comparison covering memory architecture, unique capabilities, overlapping user-configurable features, and recommended adapter build order (Hermes first)
+- Hermes: `docs/integrations/hermes.md` — **planned, not yet implemented**; design brief for implementing `MemoryProvider` ABC; all hook names verified against Hermes source
 
 The model/runtime wiring guide includes:
 
