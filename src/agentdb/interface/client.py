@@ -13,8 +13,9 @@ from typing import Any, Callable, Optional
 
 import yaml
 
-from ..core.models import MemoryRecord, Skill
+from ..core.models import ConflictRecord, MemoryRecord, Skill
 from ..gateway import Gateway
+from ..governance.conflict_detector import ConflictDetector
 from ..governance.permission_router import PermissionDenied, PermissionRouter
 from ..retrieval.algorithm import MultiSignalRanker
 from ..skills.skill_store import SkillStore
@@ -50,6 +51,8 @@ class RetrievalResult:
     override_instructions: list
     skills: list
     skill_warnings: list
+    token_estimate: int = 0
+    truncated: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -109,9 +112,26 @@ CREATE TABLE IF NOT EXISTS external_retrieves (
 )
 """
 
+_CREATE_CONFLICTS = """
+CREATE TABLE IF NOT EXISTS conflicts (
+    id          TEXT PRIMARY KEY,
+    record_a_id TEXT NOT NULL,
+    record_b_id TEXT NOT NULL,
+    conflict_type TEXT NOT NULL,
+    resolved    INTEGER NOT NULL DEFAULT 0,
+    auto_resolved INTEGER NOT NULL DEFAULT 0,
+    created_at  TEXT NOT NULL
+)
+"""
+
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _estimate_tokens(record: MemoryRecord) -> int:
+    value_str = json.dumps(record.value) if isinstance(record.value, (dict, list)) else str(record.value)
+    return max(1, len(value_str) // 4)
 
 
 # ---------------------------------------------------------------------------
@@ -127,6 +147,7 @@ class MemoryStore:
         db_path.parent.mkdir(parents=True, exist_ok=True)
         with self._connect() as conn:
             conn.execute(_CREATE_MEMORIES)
+            conn.execute(_CREATE_CONFLICTS)
             for column, coltype in _MEMORIES_MIGRATION_COLUMNS:
                 try:
                     conn.execute(f"ALTER TABLE memories ADD COLUMN {column} {coltype}")
@@ -312,6 +333,80 @@ class MemoryStore:
                     break
 
         return fallback
+
+    # ------------------------------------------------------------------
+    # Conflict storage
+    # ------------------------------------------------------------------
+
+    def store_conflict(self, conflict: ConflictRecord) -> None:
+        now = _utcnow().isoformat()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO conflicts
+                    (id, record_a_id, record_b_id, conflict_type, resolved, auto_resolved, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    conflict.id,
+                    conflict.record_a_id,
+                    conflict.record_b_id,
+                    conflict.conflict_type,
+                    int(conflict.resolved),
+                    int(conflict.auto_resolved),
+                    now,
+                ),
+            )
+
+    def get_conflicts_for_records(self, record_ids: list[str]) -> list[ConflictRecord]:
+        if not record_ids:
+            return []
+        placeholders = ",".join("?" * len(record_ids))
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT id, record_a_id, record_b_id, conflict_type, resolved, auto_resolved
+                FROM conflicts
+                WHERE record_a_id IN ({placeholders}) OR record_b_id IN ({placeholders})
+                """,
+                record_ids + record_ids,
+            ).fetchall()
+        return [
+            ConflictRecord(
+                id=row["id"],
+                record_a_id=row["record_a_id"],
+                record_b_id=row["record_b_id"],
+                conflict_type=row["conflict_type"],
+                resolved=bool(row["resolved"]),
+                auto_resolved=bool(row["auto_resolved"]),
+            )
+            for row in rows
+        ]
+
+    def list_conflicts(self, resolved: bool = False) -> list[ConflictRecord]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT id, record_a_id, record_b_id, conflict_type, resolved, auto_resolved "
+                "FROM conflicts WHERE resolved = ?",
+                (int(resolved),),
+            ).fetchall()
+        return [
+            ConflictRecord(
+                id=row["id"],
+                record_a_id=row["record_a_id"],
+                record_b_id=row["record_b_id"],
+                conflict_type=row["conflict_type"],
+                resolved=bool(row["resolved"]),
+                auto_resolved=bool(row["auto_resolved"]),
+            )
+            for row in rows
+        ]
+
+    def update_conflict_id(self, record_id: str, conflict_id: str) -> None:
+        self._persist_field(record_id, "conflict_id", conflict_id)
+        record = self._by_id.get(record_id)
+        if record is not None:
+            record.conflict_id = conflict_id
 
 
 # ---------------------------------------------------------------------------
@@ -680,6 +775,36 @@ class AgentDB:
             confidence=confidence if confidence is not None else 1.0,
             entities=list(entities) if entities else [],
         )
+
+        # Conflict detection: check before persisting
+        existing = self._store.get_by_key(key)
+        if existing is not None and not existing.archived:
+            conflict = ConflictDetector().check(new_record=record, existing=existing)
+            if conflict is not None:
+                record.conflict_id = conflict.id
+                existing.conflict_id = conflict.id
+                self._store.update_conflict_id(existing.id, conflict.id)
+                self._store.store_conflict(conflict)
+                self.gateway.dispatch(
+                    "conflict_detected",
+                    conflict_id=conflict.id,
+                    conflict_type=conflict.conflict_type,
+                    key=key,
+                    agent_id=agent_id,
+                    session_id=session_id,
+                )
+                self.audit_log.append(
+                    "conflict_detected",
+                    {
+                        "conflict_id": conflict.id,
+                        "conflict_type": conflict.conflict_type,
+                        "key": key,
+                        "record_a_id": existing.id,
+                        "record_b_id": record.id,
+                        "agent_id": agent_id,
+                    },
+                )
+
         self._store.write(record)
         self.audit_log.append(
             EVENT_MEMORY_WRITE,
@@ -726,10 +851,24 @@ class AgentDB:
         limit: int = 5,
         session_id: Optional[str] = None,
         external_context: Optional[list[dict]] = None,
+        budget_tokens: Optional[int] = None,
     ) -> RetrievalResult:
         candidates = self._store.search(query, limit=max(limit, 50))
         ranked = self._ranker.rank(query, candidates, agent_id=agent_id)[:limit]
-        records = [rr.record for rr in ranked]
+        ranked_records = [rr.record for rr in ranked]
+
+        # Budget cap
+        selected: list[MemoryRecord] = []
+        token_total = 0
+        truncated = False
+        for record in ranked_records:
+            est = _estimate_tokens(record)
+            if budget_tokens is not None and token_total + est > budget_tokens:
+                truncated = True
+                break
+            selected.append(record)
+            token_total += est
+        records = selected
 
         # Increment retrieval counts
         for record in records:
@@ -808,12 +947,26 @@ class AgentDB:
                     f"Skill '{skill.id}' is stale (health_score={skill.health_score:.2f})"
                 )
 
+        # Fetch conflicts for returned records
+        conflicts = self._store.get_conflicts_for_records([r.id for r in records])
+
+        # Build override instructions for authority conflicts
+        override_instructions = []
+        for c in conflicts:
+            if c.conflict_type == "authority":
+                override_instructions.append(
+                    f"Authority conflict on a retrieved memory (conflict_id={c.id}): "
+                    "the human-approved version takes precedence over any agent-inferred value for this key."
+                )
+
         return RetrievalResult(
             records=records,
-            conflicts=[],
-            override_instructions=[],
+            conflicts=conflicts,
+            override_instructions=override_instructions,
             skills=all_skills,
             skill_warnings=skill_warnings,
+            token_estimate=token_total,
+            truncated=truncated,
         )
 
     def retrieve_by_entities(
@@ -854,10 +1007,21 @@ class AgentDB:
                     f"Skill '{skill.id}' is stale (health_score={skill.health_score:.2f})"
                 )
 
+        # Fetch conflicts for returned records
+        conflicts = self._store.get_conflicts_for_records([r.id for r in records])
+
+        override_instructions = []
+        for c in conflicts:
+            if c.conflict_type == "authority":
+                override_instructions.append(
+                    f"Authority conflict on a retrieved memory (conflict_id={c.id}): "
+                    "the human-approved version takes precedence over any agent-inferred value for this key."
+                )
+
         return RetrievalResult(
             records=records,
-            conflicts=[],
-            override_instructions=[],
+            conflicts=conflicts,
+            override_instructions=override_instructions,
             skills=all_skills,
             skill_warnings=skill_warnings,
         )

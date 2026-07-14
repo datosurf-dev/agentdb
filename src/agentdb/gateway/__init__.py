@@ -49,34 +49,14 @@ class Gateway:
     # Conflict queue
     # ------------------------------------------------------------------
 
-    def conflict_queue(self, resolved: bool = False) -> list[dict]:
+    def conflict_queue(self, resolved: bool = False) -> list:
         """
-        Return conflict records from the memories table.
-
-        Conflict records have keys starting with ``conflict/``.  They are
-        written by the conflict-detection subsystem (Task 12 / public-client
-        gap); this method exposes the read-only queue view.
+        Return conflict records from the conflicts table.
 
         Args:
-            resolved: if True, include archived (resolved) conflict records;
-                      defaults to False (pending only).
+            resolved: if True, return resolved conflicts; defaults to False (pending only).
         """
-        results: list[dict] = []
-        for record in self._db._store._by_id.values():
-            if not record.key.startswith("conflict/"):
-                continue
-            if record.archived and not resolved:
-                continue
-            results.append(
-                {
-                    "conflict_id": record.key.removeprefix("conflict/"),
-                    "key": record.key,
-                    "value": record.value,
-                    "resolved": record.archived,
-                    "created_at": record.created_at.isoformat(),
-                }
-            )
-        return results
+        return self._db._store.list_conflicts(resolved=resolved)
 
     # ------------------------------------------------------------------
     # Proposal workflow
