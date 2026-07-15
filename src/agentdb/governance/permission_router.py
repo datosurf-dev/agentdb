@@ -11,6 +11,15 @@ class PermissionDenied(Exception):
     pass
 
 
+# Prefixes owned by AgentDB's own framework machinery (not agent business
+# data) — writable by default regardless of default_policy/can_write,
+# because gating them requires every integrating deployment to remember a
+# permissions.yaml edit before the feature works at all. An explicit
+# cannot_write entry still overrides this (see check_write below) — this is
+# a default, not an unconditional bypass.
+FRAMEWORK_MANAGED_WRITE_PREFIXES: tuple[str, ...] = ("proposal/",)
+
+
 class PermissionRouter:
     """
     Routes permission checks based on a YAML policy file.
@@ -83,6 +92,11 @@ class PermissionRouter:
         # Check can_write
         can_write = agent_config.get("can_write", [])
         if self._matches_any(key, can_write):
+            return  # allowed
+
+        # Framework-managed prefixes are writable by default (cannot_write,
+        # checked above, still overrides this).
+        if self._matches_any(key, FRAMEWORK_MANAGED_WRITE_PREFIXES):
             return  # allowed
 
         # Fall through to default policy

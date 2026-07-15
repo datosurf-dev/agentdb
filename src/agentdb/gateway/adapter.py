@@ -37,6 +37,16 @@ class GatewayAdapter:
         self.profile_name: str = profile
         self.gateway: "Gateway" = db.gateway
 
+    @property
+    def agent_id(self) -> str:
+        """Public accessor for the agent_id this adapter was constructed with.
+
+        Downstream apps need this to scope their own gateway calls (e.g. the
+        scope= argument on gateway.propose()) without reaching into the
+        underscore-prefixed private attribute.
+        """
+        return self._agent_id
+
     def prepare_turn(self, user_query: str, session_id: str) -> None:  # pragma: no cover
         pass
 

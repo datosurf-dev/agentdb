@@ -68,6 +68,36 @@ def test_propose_writes_memory_record(tmp_path):
     assert record.value["name"] == "summarise-bullets"
 
 
+def test_propose_works_with_permissions_enforced_and_no_explicit_grant(tmp_path):
+    """
+    Regression guard for a real production gap: this test suite's other
+    gateway tests use _make_db() with no permissions_path at all, so they
+    never exercised the permission-gated path — which is exactly how the
+    proposal/ write-denied bug shipped undetected. This test configures a
+    real permissions file for an agent with zero explicit proposal/ grant.
+    """
+    perms = tmp_path / "permissions.yaml"
+    perms.write_text(
+        "\n".join(
+            [
+                "default_policy: deny",
+                "agents:",
+                "  research_agent:",
+                "    can_write:",
+                "      - \"memory/working/\"",
+            ]
+        )
+    )
+    db = AgentDB(path=tmp_path / "test.db", permissions_path=perms)
+    proposal_id = db.gateway.propose(
+        name="summarise-bullets",
+        content="Always reply with bullet points",
+        scope=["research_agent"],
+        agent_id="research_agent",
+    )
+    assert db.read(f"proposal/{proposal_id}") is not None
+
+
 def test_approve_calls_skills_api(tmp_path):
     db = _make_db(tmp_path)
     gw = db.gateway
@@ -152,6 +182,21 @@ def test_gateway_adapter_inherits_gateway_reference(tmp_path):
     assert adapter._agent_id == "test-agent"
     assert adapter.gateway is db.gateway
     assert isinstance(adapter.gateway, Gateway)
+
+
+def test_gateway_adapter_exposes_agent_id_publicly(tmp_path):
+    """
+    Downstream apps need the bound agent_id to scope their own calls (e.g.
+    the scope= argument on gateway.propose()) without reaching into the
+    underscore-prefixed private attribute.
+    """
+    db = _make_db(tmp_path)
+
+    class MyAdapter(GatewayAdapter):
+        pass
+
+    adapter = MyAdapter(db=db, agent_id="test-agent")
+    assert adapter.agent_id == "test-agent"
 
 
 # ---------------------------------------------------------------------------

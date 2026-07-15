@@ -73,6 +73,41 @@ def test_delete_denied_leaves_record_intact(tmp_path):
     assert human_backend.read("skills/python-style") == "use type hints"
 
 
+def test_proposal_prefix_is_writable_without_explicit_grant(tmp_path):
+    """
+    proposal/ is framework-managed (the gateway's own proposal workflow),
+    not agent business data — it should be writable by default even for an
+    agent with no explicit can_write grant for it. coder_agent in the shared
+    fixture has no proposal/ entry, so this proves the default, not a grant.
+    """
+    db = AgentDB(path=tmp_path / "test.db", permissions_path=PERMS)
+    backend = AgentDBBackend(agent_id="coder_agent", trust_zone="agent_inferred", db=db)
+    backend.write("proposal/some-id", {"name": "x"})
+    assert backend.read("proposal/some-id") == {"name": "x"}
+
+
+def test_cannot_write_can_still_deny_proposal_prefix(tmp_path):
+    """Framework-managed defaults are an escape hatch, not an unconditional grant."""
+    perms = tmp_path / "permissions.deny.proposal.yaml"
+    perms.write_text(
+        "\n".join(
+            [
+                "default_policy: deny",
+                "agents:",
+                "  coder_agent:",
+                "    can_write:",
+                "      - \"memory/working/\"",
+                "    cannot_write:",
+                "      - \"proposal/\"",
+            ]
+        )
+    )
+    db = AgentDB(path=tmp_path / "test.db", permissions_path=perms)
+    backend = AgentDBBackend(agent_id="coder_agent", trust_zone="agent_inferred", db=db)
+    with pytest.raises(PermissionDenied):
+        backend.write("proposal/some-id", {"name": "x"})
+
+
 def test_list_returns_matching_paths(backend):
     backend.write("memory/working/a", "v1")
     backend.write("memory/working/b", "v2")
