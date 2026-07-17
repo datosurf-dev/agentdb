@@ -57,6 +57,8 @@ class MemoryRecord:
     entities: list = field(default_factory=list)
     last_retrieved: Optional[datetime] = None
     conflict_id: Optional[str] = None
+    expiry_time: Optional[datetime] = None
+    inferred: bool = False
 
 
 @dataclass

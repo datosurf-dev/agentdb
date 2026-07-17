@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timezone  # noqa: F401 — timezone used in run_sweep
 
 from agentdb.core.models import Origin
 from agentdb.core.store import MemoryStore
@@ -58,6 +58,20 @@ class LifecycleManager:
         now = _utcnow()
         decayed = 0
         archived_ids: set[str] = set()
+
+        records = self._store.list_all()
+
+        # --- Step 0: archive expired records (expiry_time has passed) ---
+        for record in records:
+            if _origin_value(record.origin) == Origin.HUMAN_APPROVED.value:
+                continue  # human_approved records never expire
+            if record.expiry_time is not None:
+                expiry = record.expiry_time
+                if expiry.tzinfo is None:
+                    expiry = expiry.replace(tzinfo=timezone.utc)
+                if expiry <= now:
+                    self._store.archive_record(record.id)
+                    archived_ids.add(record.id)
 
         records = self._store.list_all()
 

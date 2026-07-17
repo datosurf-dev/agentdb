@@ -29,13 +29,17 @@ CREATE TABLE IF NOT EXISTS memories (
     created_at TEXT NOT NULL,
     entities TEXT NOT NULL DEFAULT '[]',
     last_retrieved TEXT,
-    conflict_id TEXT
+    conflict_id TEXT,
+    expiry_time TEXT,
+    inferred INTEGER NOT NULL DEFAULT 0
 )
 """
 
 _MEMORIES_MIGRATION_COLUMNS = (
     ("last_retrieved", "TEXT"),
     ("conflict_id", "TEXT"),
+    ("expiry_time", "TEXT"),
+    ("inferred", "INTEGER NOT NULL DEFAULT 0"),
 )
 
 _CREATE_CONFLICTS = """
@@ -117,6 +121,11 @@ class MemoryStore:
                 if row["last_retrieved"] else None
             ),
             conflict_id=row["conflict_id"],
+            expiry_time=(
+                datetime.fromisoformat(row["expiry_time"])
+                if row["expiry_time"] else None
+            ),
+            inferred=bool(row["inferred"]) if row["inferred"] is not None else False,
         )
 
     def write(self, record: MemoryRecord) -> MemoryRecord:
@@ -126,8 +135,8 @@ class MemoryStore:
                 INSERT OR REPLACE INTO memories
                     (id, key, value, origin, trust_level, agent_id, confidence,
                      version, archived, retrieval_count, created_at, entities,
-                     last_retrieved, conflict_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     last_retrieved, conflict_id, expiry_time, inferred)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     record.id,
@@ -144,6 +153,8 @@ class MemoryStore:
                     json.dumps(record.entities),
                     record.last_retrieved.isoformat() if record.last_retrieved else None,
                     record.conflict_id,
+                    record.expiry_time.isoformat() if record.expiry_time else None,
+                    int(record.inferred),
                 ),
             )
         self._by_id[record.id] = record

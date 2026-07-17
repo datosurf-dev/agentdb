@@ -226,11 +226,13 @@ class AgentDB:
         tracking_max_files_per_directory: int = 200,
         db_path: Optional[Any] = None,
         summarizer: Optional[Callable] = None,
+        infer_fn: Optional[Callable] = None,
     ) -> None:
         # db_path is an alias for path (used by adapter tests)
         if db_path is not None and path is None:
             path = db_path
         self._summarizer = summarizer
+        self._infer_fn = infer_fn
         # Resolve memory_dir from args or env vars
         resolved_memory_dir: Optional[Path] = None
         if memory_dir is not None:
@@ -374,7 +376,16 @@ class AgentDB:
         session_id: Optional[str] = None,
         entities: Optional[list] = None,
         confidence: Optional[float] = None,
+        infer: bool = False,
+        expiry_time: Optional["datetime"] = None,
     ) -> MemoryRecord:
+        if infer:
+            if self._infer_fn is None:
+                raise ValueError(
+                    "infer=True requires an infer_fn — pass infer_fn=<callable> to AgentDB()"
+                )
+            value = self._infer_fn(value)
+
         trust_zone = self._derive_trust_zone(origin)
 
         # Permission check
@@ -402,6 +413,8 @@ class AgentDB:
             agent_id=agent_id,
             confidence=confidence if confidence is not None else 1.0,
             entities=list(entities) if entities else [],
+            expiry_time=expiry_time,
+            inferred=infer,
         )
 
         # Conflict detection: check before persisting
