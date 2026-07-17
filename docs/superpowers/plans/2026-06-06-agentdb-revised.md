@@ -68,7 +68,7 @@ See `docs/superpowers/plans/completed-tasks.md` for the full synthesized record 
 
 ### Partial (works, but diverges from original spec — drift is not necessarily a problem, just noted)
 - **Skill store (Task 8):** the staleness fix shipped (see `completed-tasks.md`). Still missing: entity-drift penalty, unresolved-conflict penalty, `SkillConflict` exception, `search()`. **Also missing (12b):** dispatching a `skill_stale` trigger the first time a skill's health score crosses below 0.6, via `dispatch_reconciliation_trigger`. Today staleness only ever surfaces as a warning string returned to whichever agent happens to retrieve that skill — no one else is notified. Needs a "just crossed the threshold" check, not a "currently below" check, to avoid dispatching on every single retrieve.
-- **Models:** `MemoryRecord`/`ConflictRecord`/`Skill` in `core/models.py` are missing several originally-planned fields: `user_id, session_id, expiry_policy, tier, audit_sequence, embedding, embedding_version` (records), `detected_at/resolved_at/resolution/agent_id` (conflicts). `ExpiryPolicy`/`MemoryTier` enums exist but are never attached to a record. `last_retrieved`/`conflict_id` were added 2026-07-11 to support ranking.
+- **Models:** `MemoryRecord`/`ConflictRecord`/`Skill` in `core/models.py` are missing several originally-planned fields: `user_id, session_id, expiry_policy, tier, audit_sequence, embedding, embedding_version` (records), `detected_at/resolved_at/resolution/agent_id` (conflicts). `ExpiryPolicy`/`MemoryTier` enums exist but are never attached to a record. `last_retrieved`/`conflict_id` were added 2026-07-11 to support ranking. Also missing: `expiry_time` (a concrete per-record `datetime | None` field, distinct from the abstract `expiry_policy` enum — lets callers set a hard TTL on individual `agent_inferred` records; `human_approved` records never expire regardless of this field). The lifecycle manager's `run_sweep()` should archive records where `expiry_time` is set and `expiry_time <= now`, checked before the staleness/confidence thresholds. See Task 10C.
 - **`AgentDBBackend`:** `list()` uses `list_all()` (all agents), not scoped per-agent. Two extra methods (`grep`, `glob`) exist beyond the original 4-method contract (harmless, useful).
 - **Store + audit log:** both live inline in `interface/client.py` (`MemoryStore`, `AuditLog` classes) rather than as separate `core/memory_store.py` / `core/audit_log.py` modules. Audit log is a SQLite table, not append-only NDJSON.
 - **Permission router:** `governance/permission_router.py` exposes `check_write`/`check_read`. `PermissionDenied` carries a plain string, not structured `reason/key/agent_id/origin` fields. `config/permissions.example.yaml` does not exist.
@@ -95,8 +95,8 @@ See `docs/superpowers/plans/completed-tasks.md` for the full synthesized record 
 6. ~~Public client gap — real conflict detection + budgeted retrieval~~ — done 2026-07-14 (commits bbe7ffb..ab4e6aa). `ConflictDetector` (temporal + authority); `budget_tokens` on `retrieve()`; `token_estimate`/`truncated` on `RetrievalResult`; conflict dispatch via `db.gateway`.
 7. ~~Task 9 — lifecycle manager~~ — done 2026-07-14 (commit 7e315e1). `db.lifecycle.run_sweep()`; archival + reinforce + `record_outcome`; `MemoryStore`/`SystemStats` extracted to `agentdb/core/`.
 8. ~~Hermes adapter — `agentdb/adapters/hermes.py`~~ — done 2026-07-14 (commits 4ba16eb..6940fa7). `AgentDBHermesProvider`; 14 hooks; Principle 12a proven via shim tests.
-9. ~~deepagents.py~~ — deprioritized 2026-07-13. `AgentDBBackend` already covers it generically. Build the OpenClaw adapter instead once Hermes is done (`docs/integrations/openclaw.md`).
-10. **OpenClaw adapter — `agentdb/adapters/openclaw.py`:** local Python sidecar (HTTP); points at the same `AgentDB` instance the Hermes adapter uses. Three open questions in `docs/integrations/openclaw.md` must be resolved before writing code.
+9. ~~deepagents.py~~ — deprioritized 2026-07-13. `AgentDBBackend` already covers it generically.
+10. ~~OpenClaw adapter~~ — dropped 2026-07-17. Hermes is the only named adapter target; `AgentDBBackend` covers any other framework generically.
 11. ~~Wire budgeted retrieval into the Claude SDK adapter~~ — done 2026-07-14. `AgentDBClaudeMiddleware.prepare_turn` now passes `budget_tokens` through to `retrieve()` (previously always `None`, so the adapter never used the token-budget/`truncated`/`token_estimate` machinery already shipped on the public client). Threaded as a new `memory_budget_tokens` param through `AgentDBClaudeMiddleware.__init__`, `AgentDBClaudeRuntime.from_claude_client`, and `.from_sdk_client`. Tests: `tests/integration/test_claude_agent_sdk_adapter.py` (4 new tests).
 12. ~~Connect the Claude SDK adapter to `db.gateway` (mirroring the Hermes adapter's existing pattern)~~ — done 2026-07-14. `AgentDBClaudeMiddleware.__init__` now subscribes a platform-agnostic `_on_conflict` handler to the `conflict_detected` trigger, and `prepare_turn` dispatches `conversation_started` per turn — same pattern as `AgentDBHermesProvider.initialize`/`on_turn_start`. Added thin passthrough methods for the rest of the gateway surface: `pending_conflicts()` (conflict queue), `propose_skill()`/`approve_proposal()`/`reject_proposal()`/`list_proposals()` (proposal workflow) — plain delegation to `self.gateway`, no new decision logic invented. Note: per-retrieval conflicts were already surfaced via `retrieval.override_instructions`; this adds the separate, broader pending-conflict-queue view. Required one fixture fix: `tests/fixtures/permissions.test.yaml` had no `proposal/` write grant for `research_agent`. Tests: `tests/integration/test_claude_agent_sdk_adapter.py` (6 new tests).
 13. ~~Expose `agent_id` as a public property on `GatewayAdapter`~~ — done 2026-07-14, prompted by a real downstream integration needing it (see `docs/integrations/claude-agent-sdk-gateway-guide.md`) and having to duplicate it in its own global instead. Inherited by both `AgentDBClaudeMiddleware` and `AgentDBHermesProvider`. Test: `tests/unit/test_gateway.py`.
@@ -527,7 +527,7 @@ git commit -m "feat: lifecycle manager — confidence decay, staleness archival,
 ## Phase 3 — Provider Ingestion
 **Exit criterion: all three provider ingestors sync. Org knowledge tier documented and queryable via system tables.**
 
-**Status: not started.** Gate cleared 2026-07-14 — budgeted retrieval + real conflict detection shipped (commits bbe7ffb..ab4e6aa). Phase 3 is now unblocked.
+**Status: deferred 2026-07-17.** Gate cleared 2026-07-14 (budgeted retrieval + real conflict detection shipped). Deliberately skipped to validate the core loop with Claude SDK + Hermes in production before adding ingestion complexity. Revisit once the governed memory loop is proven stable in real use.
 
 ### Task 10: Provider Ingestors (Anthropic, OpenAI, Google)
 
@@ -827,6 +827,100 @@ git commit -m "feat: provider ingestors — Anthropic, OpenAI, Google (all write
 
 ---
 
+### Task 10C: Ingestion Quality — `infer` flag and `expiry_time`
+
+**Status: not started. Unblocked — no phase dependency.**
+
+**Context:** Informed by HydraDB's ingestion model. HydraDB's `infer: true` flag routes raw signals (logs, dialogue, event streams) through an extraction step that derives structured preferences before storage, rather than requiring callers to pre-structure content. This maps well onto AgentDB's "memory that improves" principle: inference quality is an ingestion concern, not a governance concern — the trust zone and `PermissionRouter` apply after inference, not before it. Separately, HydraDB supports per-record `expiry_time`; AgentDB's `expiry_policy` enum exists but is abstract and unattached — a concrete datetime field is the missing piece.
+
+**Governance note:** both features are strictly scoped to `agent_inferred` writes. `human_approved` records are never inferred into and never expire.
+
+**Files:**
+- Modify: `agentdb/core/models.py` — add `expiry_time: datetime | None = None` to `MemoryRecord`
+- Modify: `agentdb/governance/lifecycle_manager.py` — honour `expiry_time` in `run_sweep()`
+- Modify: `agentdb/interface/client.py` — add `infer: bool = False` and `expiry_time: datetime | None = None` params to `write()`; add `_infer_value()` helper
+- Modify: relevant SQLite schema (add `expiry_time` column, `ALTER TABLE` migration)
+- Create: `tests/unit/test_infer_write.py`
+
+**`infer` design:**
+
+`infer=True` on `write()` passes the raw `value` through a configurable extraction callable before storage. The extraction callable is set at `AgentDB(infer_fn=...)` init time (default `None` — raises `ValueError` if `infer=True` is used without one). This keeps the LLM/extraction dependency opt-in and avoids baking a specific provider into the core.
+
+```python
+# Caller wires the extractor at init time
+def my_extractor(raw: str) -> str:
+    # call an LLM, regex, or rule set — anything that returns structured text
+    ...
+
+db = AgentDB(infer_fn=my_extractor)
+
+# Agent writes raw signal; AgentDB extracts before storage
+db.write(
+    key="memory/episodic/session-42/style",
+    value="User toggled dark mode on, kept it three weeks, switched once, came back.",
+    origin="agent_inferred",
+    agent_id="assistant",
+    infer=True,
+    # stored as: "User prefers dark mode."
+)
+```
+
+The stored record carries `infer=True` in its metadata so callers can distinguish inferred records from verbatim ones in the audit log.
+
+**`expiry_time` design:**
+
+```python
+from datetime import datetime, timedelta
+
+db.write(
+    key="memory/working/session-42/task_context",
+    value="User is mid-checkout on the Pro plan",
+    origin="agent_inferred",
+    agent_id="assistant",
+    expiry_time=datetime.utcnow() + timedelta(hours=2),
+)
+# lifecycle.run_sweep() will archive this once expiry_time passes
+```
+
+`human_approved` records: `expiry_time` is accepted on the model but `run_sweep()` must skip them regardless of the field value — same immunity as confidence decay.
+
+**Failing tests to write first:**
+
+```python
+# tests/unit/test_infer_write.py
+def test_infer_false_stores_verbatim(db):
+    db.write(key="k", value="raw signal", origin="agent_inferred", agent_id="a", infer=False)
+    assert db.read("k", agent_id="a").value == "raw signal"
+
+def test_infer_true_calls_extractor(db_with_extractor):
+    db_with_extractor.write(key="k", value="raw", origin="agent_inferred", agent_id="a", infer=True)
+    assert db_with_extractor.read("k", agent_id="a").value == "extracted"
+
+def test_infer_true_without_extractor_raises(db):
+    with pytest.raises(ValueError, match="infer_fn"):
+        db.write(key="k", value="raw", origin="agent_inferred", agent_id="a", infer=True)
+
+def test_expiry_time_archived_by_sweep(db):
+    past = datetime.utcnow() - timedelta(seconds=1)
+    db.write(key="k", value="v", origin="agent_inferred", agent_id="a", expiry_time=past)
+    db.lifecycle.run_sweep()
+    assert db.read("k", agent_id="a") is None
+
+def test_expiry_time_not_archived_if_future(db):
+    future = datetime.utcnow() + timedelta(hours=1)
+    db.write(key="k", value="v", origin="agent_inferred", agent_id="a", expiry_time=future)
+    db.lifecycle.run_sweep()
+    assert db.read("k", agent_id="a") is not None
+
+def test_human_approved_not_expired_regardless(db):
+    past = datetime.utcnow() - timedelta(seconds=1)
+    db.write(key="skills/s", value="v", origin="human_approved", agent_id="a", expiry_time=past)
+    db.lifecycle.run_sweep()
+    assert db.read("skills/s", agent_id="a") is not None
+```
+
+---
+
 ### Task 10B (Deferred): Provider App-Level Skill Sync Bridge
 
 Goal:
@@ -853,12 +947,118 @@ Rationale:
 
 ---
 
+### Task 10D: Centralized `memory.yaml` Configuration
+
+**Status: not started. Unblocked.**
+
+**Context:** All tunable defaults (lifecycle thresholds, ranker weights, retrieve limits, tracking limits) are currently hardcoded as class attributes or constructor defaults with no path to `memory.yaml`. The file exists and is read at init time, but almost nothing from it is applied beyond mode validation and DB path. The `mode` field (`budget_optimized` / `full_storage`) exists in both `memory.yaml` and the adapter profile system but they are disconnected — a user sets them in two places and they can drift.
+
+**Goal:** `memory.yaml` becomes the single source of truth for all tunable defaults. Mode defines a baseline; per-field overrides win over mode defaults; explicit constructor params win over everything.
+
+**Expanded `memory.yaml` schema:**
+
+```yaml
+mode: budget_optimized   # drives all defaults below
+
+lifecycle:
+  confidence_decay_rate: 0.0
+  archival_threshold: 0.10
+  staleness_days: 90
+  reinforce_rate: 0.10
+
+retrieval:
+  retrieve_limit: 5           # 20 in full_storage
+  memory_budget_chars: 2000   # 12000 in full_storage
+  ranker_weights:
+    provenance: 0.35
+    recency: 0.25
+    confidence: 0.25
+    causal: 0.15
+    semantic: 0.0
+  conflict_threshold: 0.85    # Phase 4
+
+capture:
+  conversation_jsonl: false
+  tracking_max_files_per_directory: 200
+
+reconciliation:
+  triggers:
+    - conversation_started
+
+database:
+  mode: embedded
+  path: database/agentdb.sqlite
+```
+
+**Resolution order (lowest → highest priority):**
+1. Mode defaults (built-in for `budget_optimized` / `full_storage`)
+2. Per-field overrides in `memory.yaml`
+3. Explicit constructor params to `AgentDB()` (sentinel `None` → resolved from config)
+
+**Files:**
+- Modify: `agentdb/interface/client.py` — add `_MODE_DEFAULTS` dict, `_resolve_config()` helper, wire resolved values to `LifecycleManager` and `MultiSignalRanker` at init; expose `db.config` property
+- Modify: `agentdb/governance/lifecycle_manager.py` — add constructor params (`confidence_decay_rate`, `archival_threshold`, `staleness_days`, `reinforce_rate`); class attributes remain as fallback defaults
+- Create: `tests/unit/test_config.py`
+
+**Backwards compatibility:** all existing `AgentDB()` call sites without `memory_dir` continue to get the same hardcoded defaults. `LifecycleManager` class attributes remain so direct instantiation in tests is unchanged.
+
+**Failing tests to write first:**
+
+```python
+# tests/unit/test_config.py
+def test_budget_optimized_defaults_applied_to_lifecycle(tmp_path)
+    # LifecycleManager.STALENESS_DAYS should be 90, ARCHIVAL_THRESHOLD 0.10
+
+def test_full_storage_mode_uses_higher_retrieve_limit(tmp_path)
+    # db.config["retrieval"]["retrieve_limit"] == 20
+
+def test_yaml_field_override_beats_mode_default(tmp_path)
+    # memory.yaml has lifecycle.staleness_days: 30
+    # db.lifecycle.STALENESS_DAYS == 30
+
+def test_ranker_uses_config_weights(tmp_path)
+    # memory.yaml has retrieval.ranker_weights.provenance: 0.50 (with adjusted others)
+    # db._ranker.w_provenance == 0.50
+
+def test_no_memory_dir_uses_hardcoded_defaults(tmp_path)
+    # AgentDB() with no memory_dir — defaults unchanged
+
+def test_config_property_returns_resolved_dict(tmp_path)
+    # db.config["lifecycle"]["staleness_days"] == 90
+```
+
+---
+
 ## Phase 4 — Semantic Search + pgvector
 **Exit criterion: embedding-based semantic search active. Semantic conflict detection live. pgvector backend available.**
 
 **Status: not started, correctly phase-gated** — no `retrieval/embedding.py`, no vector library usage anywhere in the codebase.
 
 **Scope narrowed 2026-07-11:** build local-only first (`all-MiniLM-L6-v2` via sentence-transformers) — zero API cost, zero API-key/network dependency, nothing to configure. The spec below supports OpenAI and Voyage backends too; treat those as deferred until the local model is proven insufficient for retrieval quality. Shipping all three backends up front is more surface (config branching, two extra API integrations, two extra sets of credentials to manage) than Design Principle 11 ("memory assets are subordinate... only in scope when they improve recall/reduce conflicts/increase accuracy") justifies before there's evidence the local model isn't good enough.
+
+**Additional Phase 4 deliverables (informed by HydraDB comparison, 2026-07-17):**
+
+Once embeddings are active, two retrieval-quality improvements become meaningful and should land in this phase:
+
+**1. `mode` parameter on `retrieve()` — `"fast"` vs `"thinking"`**
+
+Maps to AgentDB's existing architectural split: `pre_tool_use` (action-driven, latency-sensitive) naturally runs `fast`; `prepare_turn` (turn-start, can absorb latency) benefits from `thinking`.
+
+- `fast` (default): current single-pass ranked retrieval. No change.
+- `thinking`: multi-query expansion — generate 2–3 query variants from the original (e.g. synonym expansion, entity rephrasing), run retrieval for each, merge and rerank the union by score. Higher latency; improves recall for ambiguous or broad queries.
+
+Both modes go through the same `PermissionRouter` and return the same `RetrievalResult` shape. Mode only affects the retrieval path, not governance.
+
+Adapter wiring: `AgentDBClaudeMiddleware.prepare_turn()` should default to `mode="thinking"`; `pre_tool_use()` should default to `mode="fast"`. Both should accept an override.
+
+**2. Per-call `alpha` and `recency_bias` on `retrieve()`**
+
+- `alpha: float = 0.8` — hybrid ranking weight (0.0 = keyword-only, 1.0 = semantic-only). Replaces the current hardcoded semantic weight of 0.0 once Phase 4 activates. Default 0.8 matches the Phase 4 target weight distribution.
+- `recency_bias: float = 0.0` — additive boost to the recency signal for this call only (0.0–1.0). Useful when a caller knows the query is time-sensitive (e.g. "what changed today") without changing global ranker weights.
+
+Both params are passed into `MultiSignalRanker` as call-time overrides; they do not mutate the ranker's configured weights. The existing `weight_*` constructor params remain the global defaults.
+
+These are retrieval quality improvements only — no governance implications. Defer implementation until the semantic signal is non-zero (i.e. Phase 4 embeddings active), since `alpha` has no effect when `weight_semantic = 0`.
 
 > **[DECISION required before starting]** Confirm the local model is `all-MiniLM-L6-v2` (384 dims) and not some other sentence-transformers model. If/when local proves insufficient, revisit `text-embedding-3-small` (OpenAI, 1536 dims) or `voyage-3` (Voyage AI, 1024 dims) — both remain in the spec below for that path.
 >
@@ -1106,18 +1306,16 @@ Full task expansion after Phase 3 is complete.
 
 > **Read before implementing:**
 > - **Hermes:** `docs/integrations/hermes.md` — full design brief: 14-hook mapping table (verified against Hermes source), session key mapping, skill coexistence, `on_pre_compress` summarizer wiring, `db.gateway.subscribe` conflict notification pattern, open questions. This is the spec; what follows is the plan.
-> - **OpenClaw:** `docs/integrations/openclaw.md` — sidecar shape, four open questions that must be resolved before writing code.
-> - **Assessment:** `docs/integrations/openclaw-hermes-assessment.md` — why Hermes first, governance wrapper strategy (C) for both.
+> - **Assessment:** `docs/integrations/openclaw-hermes-assessment.md` — Hermes selection rationale (kept for archaeology).
 
 **Type: 12a, real-time enforcement.** Per `docs/context/architecture-principles.md` Principle 12, an adapter is not "done" on API existence alone — it must name the exact point in the framework's own control flow where AgentDB governance executes, and a test must prove that framework-triggered point changes what context/instructions reach the agent.
 
-**Build order updated 2026-07-13:** Hermes first, then OpenClaw. deepagents deprioritized — `AgentDBBackend` already covers it generically and no real consumer has asked for the dedicated adapter. All adapters must subclass `GatewayAdapter` (Task 16) — never call `db.register_reconciliation_handler`/`dispatch_reconciliation_trigger` directly.
+**Adapter strategy (updated 2026-07-17):** Hermes is the only named adapter target. OpenClaw dropped — `AgentDBBackend` covers any other framework generically, and no real consumer has asked for a dedicated adapter. All adapters must subclass `GatewayAdapter` (Task 16) — never call `db.register_reconciliation_handler`/`dispatch_reconciliation_trigger` directly.
 
-**Hermes status: complete (2026-07-14). Commits 4ba16eb..6940fa7 + a1f6c4d. AgentDBHermesProvider implements MemoryProvider ABC + GatewayAdapter; 14 hooks; Principle 12a proven via HermesMemoryManagerShim tests. OpenClaw not started.**
+**Hermes status: complete (2026-07-14). Commits 4ba16eb..6940fa7 + a1f6c4d. AgentDBHermesProvider implements MemoryProvider ABC + GatewayAdapter; 14 hooks; Principle 12a proven via HermesMemoryManagerShim tests.**
 
 **Files:**
 - Create: `agentdb/adapters/hermes.py` — implement Hermes's `MemoryProvider` ABC as a `GatewayAdapter` subclass. Direct Python import, no sidecar. Full design in `docs/integrations/hermes.md`. **Build this first.**
-- Create: `agentdb/adapters/openclaw.py` — local Python sidecar (HTTP). Governance wrapper approach (C). Three open questions in `docs/integrations/openclaw.md` must be resolved before writing code. **Build after Hermes.**
 - Defer: `agentdb/adapters/deepagents.py` — deprioritized; `AgentDBBackend` covers it generically today.
 - Defer: `langgraph.py`, `crewai.py`, `openai_agents.py`, `google_adk.py`, `autogen.py` — build only when a specific framework's users ask for one.
 
@@ -1129,7 +1327,7 @@ Full task expansion after Phase 3 is complete.
 
 **Type:** Conceptual unification — not a new runtime process. `Gateway` wraps the existing in-memory reconciliation dispatcher and adds the proposal workflow surface. No new event bus, no new storage.
 
-**Why now (before the public client gap):** the public client gap will need to call `db.gateway.dispatch("conflict_detected", ...)` when it lands. All new adapters (Hermes, OpenClaw) and the Task 13 proposal workflow build on `db.gateway`. Building this first keeps everything downstream consistent and avoids a second migration later.
+**Why now (before the public client gap):** the public client gap will need to call `db.gateway.dispatch("conflict_detected", ...)` when it lands. The Hermes adapter and the Task 13 proposal workflow both build on `db.gateway`. Building this first keeps everything downstream consistent and avoids a second migration later.
 
 **Files:**
 - Create: `agentdb/gateway/__init__.py` — `Gateway` class
@@ -1232,9 +1430,8 @@ Items (detail deferred to closer to Phase 4 completion):
 
 | Decision | Resolution |
 |---|---|
-| Recommended next actions ordering | ~~`db.gateway` → public client gap → Task 9 → Hermes adapter~~ all done 2026-07-14 → **OpenClaw adapter** → Phase 3 (Task 10 provider ingestors) |
-| Adapter order | Hermes first (`MemoryProvider` ABC, direct Python), OpenClaw second (sidecar). deepagents deprioritized. |
-| OpenClaw integration shape | (C) governance wrapper — not backend replacement (A) or additive layer (B). See `docs/integrations/openclaw-hermes-assessment.md`. |
+| Recommended next actions ordering | ~~`db.gateway` → public client gap → Task 9 → Hermes adapter~~ all done 2026-07-14 → ~~OpenClaw adapter~~ dropped 2026-07-17 → ~~Phase 3 (Task 10 provider ingestors)~~ deferred 2026-07-17 — validate core loop with Claude SDK + Hermes in production first; revisit provider ingestors once the core loop is proven |
+| Adapter strategy | Hermes only (`MemoryProvider` ABC, direct Python). OpenClaw dropped 2026-07-17. deepagents deprioritized — `AgentDBBackend` covers generically. |
 | Task 9 scope | Configurable on-demand sweep (`db.lifecycle.run_sweep()`): archival + gentle decay (off by default). No background scheduler. |
 | SkillDraftsAPI vs AgentDB | Resolved as `db.gateway.propose`/`approve`/`reject`/`list_proposals` — unified `Gateway` surface (Task 16). |
 | Conflict queue UI | `db.gateway.conflict_queue()` — foundation for any consumer (MCP, CLI, Slack/Telegram notifier). |
@@ -1249,7 +1446,11 @@ Items (detail deferred to closer to Phase 4 completion):
 
 | Decision | Needed before | Notes |
 |---|---|---|
-| OpenClaw hook names | `openclaw.py` adapter | Exact turn-lifecycle hook name(s) for pre-response/post-response unverified — confirm via OpenClaw plugin SDK docs. See `docs/integrations/openclaw.md` open questions. |
-| OpenClaw sidecar latency | `openclaw.py` adapter | Confirm latency cost of sidecar call inside `before_tool_call`'s inline path is acceptable. |
-| OpenClaw memory-core migration | `openclaw.py` adapter | Backfill story from memory-core's existing SQLite index for opted-in agents. |
 | Conflict similarity threshold tuning | Phase 4 | 0.85 is the starting default; needs a labelled test set to tune against real conflict pairs. |
+| `infer_fn` interface contract | Task 10C | Confirm callable signature: `(raw: str) -> str`, or richer `(raw: str, key: str, agent_id: str) -> str` to give extractors more context. |
+
+### Deferred Research
+
+| Topic | When to revisit | Notes |
+|---|---|---|
+| **Graph-native relations** | After AgentDB core loop is stable and in production use | HydraDB's primary business differentiator: a context graph connecting memory nodes, with relationship traversal at retrieval time (`graph_context: true`, `forceful_relations`). AgentDB's current entity tagging is keyword-based and flat — no edges, no traversal. The question is whether graph traversal meaningfully improves action quality over provenance-weighted flat retrieval for the workloads AgentDB targets. **Research plan once stable:** run controlled A/B retrieval benchmarks (LongMemEvals or equivalent) comparing AgentDB's multi-signal flat retrieval vs a graph-augmented path (networkx or a lightweight graph layer over the existing SQLite store). If performance gap justifies the infrastructure cost, a `CausalGraph` extension (already planned for Phase 5) could be the first graph primitive to build on — it already assumes a directed graph structure (`record_to_retrievals` / `retrieval_to_outcomes`). Extending it with memory-to-memory edges (e.g. "this memory was written as a consequence of retrieving that one") would be the minimal graph-native increment. Full graph DB (Neo4j, etc.) is out of scope unless benchmarks show it's necessary — SQLite adjacency tables first. |

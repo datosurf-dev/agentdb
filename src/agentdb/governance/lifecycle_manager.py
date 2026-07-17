@@ -30,14 +30,21 @@ class LifecycleManager:
         store: MemoryStore,
         system: SystemStats,
         session_record_ids: dict | None = None,
+        confidence_decay_rate: float | None = None,
+        archival_threshold: float | None = None,
+        staleness_days: int | None = None,
+        reinforce_rate: float | None = None,
     ) -> None:
         self._store = store
         self._system = system
-        # Shared reference to AgentDB._session_record_ids so record_outcome
-        # can find what was retrieved in a given session.
         self._session_record_ids: dict[str, list[str]] = (
             session_record_ids if session_record_ids is not None else {}
         )
+        cls = type(self)
+        self.CONFIDENCE_DECAY_RATE = confidence_decay_rate if confidence_decay_rate is not None else cls.CONFIDENCE_DECAY_RATE
+        self.ARCHIVAL_THRESHOLD = archival_threshold if archival_threshold is not None else cls.ARCHIVAL_THRESHOLD
+        self.STALENESS_DAYS = staleness_days if staleness_days is not None else cls.STALENESS_DAYS
+        self.REINFORCE_RATE = reinforce_rate if reinforce_rate is not None else cls.REINFORCE_RATE
 
     # ------------------------------------------------------------------
     # Sweep

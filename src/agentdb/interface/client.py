@@ -194,6 +194,79 @@ class SkillsAPI:
 
 
 # ---------------------------------------------------------------------------
+# Mode-based defaults and config resolution
+# ---------------------------------------------------------------------------
+
+_MODE_DEFAULTS: dict = {
+    "budget_optimized": {
+        "lifecycle": {
+            "confidence_decay_rate": 0.0,
+            "archival_threshold": 0.10,
+            "staleness_days": 90,
+            "reinforce_rate": 0.10,
+        },
+        "retrieval": {
+            "retrieve_limit": 5,
+            "memory_budget_chars": 2000,
+            "ranker_weights": {
+                "provenance": 0.35,
+                "recency": 0.25,
+                "confidence": 0.25,
+                "causal": 0.15,
+                "semantic": 0.0,
+            },
+            "conflict_threshold": 0.85,
+        },
+        "capture": {
+            "conversation_jsonl": False,
+            "tracking_max_files_per_directory": 200,
+        },
+    },
+    "full_storage": {
+        "lifecycle": {
+            "confidence_decay_rate": 0.0,
+            "archival_threshold": 0.10,
+            "staleness_days": 90,
+            "reinforce_rate": 0.10,
+        },
+        "retrieval": {
+            "retrieve_limit": 20,
+            "memory_budget_chars": 12000,
+            "ranker_weights": {
+                "provenance": 0.35,
+                "recency": 0.25,
+                "confidence": 0.25,
+                "causal": 0.15,
+                "semantic": 0.0,
+            },
+            "conflict_threshold": 0.85,
+        },
+        "capture": {
+            "conversation_jsonl": True,
+            "tracking_max_files_per_directory": 200,
+        },
+    },
+}
+
+
+def _deep_merge(base: dict, override: dict) -> dict:
+    result = dict(base)
+    for key, val in override.items():
+        if key in result and isinstance(result[key], dict) and isinstance(val, dict):
+            result[key] = _deep_merge(result[key], val)
+        else:
+            result[key] = val
+    return result
+
+
+def _resolve_config(mode: str, yaml_dict: dict) -> dict:
+    """Merge mode defaults with per-field yaml overrides. yaml_dict wins."""
+    base = _MODE_DEFAULTS.get(mode, _MODE_DEFAULTS["budget_optimized"])
+    override = {k: yaml_dict[k] for k in ("lifecycle", "retrieval", "capture") if k in yaml_dict}
+    return _deep_merge(base, override)
+
+
+# ---------------------------------------------------------------------------
 # Default memory.yaml content
 # ---------------------------------------------------------------------------
 
@@ -202,6 +275,22 @@ mode: budget_optimized
 tracked_directories: []
 capture:
   conversation_jsonl: false
+  tracking_max_files_per_directory: 200
+lifecycle:
+  confidence_decay_rate: 0.0
+  archival_threshold: 0.10
+  staleness_days: 90
+  reinforce_rate: 0.10
+retrieval:
+  retrieve_limit: 5
+  memory_budget_chars: 2000
+  ranker_weights:
+    provenance: 0.35
+    recency: 0.25
+    confidence: 0.25
+    causal: 0.15
+    semantic: 0.0
+  conflict_threshold: 0.85
 reconciliation:
   triggers:
     - conversation_started
@@ -223,7 +312,7 @@ class AgentDB:
         permissions_path: Optional[Any] = None,
         tracking_directories: Optional[list[str]] = None,
         tracking_root: Any = ".",
-        tracking_max_files_per_directory: int = 200,
+        tracking_max_files_per_directory: Optional[int] = None,
         db_path: Optional[Any] = None,
         summarizer: Optional[Callable] = None,
         infer_fn: Optional[Callable] = None,
@@ -301,14 +390,33 @@ class AgentDB:
         # Initialize outcomes table
         self._init_outcomes_table()
 
+        # Resolve mode-based config
+        mode = self.memory_config.get("mode", "budget_optimized") if self.memory_config else "budget_optimized"
+        self._resolved_config = _resolve_config(mode, self.memory_config)
+
         # Tracking config
         self.tracking_directories: list[str] = tracking_directories or []
         self.tracking_root: Path = Path(tracking_root).resolve()
-        self.tracking_max_files_per_directory: int = tracking_max_files_per_directory
+        self.tracking_max_files_per_directory: int = (
+            tracking_max_files_per_directory
+            if tracking_max_files_per_directory is not None
+            else self._resolved_config["capture"]["tracking_max_files_per_directory"]
+        )
 
         # Session tracking: session_id -> list of record ids retrieved
         self._session_record_ids: dict[str, list[str]] = {}
-        self._ranker = MultiSignalRanker()
+
+        # Ranker with weights from resolved config
+        rw = self._resolved_config["retrieval"]["ranker_weights"]
+        lc = self._resolved_config["lifecycle"]
+        self._ranker = MultiSignalRanker(
+            weight_provenance=rw["provenance"],
+            weight_recency=rw["recency"],
+            weight_confidence=rw["confidence"],
+            weight_causal=rw["causal"],
+            weight_semantic=rw["semantic"],
+            staleness_days=lc["staleness_days"],
+        )
 
         # Gateway surface (initialized after all dependencies are ready)
         self._gateway: Optional[Gateway] = None
@@ -318,6 +426,10 @@ class AgentDB:
             store=self._store,
             system=self._system,
             session_record_ids=self._session_record_ids,
+            confidence_decay_rate=lc["confidence_decay_rate"],
+            archival_threshold=lc["archival_threshold"],
+            staleness_days=lc["staleness_days"],
+            reinforce_rate=lc["reinforce_rate"],
         )
 
     @property
@@ -347,6 +459,11 @@ class AgentDB:
     def lifecycle(self) -> LifecycleManager:
         """Lifecycle manager: sweep, reinforce, record_outcome."""
         return self._lifecycle
+
+    @property
+    def config(self) -> dict:
+        """Fully resolved config: mode defaults merged with memory.yaml overrides."""
+        return self._resolved_config
 
     def _init_outcomes_table(self) -> None:
         with self._store._connect() as conn:
