@@ -327,200 +327,7 @@ class AgentDB:
 - Create: `agentdb/governance/lifecycle_manager.py`
 - Create: `tests/unit/test_lifecycle.py`
 
-- [ ] **Step 1: Write failing tests**
-
-> **Import note (verified 2026-07-14):** The spec originally referenced `SQLiteMemoryStore` from `agentdb.core.memory_store` and `SystemTables` from `agentdb.core.system_tables` — neither module exists. The real classes are `MemoryStore` and `SystemStats`, both defined in `agentdb/interface/client.py`. Before implementing, extract them to `agentdb/core/store.py` and `agentdb/core/system.py` respectively, then update the `client.py` imports — this avoids a circular import between `lifecycle_manager.py` and `client.py`. Tests and `LifecycleManager` itself should import from those new core modules, not from `interface.client`.
-
-```python
-# tests/unit/test_lifecycle.py
-import pytest
-from datetime import datetime, timedelta
-from pathlib import Path
-from agentdb.core.models import MemoryRecord, Origin, TrustLevel
-from agentdb.core.store import MemoryStore          # extracted from interface/client.py
-from agentdb.core.system import SystemStats         # extracted from interface/client.py
-from agentdb.governance.lifecycle_manager import LifecycleManager
-
-@pytest.fixture
-def store(tmp_path):
-    return MemoryStore(db_path=tmp_path / "test.db")
-
-@pytest.fixture
-def manager(store, tmp_path):
-    sys = SystemStats(db_path=tmp_path / "test.db")
-    return LifecycleManager(store=store, system=sys)
-
-def _rec(agent_id="a1", key="k", origin=Origin.AGENT_INFERRED,
-         trust=TrustLevel.AGENT, confidence=1.0, days_since_retrieved=0):
-    r = MemoryRecord(key=key, value="v", origin=origin,
-                     trust_level=trust, agent_id=agent_id,
-                     confidence=confidence)
-    offset = datetime.utcnow() - timedelta(days=days_since_retrieved)
-    r.last_retrieved = offset
-    r.updated_at = offset
-    return r
-
-def test_decay_reduces_confidence(store, manager):
-    r = store.put(_rec(confidence=1.0, days_since_retrieved=10))
-    summary = manager.run_cycle()
-    updated = store.get(r.id)
-    assert updated.confidence < 1.0
-
-def test_human_approved_does_not_decay(store, manager):
-    r = store.put(_rec(origin=Origin.HUMAN_APPROVED, trust=TrustLevel.HUMAN,
-                       confidence=1.0, days_since_retrieved=100))
-    manager.run_cycle()
-    updated = store.get(r.id)
-    assert updated.confidence == 1.0
-
-def test_below_threshold_gets_archived(store, manager):
-    manager.ARCHIVAL_THRESHOLD = 0.5
-    r = store.put(_rec(confidence=0.45))
-    manager.run_cycle()
-    assert store.get(r.id) is None  # archived
-
-def test_stale_record_archived(store, manager):
-    manager.STALENESS_DAYS = 30
-    r = store.put(_rec(days_since_retrieved=35))
-    manager.run_cycle()
-    assert store.get(r.id) is None
-
-def test_active_record_not_archived(store, manager):
-    r = store.put(_rec(confidence=0.9, days_since_retrieved=1))
-    manager.run_cycle()
-    assert store.get(r.id) is not None
-
-def test_reinforce_boosts_confidence(store, manager):
-    r = store.put(_rec(confidence=0.5))
-    manager.reinforce(r.id)
-    updated = store.get(r.id)
-    assert updated.confidence > 0.5
-
-def test_run_cycle_returns_summary(store, manager):
-    store.put(_rec(key="k1"))
-    summary = manager.run_cycle()
-    assert "decayed" in summary
-    assert "archived" in summary
-```
-
-- [ ] **Step 2: Run to verify failure**
-
-```bash
-pytest tests/unit/test_lifecycle.py -v
-```
-
-- [ ] **Step 3: Write `agentdb/governance/lifecycle_manager.py`**
-
-```python
-import sqlite3
-from datetime import datetime, timedelta
-from pathlib import Path
-
-from ..core.store import MemoryStore          # extracted from interface/client.py pre-Task 9
-from ..core.models import Origin
-from ..core.system import SystemStats         # extracted from interface/client.py pre-Task 9
-
-
-class LifecycleManager:
-    DECAY_INTERVAL_DAYS   = 7
-    CONFIDENCE_DECAY_RATE = 0.05   # per cycle, agent_inferred only
-    ARCHIVAL_THRESHOLD    = 0.10
-    STALENESS_DAYS        = 90
-    REINFORCE_RATE        = 0.10   # confidence boost per reinforce call
-
-    def __init__(self, store: MemoryStore, system: SystemStats):
-        self._store  = store
-        self._system = system
-
-    def run_cycle(self) -> dict:
-        """
-        One full lifecycle pass.
-        1. Decay confidence on unreinforced agent_inferred + provider_ingested records
-        2. Archive records below ARCHIVAL_THRESHOLD
-        3. Archive records stale for STALENESS_DAYS
-        Returns: {decayed: N, archived: N}
-        human_approved records are never touched.
-        """
-        now = datetime.utcnow()
-        stale_cutoff = now - timedelta(days=self.STALENESS_DAYS)
-
-        decayed, archived = 0, 0
-
-        with self._store._connect() as conn:
-            conn.row_factory = sqlite3.Row
-            rows = conn.execute(
-                "SELECT id, confidence, origin, last_retrieved, updated_at "
-                "FROM memories WHERE archived=0"
-            ).fetchall()
-
-        for row in rows:
-            if row["origin"] == Origin.HUMAN_APPROVED.value:
-                continue  # never decay
-
-            record_id  = row["id"]
-            confidence = row["confidence"]
-            ref_str    = row["last_retrieved"] or row["updated_at"]
-            ref_time   = datetime.fromisoformat(ref_str)
-
-            # Decay
-            new_confidence = confidence - self.CONFIDENCE_DECAY_RATE
-            new_confidence = max(new_confidence, 0.0)
-
-            # Archive?
-            should_archive = (
-                new_confidence < self.ARCHIVAL_THRESHOLD
-                or ref_time < stale_cutoff
-            )
-
-            with self._store._connect() as conn:
-                if should_archive:
-                    conn.execute(
-                        "UPDATE memories SET archived=1, updated_at=? WHERE id=?",
-                        (now.isoformat(), record_id)
-                    )
-                    archived += 1
-                else:
-                    conn.execute(
-                        "UPDATE memories SET confidence=?, updated_at=? WHERE id=?",
-                        (new_confidence, now.isoformat(), record_id)
-                    )
-                    if new_confidence < confidence:
-                        decayed += 1
-
-        return {"decayed": decayed, "archived": archived}
-
-    def reinforce(self, record_id: str) -> None:
-        """
-        Boost confidence toward 1.0 and reset decay clock.
-        Called after positive outcome signal. Phase 2: explicit human feedback only.
-        """
-        now = datetime.utcnow()
-        with self._store._connect() as conn:
-            row = conn.execute(
-                "SELECT confidence FROM memories WHERE id=?", (record_id,)
-            ).fetchone()
-            if row is None:
-                return
-            new_confidence = min(row["confidence"] + self.REINFORCE_RATE, 1.0)
-            conn.execute(
-                "UPDATE memories SET confidence=?, last_retrieved=?, updated_at=? WHERE id=?",
-                (new_confidence, now.isoformat(), now.isoformat(), record_id)
-            )
-```
-
-- [ ] **Step 4: Run tests**
-
-```bash
-pytest tests/unit/test_lifecycle.py -v
-```
-Expected: all 7 PASS.
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add agentdb/governance/lifecycle_manager.py tests/unit/test_lifecycle.py
-git commit -m "feat: lifecycle manager — confidence decay, staleness archival, reinforcement"
-```
+Implementation complete. See commit 7e315e1.
 
 ---
 
@@ -829,7 +636,7 @@ git commit -m "feat: provider ingestors — Anthropic, OpenAI, Google (all write
 
 ### Task 10C: Ingestion Quality — `infer` flag and `expiry_time`
 
-**Status: not started. Unblocked — no phase dependency.**
+**Status: complete (2026-07-17, commit 2d7dccb).**
 
 **Context:** Informed by HydraDB's ingestion model. HydraDB's `infer: true` flag routes raw signals (logs, dialogue, event streams) through an extraction step that derives structured preferences before storage, rather than requiring callers to pre-structure content. This maps well onto AgentDB's "memory that improves" principle: inference quality is an ingestion concern, not a governance concern — the trust zone and `PermissionRouter` apply after inference, not before it. Separately, HydraDB supports per-record `expiry_time`; AgentDB's `expiry_policy` enum exists but is abstract and unattached — a concrete datetime field is the missing piece.
 
@@ -884,41 +691,6 @@ db.write(
 
 `human_approved` records: `expiry_time` is accepted on the model but `run_sweep()` must skip them regardless of the field value — same immunity as confidence decay.
 
-**Failing tests to write first:**
-
-```python
-# tests/unit/test_infer_write.py
-def test_infer_false_stores_verbatim(db):
-    db.write(key="k", value="raw signal", origin="agent_inferred", agent_id="a", infer=False)
-    assert db.read("k", agent_id="a").value == "raw signal"
-
-def test_infer_true_calls_extractor(db_with_extractor):
-    db_with_extractor.write(key="k", value="raw", origin="agent_inferred", agent_id="a", infer=True)
-    assert db_with_extractor.read("k", agent_id="a").value == "extracted"
-
-def test_infer_true_without_extractor_raises(db):
-    with pytest.raises(ValueError, match="infer_fn"):
-        db.write(key="k", value="raw", origin="agent_inferred", agent_id="a", infer=True)
-
-def test_expiry_time_archived_by_sweep(db):
-    past = datetime.utcnow() - timedelta(seconds=1)
-    db.write(key="k", value="v", origin="agent_inferred", agent_id="a", expiry_time=past)
-    db.lifecycle.run_sweep()
-    assert db.read("k", agent_id="a") is None
-
-def test_expiry_time_not_archived_if_future(db):
-    future = datetime.utcnow() + timedelta(hours=1)
-    db.write(key="k", value="v", origin="agent_inferred", agent_id="a", expiry_time=future)
-    db.lifecycle.run_sweep()
-    assert db.read("k", agent_id="a") is not None
-
-def test_human_approved_not_expired_regardless(db):
-    past = datetime.utcnow() - timedelta(seconds=1)
-    db.write(key="skills/s", value="v", origin="human_approved", agent_id="a", expiry_time=past)
-    db.lifecycle.run_sweep()
-    assert db.read("skills/s", agent_id="a") is not None
-```
-
 ---
 
 ### Task 10B (Deferred): Provider App-Level Skill Sync Bridge
@@ -949,7 +721,7 @@ Rationale:
 
 ### Task 10D: Centralized `memory.yaml` Configuration
 
-**Status: not started. Unblocked.**
+**Status: complete (2026-07-17, commits 7cd0954 + beecf33). Built-in profiles: `budget_optimized`, `full_storage`, `research`. User-defined profiles via `profiles:` block with optional `extends:`. `db.config` property exposes the resolved dict.**
 
 **Context:** All tunable defaults (lifecycle thresholds, ranker weights, retrieve limits, tracking limits) are currently hardcoded as class attributes or constructor defaults with no path to `memory.yaml`. The file exists and is read at init time, but almost nothing from it is applied beyond mode validation and DB path. The `mode` field (`budget_optimized` / `full_storage`) exists in both `memory.yaml` and the adapter profile system but they are disconnected — a user sets them in two places and they can drift.
 
@@ -994,38 +766,6 @@ database:
 1. Mode defaults (built-in for `budget_optimized` / `full_storage`)
 2. Per-field overrides in `memory.yaml`
 3. Explicit constructor params to `AgentDB()` (sentinel `None` → resolved from config)
-
-**Files:**
-- Modify: `agentdb/interface/client.py` — add `_MODE_DEFAULTS` dict, `_resolve_config()` helper, wire resolved values to `LifecycleManager` and `MultiSignalRanker` at init; expose `db.config` property
-- Modify: `agentdb/governance/lifecycle_manager.py` — add constructor params (`confidence_decay_rate`, `archival_threshold`, `staleness_days`, `reinforce_rate`); class attributes remain as fallback defaults
-- Create: `tests/unit/test_config.py`
-
-**Backwards compatibility:** all existing `AgentDB()` call sites without `memory_dir` continue to get the same hardcoded defaults. `LifecycleManager` class attributes remain so direct instantiation in tests is unchanged.
-
-**Failing tests to write first:**
-
-```python
-# tests/unit/test_config.py
-def test_budget_optimized_defaults_applied_to_lifecycle(tmp_path)
-    # LifecycleManager.STALENESS_DAYS should be 90, ARCHIVAL_THRESHOLD 0.10
-
-def test_full_storage_mode_uses_higher_retrieve_limit(tmp_path)
-    # db.config["retrieval"]["retrieve_limit"] == 20
-
-def test_yaml_field_override_beats_mode_default(tmp_path)
-    # memory.yaml has lifecycle.staleness_days: 30
-    # db.lifecycle.STALENESS_DAYS == 30
-
-def test_ranker_uses_config_weights(tmp_path)
-    # memory.yaml has retrieval.ranker_weights.provenance: 0.50 (with adjusted others)
-    # db._ranker.w_provenance == 0.50
-
-def test_no_memory_dir_uses_hardcoded_defaults(tmp_path)
-    # AgentDB() with no memory_dir — defaults unchanged
-
-def test_config_property_returns_resolved_dict(tmp_path)
-    # db.config["lifecycle"]["staleness_days"] == 90
-```
 
 ---
 
@@ -1336,56 +1076,9 @@ Full task expansion after Phase 3 is complete.
 - Modify: `agentdb/adapters/claude_agent_sdk.py` — inherit `GatewayAdapter` (one-line class declaration change); use `self.gateway.subscribe`/`dispatch` for any new notification wiring
 - Create: `tests/unit/test_gateway.py`
 
-**`Gateway` class surface:**
+**`propose`/`approve`/`reject` in this task:** surface and storage only (draft as `agent_inferred` memory record, archive on approve/reject, audit-log each step). Conflict reconciliation is Task 13 scope. In this task, drafts always start as `status="pending"`.
 
-```python
-class Gateway:
-    # Reconciliation (moved from AgentDB top-level — aliases kept there)
-    def subscribe(self, trigger: str, handler: Callable) -> None: ...
-    def dispatch(self, trigger: str, **kwargs) -> None: ...
-
-    # Conflict queue (was planned for MCP Task 14 — now lives here)
-    def conflict_queue(self, resolved: bool = False) -> list[dict]: ...
-
-    # Proposal workflow (was Task 13's open question — now resolved)
-    def propose(self, name, content, scope, agent_id, entities=None, session_id=None) -> str: ...
-    def approve(self, proposal_id: str, resolution=None) -> None: ...
-    def reject(self, proposal_id: str, reason=None) -> None: ...
-    def list_proposals(self, status: str = "pending") -> list[dict]: ...
-```
-
-**`GatewayAdapter` base class:**
-
-```python
-class GatewayAdapter:
-    def __init__(self, db: "AgentDB", agent_id: str, profile: str = "budget_optimized"):
-        self._db = db
-        self._agent_id = agent_id
-        self._profile = profile
-        self.gateway = db.gateway  # direct reference, no extra wiring
-
-    # Subclasses implement these (pattern follows Hermes MemoryProvider — not enforced as ABC)
-    def prepare_turn(self, user_query: str, session_id: str): ...
-    def pre_tool_use(self, tool_name: str, tool_input: dict, session_id: str): ...
-    def finalize_turn(self, session_id: str, **kwargs): ...
-```
-
-**Backward compatibility:** `AgentDB.register_reconciliation_handler` and `AgentDB.dispatch_reconciliation_trigger` remain as pass-through aliases to `db.gateway.subscribe`/`dispatch`. No existing call sites break. Aliases are not deprecated yet — remove them only when all known consumers have migrated.
-
-**`propose`/`approve`/`reject` in this task:** implement the surface and storage only (write draft as `agent_inferred` memory record, archive on approve/reject, audit-log each step). Conflict reconciliation is Task 13 scope (depends on Task 12). In this task, drafts always start as `status="pending"`.
-
-**Tests to write:**
-```python
-# tests/unit/test_gateway.py
-def test_subscribe_and_dispatch_fires_handler()
-def test_conflict_queue_empty_before_any_conflicts()
-def test_propose_writes_memory_record()
-def test_approve_calls_skills_api()
-def test_reject_archives_draft_without_touching_skills()
-def test_list_proposals_filters_by_status()
-def test_gateway_adapter_inherits_gateway_reference()
-def test_claude_middleware_still_works_after_migration()  # regression
-```
+Full implementation complete. See commits 00dd95e..5bc0848 + a1f6c4d.
 
 ---
 
@@ -1420,7 +1113,7 @@ Items (detail deferred to closer to Phase 4 completion):
 | numpy not installed by default | Phase 1–3 | `pip install agentdb[embeddings]` activates numpy-backed semantic scoring; pure Python fallback is always available |
 | Google Vertex AI provider is experimental | Phase 3 | MemoryBankService API is less stable than Anthropic/OpenAI equivalents. Treat as beta. Pin to specific API version in provider code. |
 | ~~Real conflict detection not active~~ | ~~Phase 1–4~~ | Done 2026-07-14 — `ConflictDetector` wired into `write()`/`retrieve()` |
-| No budgeted context assembly (`budget_tokens`/`token_estimate`/`truncated`) | Phase 1–4 | Public client Task 6 gap — see Current Status → Partial → Public client |
+| ~~No budgeted context assembly (`budget_tokens`/`token_estimate`/`truncated`)~~ | ~~Phase 1–4~~ | Done 2026-07-14 — `budget_tokens` on `retrieve()`, `token_estimate`/`truncated` on `RetrievalResult` |
 
 ---
 
