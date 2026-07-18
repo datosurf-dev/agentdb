@@ -18,7 +18,7 @@ The full architecture pitch and the numbered design principles (now including Pr
 
 ## Current Repository Status (As Of 2026-07-17)
 
-Core governed memory loop is fully operational: real conflict detection, budgeted retrieval, lifecycle management, centralized config, and two adapters (Claude SDK + Hermes) are all shipped and test-covered. Phase 3 (provider ingestors) is deliberately deferred while the loop is validated in production. Later-phase hardening (semantic search, MCP, framework adapters) remains pending.
+Core governed memory loop is fully operational: real conflict detection, budgeted retrieval, lifecycle management, centralized config + profiles, MCP server (stdio/Claude Desktop), and two adapters (Claude SDK + Hermes) are all shipped and test-covered. Phase 3 (embeddings/semantic search) is deliberately deferred until the loop proves its value in production. Provider ingestors (Phase 6) and additional framework adapters (Phase 4 Task 15) remain pending.
 
 ### Feature State Matrix
 
@@ -64,12 +64,12 @@ Core governed memory loop is fully operational: real conflict detection, budgete
 |---|---|---|
 | Query-driven retrieval into turn context | Implemented (Claude SDK + Hermes) | Both adapters retrieve at turn start via `prepare_turn`. `budget_tokens` param now wired end-to-end; `RetrievalResult.token_estimate` and `truncated` are live. |
 | Action-driven retrieval (`entities`, `retrieve_by_entities`, `PreToolUse` hook) | Implemented (initial) | Core entity retrieval, adapter `pre_tool_use(...)`, and downstream hook-registration surface are implemented; automatic SDK attachment remains downstream integration work. |
-| MCP server surface | Planned (Phase 5) | Not implemented in current source tree. |
+| MCP server surface | Implemented (stdio) | `interface/mcp_server.py`: 4 tools (`memory_write`, `memory_retrieve`, `conflict_queue`, `memory_stats`). `agentdb-mcp` console script. HTTP+SSE transport deferred. |
 | Hardening and production controls | Planned (Phase 6) | Roadmap-only at this snapshot. |
 
 Validation status:
 - Editable install and package-style imports are validated via `pip install -e '.[dev]'`.
-- `python -m pytest -q tests/unit tests/integration/test_claude_agent_sdk_adapter.py` → 158 passed.
+- `python -m pytest -q tests/unit tests/integration/test_claude_agent_sdk_adapter.py` → 168 passed.
 - Plain `python -m pytest -q` (no path filter) currently **fails collection** with 6 `ModuleNotFoundError`s, one per adapter that doesn't exist yet (`autogen`, `crewai`, `deepagents`, `google_adk`, `langgraph`, `openai_agents`). This isn't a regression to fix — it's expected until those adapters are built (or their test files are skip-marked).
 
 The rest of this README describes architecture intent and phased roadmap behavior.
