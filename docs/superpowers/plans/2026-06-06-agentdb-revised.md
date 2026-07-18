@@ -44,8 +44,8 @@ To make implementation incremental and verifiable, execute the plan in these che
 7. Injection Slice: turn-start retrieval, adapter-facing context assembly, and action-timed injection contract.
 8. Reconciliation Slice: trigger-driven refresh and coordination across tracked memory assets.
 9. Improvement Loop Slice: retrieval logging, outcome-based reinforcement, and corpus quality metrics.
-10. Provider Slice (gated): Anthropic/OpenAI/Google ingestion only after the core loop is stable and useful.
-11. Interface + Hardening Slice (gated): MCP surface, adapter hardening, migration tooling, and production constraints.
+10. Provider Slice (gated): Anthropic/OpenAI/Google ingestion only after the core loop is stable and useful. **(Phase 6 — moved after hardening)**
+11. Interface + Hardening Slice (gated): MCP surface and adapter hardening (Phase 4), then production constraints and migration tooling (Phase 5).
 
 Slices 1–9 are implemented (Done/Partial — see Current Status below for exact file locations and open gaps). Slices 10–11 are not started. Treat all adapters except `claude_agent_sdk.py` as **not started** — see Repository Structure below.
 
@@ -331,7 +331,342 @@ Implementation complete. See commit 7e315e1.
 
 ---
 
-## Phase 3 — Provider Ingestion
+## Phase 3 — Semantic Search + pgvector
+**Exit criterion: embedding-based semantic search active. Semantic conflict detection live. pgvector backend available.**
+
+**Status: not started, correctly phase-gated** — no `retrieval/embedding.py`, no vector library usage anywhere in the codebase.
+
+**Scope narrowed 2026-07-11:** build local-only first (`all-MiniLM-L6-v2` via sentence-transformers) — zero API cost, zero API-key/network dependency, nothing to configure. The spec below supports OpenAI and Voyage backends too; treat those as deferred until the local model is proven insufficient for retrieval quality. Shipping all three backends up front is more surface (config branching, two extra API integrations, two extra sets of credentials to manage) than Design Principle 11 ("memory assets are subordinate... only in scope when they improve recall/reduce conflicts/increase accuracy") justifies before there's evidence the local model isn't good enough.
+
+**Additional Phase 4 deliverables (informed by HydraDB comparison, 2026-07-17):**
+
+Once embeddings are active, two retrieval-quality improvements become meaningful and should land in this phase:
+
+**1. `mode` parameter on `retrieve()` — `"fast"` vs `"thinking"`**
+
+Maps to AgentDB's existing architectural split: `pre_tool_use` (action-driven, latency-sensitive) naturally runs `fast`; `prepare_turn` (turn-start, can absorb latency) benefits from `thinking`.
+
+- `fast` (default): current single-pass ranked retrieval. No change.
+- `thinking`: multi-query expansion — generate 2–3 query variants from the original (e.g. synonym expansion, entity rephrasing), run retrieval for each, merge and rerank the union by score. Higher latency; improves recall for ambiguous or broad queries.
+
+Both modes go through the same `PermissionRouter` and return the same `RetrievalResult` shape. Mode only affects the retrieval path, not governance.
+
+Adapter wiring: `AgentDBClaudeMiddleware.prepare_turn()` should default to `mode="thinking"`; `pre_tool_use()` should default to `mode="fast"`. Both should accept an override.
+
+**2. Per-call `alpha` and `recency_bias` on `retrieve()`**
+
+- `alpha: float = 0.8` — hybrid ranking weight (0.0 = keyword-only, 1.0 = semantic-only). Replaces the current hardcoded semantic weight of 0.0 once Phase 4 activates. Default 0.8 matches the Phase 4 target weight distribution.
+- `recency_bias: float = 0.0` — additive boost to the recency signal for this call only (0.0–1.0). Useful when a caller knows the query is time-sensitive (e.g. "what changed today") without changing global ranker weights.
+
+Both params are passed into `MultiSignalRanker` as call-time overrides; they do not mutate the ranker's configured weights. The existing `weight_*` constructor params remain the global defaults.
+
+These are retrieval quality improvements only — no governance implications. Defer implementation until the semantic signal is non-zero (i.e. Phase 4 embeddings active), since `alpha` has no effect when `weight_semantic = 0`.
+
+> **[DECISION required before starting]** Confirm the local model is `all-MiniLM-L6-v2` (384 dims) and not some other sentence-transformers model. If/when local proves insufficient, revisit `text-embedding-3-small` (OpenAI, 1536 dims) or `voyage-3` (Voyage AI, 1024 dims) — both remain in the spec below for that path.
+>
+> Store model name in `embedding_version` on every record from this point forward.
+> This field enables reindexing when the model is upgraded.
+
+---
+
+### Task 11: Embedding Service
+
+**Files:**
+- Create: `agentdb/retrieval/embedding.py`
+- Create: `tests/unit/test_embedding.py`
+
+- [ ] **Step 1: Write failing tests**
+
+```python
+# tests/unit/test_embedding.py
+import pytest
+from unittest.mock import patch, MagicMock
+from agentdb.retrieval.embedding import EmbeddingService
+
+def test_embed_returns_float_list():
+    svc = EmbeddingService(model="local:all-MiniLM-L6-v2")
+    vec = svc.embed("hello world")
+    assert isinstance(vec, list)
+    assert all(isinstance(x, float) for x in vec)
+    assert len(vec) > 0
+
+def test_embed_batch_returns_list_of_lists():
+    svc = EmbeddingService(model="local:all-MiniLM-L6-v2")
+    vecs = svc.embed_batch(["hello", "world"])
+    assert len(vecs) == 2
+
+def test_model_version_property():
+    svc = EmbeddingService(model="local:all-MiniLM-L6-v2")
+    assert svc.model_version == "local:all-MiniLM-L6-v2"
+
+def test_embed_cache_hit(tmp_path):
+    svc = EmbeddingService(model="local:all-MiniLM-L6-v2")
+    v1 = svc.embed("same text")
+    v2 = svc.embed("same text")
+    assert v1 == v2  # cached — same object contents
+```
+
+- [ ] **Step 2: Write `agentdb/retrieval/embedding.py`**
+
+```python
+"""
+Embedding service. Supports:
+  local:all-MiniLM-L6-v2  — sentence-transformers, zero API cost
+  openai:text-embedding-3-small — OpenAI API
+  voyage:voyage-3           — Voyage AI API
+
+Model is set at AgentDB() init and stored on every embedded record
+in embedding_version. Changing model requires reindexing (migration tooling
+in Phase 5).
+"""
+import hashlib
+from functools import lru_cache
+from typing import Optional
+
+
+class EmbeddingService:
+    def __init__(self, model: str = "local:all-MiniLM-L6-v2",
+                 api_key: Optional[str] = None):
+        self._model = model
+        self._api_key = api_key
+        self._cache: dict[str, list[float]] = {}
+        self._encoder = self._load_encoder()
+
+    def _load_encoder(self):
+        if self._model.startswith("local:"):
+            model_name = self._model[len("local:"):]
+            try:
+                from sentence_transformers import SentenceTransformer
+                return SentenceTransformer(model_name)
+            except ImportError:
+                raise ImportError(
+                    "sentence-transformers required for local embeddings: "
+                    "pip install sentence-transformers"
+                )
+        return None  # API-based models call out in embed()
+
+    def embed(self, text: str) -> list[float]:
+        cache_key = hashlib.sha256(text.encode()).hexdigest()
+        if cache_key in self._cache:
+            return self._cache[cache_key]
+        vec = self._embed_one(text)
+        self._cache[cache_key] = vec
+        return vec
+
+    def embed_batch(self, texts: list[str]) -> list[list[float]]:
+        if self._model.startswith("local:"):
+            vecs = self._encoder.encode(texts, convert_to_numpy=True)
+            result = [v.tolist() for v in vecs]
+            for text, vec in zip(texts, result):
+                key = hashlib.sha256(text.encode()).hexdigest()
+                self._cache[key] = vec
+            return result
+        return [self._embed_one(t) for t in texts]
+
+    def _embed_one(self, text: str) -> list[float]:
+        if self._model.startswith("local:"):
+            vec = self._encoder.encode([text], convert_to_numpy=True)[0]
+            return vec.tolist()
+        if self._model.startswith("openai:"):
+            import httpx
+            model_name = self._model[len("openai:"):]
+            resp = httpx.post(
+                "https://api.openai.com/v1/embeddings",
+                headers={"Authorization": f"Bearer {self._api_key}"},
+                json={"input": text, "model": model_name},
+                timeout=10,
+            )
+            resp.raise_for_status()
+            return resp.json()["data"][0]["embedding"]
+        if self._model.startswith("voyage:"):
+            import httpx
+            model_name = self._model[len("voyage:"):]
+            resp = httpx.post(
+                "https://api.voyageai.com/v1/embeddings",
+                headers={"Authorization": f"Bearer {self._api_key}"},
+                json={"input": [text], "model": model_name},
+                timeout=10,
+            )
+            resp.raise_for_status()
+            return resp.json()["data"][0]["embedding"]
+        raise ValueError(f"Unknown embedding model: {self._model}")
+
+    @property
+    def model_version(self) -> str:
+        return self._model
+```
+
+- [ ] **Step 3: Run tests (requires `sentence-transformers` for local model tests)**
+
+```bash
+pip install sentence-transformers
+pytest tests/unit/test_embedding.py -v
+```
+Expected: all 4 PASS.
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add agentdb/retrieval/embedding.py tests/unit/test_embedding.py
+git commit -m "feat: embedding service with local/openai/voyage backends, content-hash cache"
+```
+
+---
+
+### Task 12: Semantic Conflict Detection + pgvector Backend
+
+These are described in the plan — implementation tasks to be expanded once the embedding model decision is confirmed. Stubs are in place from Phase 1. Full implementation follows the same TDD pattern as prior tasks.
+
+**Blocking decision: confirm embedding model before starting this task.**
+
+Outline of what Task 12 will deliver:
+- `PostgresMemoryStore(MemoryStoreBackend)` in `agentdb/core/memory_store.py`
+- `ConflictDetector.check()` extended with cosine similarity comparison against existing records
+- `MultiSignalRanker` semantic signal activated (weight_semantic > 0)
+- Migration: `migrations/001_initial.sql` with pgvector schema
+
+---
+
+### Task 13: Skill Draft Reconciliation Pipeline
+
+**Status: not started. Part of Phase 3 (formerly Phase 4). Designed 2026-07-11, out of a session-long discussion about whether AgentDB's own async (12b) capabilities could help this repo remember its own process rules** (specifically: migrate completed plan tasks to `completed-tasks.md`, delete fully-completed plan files). That discussion concluded the answer for *this repo's own maintenance* is "no" — no Claude Code session working on agentdb is wired to retrieve from an AgentDB instance, so there's no attachment point for a hook or a dispatch to reach. But the underlying capability — turn a recurring, human-approved instruction into a governed skill, with conflict-aware reconciliation before it's committed — is a real, general AgentDB feature in its own right, useful for any deployment where an agent is wired to AgentDB (e.g. slack-assistant). This task builds that feature, not something specific to this repo.
+
+**Dependencies (why this sits here, not earlier):** Task 12 (semantic conflict detection) for reconciling drafts against existing skills/other drafts/changed files by meaning, not just exact keyword overlap; Task 11 (embeddings) as Task 12's own prerequisite; the skill store (`skills/skill_store.py`, done) and skill-store governance fix below; `db.gateway` (Task 16) for the `propose`/`approve`/`reject` surface and the `dispatch` call; `agentdb_stats()` (done).
+
+**Design directive: recycle methods, don't invent parallel ones.** Every piece of this pipeline reuses an existing mechanism rather than adding a new subsystem next to it — that's not a style preference, it's the point of the design. Reuse map:
+
+| Pipeline need | Reuses | Does not add |
+|---|---|---|
+| Store a draft | A plain `MemoryRecord`, `origin="agent_inferred"`, key `memory/skill_drafts/{draft_id}` | No new table |
+| Classify update-vs-create | Same keyword/entity matching `retrieve_by_entities()` already does, against existing skills' `scope`/content | No new matcher |
+| Detect draft-vs-draft / draft-vs-skill conflicts | Task 12's conflict detector, applied to drafts as well as stored memories | No draft-specific conflict engine |
+| Detect draft-vs-changed-file conflicts | `core/file_integrity.py` (built 2026, never wired to anything — see `docs/context/capabilities.md`) as a cheap hash pre-filter, then Task 12's embeddings only when the hash actually changed | No new file-watching mechanism |
+| Notify a human reviewer | `db.gateway.dispatch("skill_draft_proposed"/"skill_draft_conflict", ...)` — the existing 12b mechanism (Design Principle 12b), now accessed via `db.gateway` | No new pub/sub |
+| Metric-driven triggers | New fields on `agentdb_stats()` (repeated-correction cluster count, pending-draft backlog count), computed from the existing `outcomes` table and `memory/skill_drafts/*` records | No new stats surface |
+| Commit a draft | `skills_api.create_skill()` / `update_skill_version()` (existing) | No new skill-writing path |
+
+**Prerequisite fix, part of this task, not optional:** `SkillStore.update()` (via `SkillsAPI.update_skill_version()`) currently has no protection against being called by non-human-initiated code — it silently inherits `authored_by` from the original skill and lets any caller rewrite content, unlike `create()` which at least checks `authored_by == "human"` at the call site. This must be closed before this pipeline exists, otherwise the pipeline's own "approve" step would be indistinguishable from any other code path that happens to call `update_skill_version` directly. Fix: `update_skill_version`/`create_skill` remain the only two methods that touch `skills.sqlite` content; nothing in this task's "propose" surface may call either.
+
+**Pipeline:**
+
+```
+db.gateway.propose(name, content, scope, agent_id, entities=None, session_id=None)
+    → classify: match content/entities against existing skills (reuse retrieve_by_entities matching)
+        → action="update"(target_skill_id) if a good match, else action="create"
+    → reconcile (batch, not isolated to this one draft):
+        - vs. other pending drafts sharing entities/scope → flag if contradictory
+        - vs. the target skill's current content, if action="update" → always flagged for review (any change to a human skill needs eyes)
+        - vs. files tagged with the same entities: file_integrity hash changed since draft/skill was last touched?
+          → if yes, escalate to Task 12's semantic comparison to decide if the change is meaningfully conflicting
+    → write memory/skill_drafts/{draft_id}  (status="pending"|"conflicted", action, target_skill_id, conflicts=[...])
+    → db.gateway.dispatch("skill_draft_proposed" | "skill_draft_conflict", draft_id=..., agent_id=..., session_id=...)
+
+[metric triggers, computed from existing data, not a new scheduler]
+    → agentdb_stats() gains: repeated_correction_cluster_count (human_correction outcomes sharing entities, in a window),
+      skill_draft_backlog_count (pending drafts)
+    → either crossing a threshold → db.gateway.dispatch("skill_candidate_threshold_reached" | "skill_draft_backlog_high", ...)
+
+db.gateway.approve(draft_id, resolution=None)
+    → if status == "conflicted": require an explicit resolution argument, refuse otherwise
+    → action="create" → skills_api.create_skill(...); action="update" → skills_api.update_skill_version(...)
+    → archive the draft record, audit-log skill_draft_approved
+
+db.gateway.reject(draft_id, reason=None)
+    → archive the draft record, audit-log skill_draft_rejected, skills.sqlite untouched
+```
+
+**Decision resolved 2026-07-13:** `propose`/`approve`/`reject` live on `db.gateway` — a unified `Gateway` class (see Task 16) that also owns `subscribe`/`dispatch`/`conflict_queue`. Not on `AgentDB` directly and not a separate `SkillDraftsAPI` — `db.gateway` is the single surface for all routing, notification, and proposal workflow concerns.
+
+**Implementation order** (per this repo's TDD convention — tests first for each slice):
+1. `SkillStore.update()` governance fix (prerequisite, standalone, no dependency on the rest).
+2. `db.gateway.propose`/`approve`/`reject` with classification, no conflict-checking yet (draft always `status="pending"`).
+3. Conflict reconciliation (depends on Task 12 existing — do not build a bespoke keyword-only conflict heuristic here as a stand-in; wait for Task 12 rather than duplicating it in a phase-inconsistent way, per Design Principle 8).
+4. Metric-driven triggers.
+
+---
+
+## Phase 4 — MCP Server + Framework Adapters
+
+**Status: Task 14 complete (2026-07-17, commit c30f0b2). Task 15 not started.**
+
+### Task 14: MCP Server
+
+**Status: complete (2026-07-17, commit c30f0b2).** `src/agentdb/interface/mcp_server.py` — 4 tools: `memory_write`, `memory_retrieve`, `conflict_queue`, `memory_stats`. Stdio transport for Claude Desktop. Module-level `AgentDB` singleton initialized from `AGENTDB_MEMORY_DIR` env var. `agentdb-mcp` console script entry point in `pyproject.toml`. `mcp>=1.0` optional dep. 10 unit tests in `tests/unit/test_mcp_server.py`.
+
+**HTTP+SSE planned:** same tool definitions, `transport="sse"`, `X-AgentDB-Key` auth middleware, `agentdb-mcp-http` entry point. Deferred until a concrete consumer asks for it — stdio covers Claude Desktop, the primary target.
+
+**Claude Desktop config** — add to `claude_desktop_config.json`:
+```json
+{
+  "mcpServers": {
+    "agentdb": {
+      "command": "agentdb-mcp",
+      "env": {
+        "AGENTDB_MEMORY_DIR": "/path/to/your/memory/workspace"
+      }
+    }
+  }
+}
+```
+
+`memory_subscribe` deferred: push subscriptions don't work over stdio (request/response only). Replaced with `memory_stats` as 4th tool; subscribe deferred to HTTP+SSE phase.
+
+### Task 15: Framework Adapters
+
+> **Read before implementing:**
+> - **Hermes:** `docs/integrations/hermes.md` — full design brief: 14-hook mapping table (verified against Hermes source), session key mapping, skill coexistence, `on_pre_compress` summarizer wiring, `db.gateway.subscribe` conflict notification pattern, open questions. This is the spec; what follows is the plan.
+> - **Assessment:** `docs/integrations/openclaw-hermes-assessment.md` — Hermes selection rationale (kept for archaeology).
+
+**Type: 12a, real-time enforcement.** Per `docs/context/architecture-principles.md` Principle 12, an adapter is not "done" on API existence alone — it must name the exact point in the framework's own control flow where AgentDB governance executes, and a test must prove that framework-triggered point changes what context/instructions reach the agent.
+
+**Adapter strategy (updated 2026-07-17):** Hermes is the only named adapter target. OpenClaw dropped — `AgentDBBackend` covers any other framework generically, and no real consumer has asked for a dedicated adapter. All adapters must subclass `GatewayAdapter` (Task 16) — never call `db.register_reconciliation_handler`/`dispatch_reconciliation_trigger` directly.
+
+**Hermes status: complete (2026-07-14). Commits 4ba16eb..6940fa7 + a1f6c4d. AgentDBHermesProvider implements MemoryProvider ABC + GatewayAdapter; 14 hooks; Principle 12a proven via HermesMemoryManagerShim tests.**
+
+**Files:**
+- Create: `agentdb/adapters/hermes.py` — implement Hermes's `MemoryProvider` ABC as a `GatewayAdapter` subclass. Direct Python import, no sidecar. Full design in `docs/integrations/hermes.md`. **Build this first.**
+- Defer: `agentdb/adapters/deepagents.py` — deprioritized; `AgentDBBackend` covers it generically today.
+- Defer: `langgraph.py`, `crewai.py`, `openai_agents.py`, `google_adk.py`, `autogen.py` — build only when a specific framework's users ask for one.
+
+---
+
+### Task 16: `db.gateway` Package
+
+**Status: complete (2026-07-14). Commits 00dd95e..5bc0848 (impl) + a1f6c4d (final fixes). Gateway class + GatewayAdapter base; proposal workflow; conflict queue wired to real store.list_conflicts(). AgentDBClaudeMiddleware updated to inherit GatewayAdapter.**
+
+**Type:** Conceptual unification — not a new runtime process. `Gateway` wraps the existing in-memory reconciliation dispatcher and adds the proposal workflow surface. No new event bus, no new storage.
+
+**Why now (before the public client gap):** the public client gap will need to call `db.gateway.dispatch("conflict_detected", ...)` when it lands. The Hermes adapter and the Task 13 proposal workflow both build on `db.gateway`. Building this first keeps everything downstream consistent and avoids a second migration later.
+
+**Files:**
+- Create: `agentdb/gateway/__init__.py` — `Gateway` class
+- Create: `agentdb/gateway/adapter.py` — `GatewayAdapter` base class
+- Modify: `agentdb/interface/client.py` — add `db.gateway` property; keep `register_reconciliation_handler`/`dispatch_reconciliation_trigger` as pass-through aliases (no breaking change)
+- Modify: `agentdb/adapters/claude_agent_sdk.py` — inherit `GatewayAdapter` (one-line class declaration change); use `self.gateway.subscribe`/`dispatch` for any new notification wiring
+- Create: `tests/unit/test_gateway.py`
+
+**`propose`/`approve`/`reject` in this task:** surface and storage only (draft as `agent_inferred` memory record, archive on approve/reject, audit-log each step). Conflict reconciliation is Task 13 scope. In this task, drafts always start as `status="pending"`.
+
+Full implementation complete. See commits 00dd95e..5bc0848 + a1f6c4d.
+
+---
+
+## Phase 5 — Production Hardening
+
+**Status: not started.**
+
+Items (detail deferred to closer to Phase 4 completion):
+- [ ] Out-of-process permission enforcement for server mode
+- [ ] Cryptographic signing of human-approved zone
+- [ ] SSO / RBAC for managed cloud
+- [ ] Rate limiting on MCP server
+- [ ] `embedding_version` migration tooling (reindex all records on model change)
+- [ ] Conflict queue CLI
+- [ ] SLA monitoring
+
+---
+
+## Phase 6 — Provider Ingestion
 **Exit criterion: all three provider ingestors sync. Org knowledge tier documented and queryable via system tables.**
 
 **Status: deferred 2026-07-17.** Gate cleared 2026-07-14 (budgeted retrieval + real conflict detection shipped). Deliberately skipped to validate the core loop with Claude SDK + Hermes in production before adding ingestion complexity. Revisit once the governed memory loop is proven stable in real use.
@@ -769,341 +1104,13 @@ database:
 
 ---
 
-## Phase 4 — Semantic Search + pgvector
-**Exit criterion: embedding-based semantic search active. Semantic conflict detection live. pgvector backend available.**
-
-**Status: not started, correctly phase-gated** — no `retrieval/embedding.py`, no vector library usage anywhere in the codebase.
-
-**Scope narrowed 2026-07-11:** build local-only first (`all-MiniLM-L6-v2` via sentence-transformers) — zero API cost, zero API-key/network dependency, nothing to configure. The spec below supports OpenAI and Voyage backends too; treat those as deferred until the local model is proven insufficient for retrieval quality. Shipping all three backends up front is more surface (config branching, two extra API integrations, two extra sets of credentials to manage) than Design Principle 11 ("memory assets are subordinate... only in scope when they improve recall/reduce conflicts/increase accuracy") justifies before there's evidence the local model isn't good enough.
-
-**Additional Phase 4 deliverables (informed by HydraDB comparison, 2026-07-17):**
-
-Once embeddings are active, two retrieval-quality improvements become meaningful and should land in this phase:
-
-**1. `mode` parameter on `retrieve()` — `"fast"` vs `"thinking"`**
-
-Maps to AgentDB's existing architectural split: `pre_tool_use` (action-driven, latency-sensitive) naturally runs `fast`; `prepare_turn` (turn-start, can absorb latency) benefits from `thinking`.
-
-- `fast` (default): current single-pass ranked retrieval. No change.
-- `thinking`: multi-query expansion — generate 2–3 query variants from the original (e.g. synonym expansion, entity rephrasing), run retrieval for each, merge and rerank the union by score. Higher latency; improves recall for ambiguous or broad queries.
-
-Both modes go through the same `PermissionRouter` and return the same `RetrievalResult` shape. Mode only affects the retrieval path, not governance.
-
-Adapter wiring: `AgentDBClaudeMiddleware.prepare_turn()` should default to `mode="thinking"`; `pre_tool_use()` should default to `mode="fast"`. Both should accept an override.
-
-**2. Per-call `alpha` and `recency_bias` on `retrieve()`**
-
-- `alpha: float = 0.8` — hybrid ranking weight (0.0 = keyword-only, 1.0 = semantic-only). Replaces the current hardcoded semantic weight of 0.0 once Phase 4 activates. Default 0.8 matches the Phase 4 target weight distribution.
-- `recency_bias: float = 0.0` — additive boost to the recency signal for this call only (0.0–1.0). Useful when a caller knows the query is time-sensitive (e.g. "what changed today") without changing global ranker weights.
-
-Both params are passed into `MultiSignalRanker` as call-time overrides; they do not mutate the ranker's configured weights. The existing `weight_*` constructor params remain the global defaults.
-
-These are retrieval quality improvements only — no governance implications. Defer implementation until the semantic signal is non-zero (i.e. Phase 4 embeddings active), since `alpha` has no effect when `weight_semantic = 0`.
-
-> **[DECISION required before starting]** Confirm the local model is `all-MiniLM-L6-v2` (384 dims) and not some other sentence-transformers model. If/when local proves insufficient, revisit `text-embedding-3-small` (OpenAI, 1536 dims) or `voyage-3` (Voyage AI, 1024 dims) — both remain in the spec below for that path.
->
-> Store model name in `embedding_version` on every record from this point forward.
-> This field enables reindexing when the model is upgraded.
-
----
-
-### Task 11: Embedding Service
-
-**Files:**
-- Create: `agentdb/retrieval/embedding.py`
-- Create: `tests/unit/test_embedding.py`
-
-- [ ] **Step 1: Write failing tests**
-
-```python
-# tests/unit/test_embedding.py
-import pytest
-from unittest.mock import patch, MagicMock
-from agentdb.retrieval.embedding import EmbeddingService
-
-def test_embed_returns_float_list():
-    svc = EmbeddingService(model="local:all-MiniLM-L6-v2")
-    vec = svc.embed("hello world")
-    assert isinstance(vec, list)
-    assert all(isinstance(x, float) for x in vec)
-    assert len(vec) > 0
-
-def test_embed_batch_returns_list_of_lists():
-    svc = EmbeddingService(model="local:all-MiniLM-L6-v2")
-    vecs = svc.embed_batch(["hello", "world"])
-    assert len(vecs) == 2
-
-def test_model_version_property():
-    svc = EmbeddingService(model="local:all-MiniLM-L6-v2")
-    assert svc.model_version == "local:all-MiniLM-L6-v2"
-
-def test_embed_cache_hit(tmp_path):
-    svc = EmbeddingService(model="local:all-MiniLM-L6-v2")
-    v1 = svc.embed("same text")
-    v2 = svc.embed("same text")
-    assert v1 == v2  # cached — same object contents
-```
-
-- [ ] **Step 2: Write `agentdb/retrieval/embedding.py`**
-
-```python
-"""
-Embedding service. Supports:
-  local:all-MiniLM-L6-v2  — sentence-transformers, zero API cost
-  openai:text-embedding-3-small — OpenAI API
-  voyage:voyage-3           — Voyage AI API
-
-Model is set at AgentDB() init and stored on every embedded record
-in embedding_version. Changing model requires reindexing (migration tooling
-in Phase 5).
-"""
-import hashlib
-from functools import lru_cache
-from typing import Optional
-
-
-class EmbeddingService:
-    def __init__(self, model: str = "local:all-MiniLM-L6-v2",
-                 api_key: Optional[str] = None):
-        self._model = model
-        self._api_key = api_key
-        self._cache: dict[str, list[float]] = {}
-        self._encoder = self._load_encoder()
-
-    def _load_encoder(self):
-        if self._model.startswith("local:"):
-            model_name = self._model[len("local:"):]
-            try:
-                from sentence_transformers import SentenceTransformer
-                return SentenceTransformer(model_name)
-            except ImportError:
-                raise ImportError(
-                    "sentence-transformers required for local embeddings: "
-                    "pip install sentence-transformers"
-                )
-        return None  # API-based models call out in embed()
-
-    def embed(self, text: str) -> list[float]:
-        cache_key = hashlib.sha256(text.encode()).hexdigest()
-        if cache_key in self._cache:
-            return self._cache[cache_key]
-        vec = self._embed_one(text)
-        self._cache[cache_key] = vec
-        return vec
-
-    def embed_batch(self, texts: list[str]) -> list[list[float]]:
-        if self._model.startswith("local:"):
-            vecs = self._encoder.encode(texts, convert_to_numpy=True)
-            result = [v.tolist() for v in vecs]
-            for text, vec in zip(texts, result):
-                key = hashlib.sha256(text.encode()).hexdigest()
-                self._cache[key] = vec
-            return result
-        return [self._embed_one(t) for t in texts]
-
-    def _embed_one(self, text: str) -> list[float]:
-        if self._model.startswith("local:"):
-            vec = self._encoder.encode([text], convert_to_numpy=True)[0]
-            return vec.tolist()
-        if self._model.startswith("openai:"):
-            import httpx
-            model_name = self._model[len("openai:"):]
-            resp = httpx.post(
-                "https://api.openai.com/v1/embeddings",
-                headers={"Authorization": f"Bearer {self._api_key}"},
-                json={"input": text, "model": model_name},
-                timeout=10,
-            )
-            resp.raise_for_status()
-            return resp.json()["data"][0]["embedding"]
-        if self._model.startswith("voyage:"):
-            import httpx
-            model_name = self._model[len("voyage:"):]
-            resp = httpx.post(
-                "https://api.voyageai.com/v1/embeddings",
-                headers={"Authorization": f"Bearer {self._api_key}"},
-                json={"input": [text], "model": model_name},
-                timeout=10,
-            )
-            resp.raise_for_status()
-            return resp.json()["data"][0]["embedding"]
-        raise ValueError(f"Unknown embedding model: {self._model}")
-
-    @property
-    def model_version(self) -> str:
-        return self._model
-```
-
-- [ ] **Step 3: Run tests (requires `sentence-transformers` for local model tests)**
-
-```bash
-pip install sentence-transformers
-pytest tests/unit/test_embedding.py -v
-```
-Expected: all 4 PASS.
-
-- [ ] **Step 4: Commit**
-
-```bash
-git add agentdb/retrieval/embedding.py tests/unit/test_embedding.py
-git commit -m "feat: embedding service with local/openai/voyage backends, content-hash cache"
-```
-
----
-
-### Task 12: Semantic Conflict Detection + pgvector Backend
-
-These are described in the plan — implementation tasks to be expanded once the embedding model decision is confirmed. Stubs are in place from Phase 1. Full implementation follows the same TDD pattern as prior tasks.
-
-**Blocking decision: confirm embedding model before starting this task.**
-
-Outline of what Task 12 will deliver:
-- `PostgresMemoryStore(MemoryStoreBackend)` in `agentdb/core/memory_store.py`
-- `ConflictDetector.check()` extended with cosine similarity comparison against existing records
-- `MultiSignalRanker` semantic signal activated (weight_semantic > 0)
-- Migration: `migrations/001_initial.sql` with pgvector schema
-
----
-
-### Task 13: Skill Draft Reconciliation Pipeline
-
-**Status: not started. Designed 2026-07-11, out of a session-long discussion about whether AgentDB's own async (12b) capabilities could help this repo remember its own process rules** (specifically: migrate completed plan tasks to `completed-tasks.md`, delete fully-completed plan files). That discussion concluded the answer for *this repo's own maintenance* is "no" — no Claude Code session working on agentdb is wired to retrieve from an AgentDB instance, so there's no attachment point for a hook or a dispatch to reach. But the underlying capability — turn a recurring, human-approved instruction into a governed skill, with conflict-aware reconciliation before it's committed — is a real, general AgentDB feature in its own right, useful for any deployment where an agent is wired to AgentDB (e.g. slack-assistant). This task builds that feature, not something specific to this repo.
-
-**Dependencies (why this sits here, not earlier):** Task 12 (semantic conflict detection) for reconciling drafts against existing skills/other drafts/changed files by meaning, not just exact keyword overlap; Task 11 (embeddings) as Task 12's own prerequisite; the skill store (`skills/skill_store.py`, done) and skill-store governance fix below; `db.gateway` (Task 16) for the `propose`/`approve`/`reject` surface and the `dispatch` call; `agentdb_stats()` (done).
-
-**Design directive: recycle methods, don't invent parallel ones.** Every piece of this pipeline reuses an existing mechanism rather than adding a new subsystem next to it — that's not a style preference, it's the point of the design. Reuse map:
-
-| Pipeline need | Reuses | Does not add |
-|---|---|---|
-| Store a draft | A plain `MemoryRecord`, `origin="agent_inferred"`, key `memory/skill_drafts/{draft_id}` | No new table |
-| Classify update-vs-create | Same keyword/entity matching `retrieve_by_entities()` already does, against existing skills' `scope`/content | No new matcher |
-| Detect draft-vs-draft / draft-vs-skill conflicts | Task 12's conflict detector, applied to drafts as well as stored memories | No draft-specific conflict engine |
-| Detect draft-vs-changed-file conflicts | `core/file_integrity.py` (built 2026, never wired to anything — see `docs/context/capabilities.md`) as a cheap hash pre-filter, then Task 12's embeddings only when the hash actually changed | No new file-watching mechanism |
-| Notify a human reviewer | `db.gateway.dispatch("skill_draft_proposed"/"skill_draft_conflict", ...)` — the existing 12b mechanism (Design Principle 12b), now accessed via `db.gateway` | No new pub/sub |
-| Metric-driven triggers | New fields on `agentdb_stats()` (repeated-correction cluster count, pending-draft backlog count), computed from the existing `outcomes` table and `memory/skill_drafts/*` records | No new stats surface |
-| Commit a draft | `skills_api.create_skill()` / `update_skill_version()` (existing) | No new skill-writing path |
-
-**Prerequisite fix, part of this task, not optional:** `SkillStore.update()` (via `SkillsAPI.update_skill_version()`) currently has no protection against being called by non-human-initiated code — it silently inherits `authored_by` from the original skill and lets any caller rewrite content, unlike `create()` which at least checks `authored_by == "human"` at the call site. This must be closed before this pipeline exists, otherwise the pipeline's own "approve" step would be indistinguishable from any other code path that happens to call `update_skill_version` directly. Fix: `update_skill_version`/`create_skill` remain the only two methods that touch `skills.sqlite` content; nothing in this task's "propose" surface may call either.
-
-**Pipeline:**
-
-```
-db.gateway.propose(name, content, scope, agent_id, entities=None, session_id=None)
-    → classify: match content/entities against existing skills (reuse retrieve_by_entities matching)
-        → action="update"(target_skill_id) if a good match, else action="create"
-    → reconcile (batch, not isolated to this one draft):
-        - vs. other pending drafts sharing entities/scope → flag if contradictory
-        - vs. the target skill's current content, if action="update" → always flagged for review (any change to a human skill needs eyes)
-        - vs. files tagged with the same entities: file_integrity hash changed since draft/skill was last touched?
-          → if yes, escalate to Task 12's semantic comparison to decide if the change is meaningfully conflicting
-    → write memory/skill_drafts/{draft_id}  (status="pending"|"conflicted", action, target_skill_id, conflicts=[...])
-    → db.gateway.dispatch("skill_draft_proposed" | "skill_draft_conflict", draft_id=..., agent_id=..., session_id=...)
-
-[metric triggers, computed from existing data, not a new scheduler]
-    → agentdb_stats() gains: repeated_correction_cluster_count (human_correction outcomes sharing entities, in a window),
-      skill_draft_backlog_count (pending drafts)
-    → either crossing a threshold → db.gateway.dispatch("skill_candidate_threshold_reached" | "skill_draft_backlog_high", ...)
-
-db.gateway.approve(draft_id, resolution=None)
-    → if status == "conflicted": require an explicit resolution argument, refuse otherwise
-    → action="create" → skills_api.create_skill(...); action="update" → skills_api.update_skill_version(...)
-    → archive the draft record, audit-log skill_draft_approved
-
-db.gateway.reject(draft_id, reason=None)
-    → archive the draft record, audit-log skill_draft_rejected, skills.sqlite untouched
-```
-
-**Decision resolved 2026-07-13:** `propose`/`approve`/`reject` live on `db.gateway` — a unified `Gateway` class (see Task 16) that also owns `subscribe`/`dispatch`/`conflict_queue`. Not on `AgentDB` directly and not a separate `SkillDraftsAPI` — `db.gateway` is the single surface for all routing, notification, and proposal workflow concerns.
-
-**Implementation order** (per this repo's TDD convention — tests first for each slice):
-1. `SkillStore.update()` governance fix (prerequisite, standalone, no dependency on the rest).
-2. `db.gateway.propose`/`approve`/`reject` with classification, no conflict-checking yet (draft always `status="pending"`).
-3. Conflict reconciliation (depends on Task 12 existing — do not build a bespoke keyword-only conflict heuristic here as a stand-in; wait for Task 12 rather than duplicating it in a phase-inconsistent way, per Design Principle 8).
-4. Metric-driven triggers.
-
----
-
-## Phase 5 — MCP Server + Framework Adapters
-
-**Status: not started.** See Current Status → Recommended next actions #5 for the adapter re-plan approach (start from zero, do not assume any prior partial implementation).
-
-### Task 14: MCP Server
-
-**Type: `memory_write`/`memory_retrieve` are thin transport over already-real-time-enforced operations; `conflict_queue` and `memory_subscribe` are thin transports over the 12b notifier dispatcher** (per `docs/context/architecture-principles.md` Principle 12/12b) — MCP is a consumer of that mechanism, not the thing that defines it.
-
-**Files:**
-- Create: `agentdb/interface/mcp_server.py`
-
-**Reframed 2026-07-11 — this is not an event-bus-subsystem build.** All 4 tools map to functionality that already exists or is already planned: `memory_write`/`memory_retrieve` wrap `write()`/`retrieve()`; `conflict_queue` and `memory_subscribe` both just call `db.gateway.subscribe(trigger, handler)` — the existing live, in-memory dispatcher now accessed via `db.gateway` (Task 16, see `docs/context/capabilities.md`) — to register an MCP-side callback against `conflict_detected` (and any other trigger a consumer wants). There is no separate "event bus subsystem" to design or build; the durable/sequence-numbered version Design Principle 7 originally implied is explicitly *not* the default and should only be added later if a specific consumer would lose real value from a missed notification during a restart.
-
-**Sequencing:** ship `memory_write`/`memory_retrieve` first (no new dependency). `conflict_queue`/`memory_subscribe` are blocked on Task 6's real conflict detection dispatching a `conflict_detected` trigger in the first place — there's nothing meaningful to subscribe to until stored records actually get flagged. Once that exists, `conflict_queue`/`memory_subscribe` are a few lines of MCP-side handler registration against `db.gateway`, not new plumbing.
-
-Note this also means a Slack/Telegram notifier doesn't need MCP or this task at all — a host app (e.g. slack-assistant, or the Hermes adapter) can call `db.gateway.subscribe("conflict_detected", handler)` directly once Task 6 dispatches that trigger, entirely independent of whether Task 14 ever ships.
-
-Full task expansion after Phase 3 is complete.
-
-### Task 15: Framework Adapters
-
-> **Read before implementing:**
-> - **Hermes:** `docs/integrations/hermes.md` — full design brief: 14-hook mapping table (verified against Hermes source), session key mapping, skill coexistence, `on_pre_compress` summarizer wiring, `db.gateway.subscribe` conflict notification pattern, open questions. This is the spec; what follows is the plan.
-> - **Assessment:** `docs/integrations/openclaw-hermes-assessment.md` — Hermes selection rationale (kept for archaeology).
-
-**Type: 12a, real-time enforcement.** Per `docs/context/architecture-principles.md` Principle 12, an adapter is not "done" on API existence alone — it must name the exact point in the framework's own control flow where AgentDB governance executes, and a test must prove that framework-triggered point changes what context/instructions reach the agent.
-
-**Adapter strategy (updated 2026-07-17):** Hermes is the only named adapter target. OpenClaw dropped — `AgentDBBackend` covers any other framework generically, and no real consumer has asked for a dedicated adapter. All adapters must subclass `GatewayAdapter` (Task 16) — never call `db.register_reconciliation_handler`/`dispatch_reconciliation_trigger` directly.
-
-**Hermes status: complete (2026-07-14). Commits 4ba16eb..6940fa7 + a1f6c4d. AgentDBHermesProvider implements MemoryProvider ABC + GatewayAdapter; 14 hooks; Principle 12a proven via HermesMemoryManagerShim tests.**
-
-**Files:**
-- Create: `agentdb/adapters/hermes.py` — implement Hermes's `MemoryProvider` ABC as a `GatewayAdapter` subclass. Direct Python import, no sidecar. Full design in `docs/integrations/hermes.md`. **Build this first.**
-- Defer: `agentdb/adapters/deepagents.py` — deprioritized; `AgentDBBackend` covers it generically today.
-- Defer: `langgraph.py`, `crewai.py`, `openai_agents.py`, `google_adk.py`, `autogen.py` — build only when a specific framework's users ask for one.
-
----
-
-### Task 16: `db.gateway` Package
-
-**Status: complete (2026-07-14). Commits 00dd95e..5bc0848 (impl) + a1f6c4d (final fixes). Gateway class + GatewayAdapter base; proposal workflow; conflict queue wired to real store.list_conflicts(). AgentDBClaudeMiddleware updated to inherit GatewayAdapter.**
-
-**Type:** Conceptual unification — not a new runtime process. `Gateway` wraps the existing in-memory reconciliation dispatcher and adds the proposal workflow surface. No new event bus, no new storage.
-
-**Why now (before the public client gap):** the public client gap will need to call `db.gateway.dispatch("conflict_detected", ...)` when it lands. The Hermes adapter and the Task 13 proposal workflow both build on `db.gateway`. Building this first keeps everything downstream consistent and avoids a second migration later.
-
-**Files:**
-- Create: `agentdb/gateway/__init__.py` — `Gateway` class
-- Create: `agentdb/gateway/adapter.py` — `GatewayAdapter` base class
-- Modify: `agentdb/interface/client.py` — add `db.gateway` property; keep `register_reconciliation_handler`/`dispatch_reconciliation_trigger` as pass-through aliases (no breaking change)
-- Modify: `agentdb/adapters/claude_agent_sdk.py` — inherit `GatewayAdapter` (one-line class declaration change); use `self.gateway.subscribe`/`dispatch` for any new notification wiring
-- Create: `tests/unit/test_gateway.py`
-
-**`propose`/`approve`/`reject` in this task:** surface and storage only (draft as `agent_inferred` memory record, archive on approve/reject, audit-log each step). Conflict reconciliation is Task 13 scope. In this task, drafts always start as `status="pending"`.
-
-Full implementation complete. See commits 00dd95e..5bc0848 + a1f6c4d.
-
----
-
-## Phase 6 — Production Hardening
-
-**Status: not started.**
-
-Items (detail deferred to closer to Phase 4 completion):
-- [ ] Out-of-process permission enforcement for server mode
-- [ ] Cryptographic signing of human-approved zone
-- [ ] SSO / RBAC for managed cloud
-- [ ] Rate limiting on MCP server
-- [ ] `embedding_version` migration tooling (reindex all records on model change)
-- [ ] Conflict queue CLI
-- [ ] SLA monitoring
-
----
-
 ## Known Limitations (to document in `LIMITATIONS.md`)
 
 | Limitation | Active from | Resolution |
 |---|---|---|
 | Semantic search uses recency sort (no vectors) | Phase 1–3 | Phase 4 (embeddings + pgvector) |
 | Semantic conflict detection not active | Phase 1–3 | Phase 4 (cosine similarity) |
-| All three provider syncs use polling, no push | Phase 3 | When providers expose push APIs |
+| All three provider syncs use polling, no push | Phase 6 | When providers expose push APIs |
 | Causal score approximated via retrieval_count | Phase 2–3 | Phase 5 full WAL correlation (CausalGraph, prerequisites already met — see Algorithm Reference) |
 | In-process permission enforcement bypassable | Phase 1–3 | Phase 6 server mode |
 | Semantic weights = 0 until embeddings active | Phase 1–3 | Phase 4 |
@@ -1111,7 +1118,7 @@ Items (detail deferred to closer to Phase 4 completion):
 | Skill health score entity detection is keyword-based, not semantic | Phase 2 | Phase 6+ (semantic entity matching) — a skill using a synonym for a deprecated entity will not be flagged |
 | Org knowledge tier (`memory/org/`) has no automated ingestion in v1 | Phase 1 | Content must be written manually or via SDK; automated ingestion from internal wikis/docs is post-launch scope |
 | numpy not installed by default | Phase 1–3 | `pip install agentdb[embeddings]` activates numpy-backed semantic scoring; pure Python fallback is always available |
-| Google Vertex AI provider is experimental | Phase 3 | MemoryBankService API is less stable than Anthropic/OpenAI equivalents. Treat as beta. Pin to specific API version in provider code. |
+| Google Vertex AI provider is experimental | Phase 6 | MemoryBankService API is less stable than Anthropic/OpenAI equivalents. Treat as beta. Pin to specific API version in provider code. |
 | ~~Real conflict detection not active~~ | ~~Phase 1–4~~ | Done 2026-07-14 — `ConflictDetector` wired into `write()`/`retrieve()` |
 | ~~No budgeted context assembly (`budget_tokens`/`token_estimate`/`truncated`)~~ | ~~Phase 1–4~~ | Done 2026-07-14 — `budget_tokens` on `retrieve()`, `token_estimate`/`truncated` on `RetrievalResult` |
 
