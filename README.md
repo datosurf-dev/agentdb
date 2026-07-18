@@ -16,9 +16,9 @@ The full architecture pitch and the numbered design principles (now including Pr
 - Plan (active/open work): `/Users/jm/Documents/github/agentdb/docs/superpowers/plans/2026-06-06-agentdb-revised.md`
 - Completed work tracker: `/Users/jm/Documents/github/agentdb/docs/superpowers/plans/completed-tasks.md`
 
-## Current Repository Status (As Of 2026-07-11)
+## Current Repository Status (As Of 2026-07-17)
 
-Current implementation is functional for the governed memory loop and adapter integrations, with initial proactive-memory slices now in place and later-phase hardening still pending.
+Core governed memory loop is fully operational: real conflict detection, budgeted retrieval, lifecycle management, centralized config, and two adapters (Claude SDK + Hermes) are all shipped and test-covered. Phase 3 (provider ingestors) is deliberately deferred while the loop is validated in production. Later-phase hardening (semantic search, MCP, framework adapters) remains pending.
 
 ### Feature State Matrix
 
@@ -29,10 +29,10 @@ Current implementation is functional for the governed memory loop and adapter in
 | Package entrypoint (`from agentdb import AgentDB`) | Implemented | Available in `src/agentdb/__init__.py`. |
 | Core client loop (`write`, `read`, `retrieve`, `record_outcome`) | Implemented | Includes audit events and confidence updates. |
 | Backend contract (`AgentDBBackend`) | Implemented | Framework-agnostic read/write/list/grep/glob contract. |
-| Adapter surfaces | Implemented (Claude SDK only) | Only `adapters/claude_agent_sdk.py` exists. deepagents, LangGraph, CrewAI, OpenAI Agents, Google ADK, and AutoGen adapters are **not implemented** — their integration test files exist but fail to collect (`ModuleNotFoundError`). `deepagents.py` is the next one planned (flagship per Design Principle 2); the rest are deferred until a specific framework's users ask for one, since `AgentDBBackend` already works with any framework generically (see "Drop into your existing stack" below). |
+| Adapter surfaces | Implemented (Claude SDK + Hermes) | `adapters/claude_agent_sdk.py` (full `GatewayAdapter` subclass, proposal workflow, conflict queue, budgeted retrieval) and `adapters/hermes.py` (`AgentDBHermesProvider`, 14 hooks, Principle 12a proven). deepagents, LangGraph, CrewAI, OpenAI Agents, Google ADK, and AutoGen adapters are **not implemented** — deferred until a specific framework's users ask for one; `AgentDBBackend` works generically with any framework today. |
 | Claude SDK async runtime (`from_sdk_client`, `handle_turn_async`) | Implemented | Async turn wrapper available in adapter runtime. |
 | Directory tracking capture (Claude middleware) | Implemented | Optional tracked-directory snapshots persisted as memories. |
-| Package memory workspace (`~/.agentdb/memory`, `config/memory.yaml`) | Implemented (initial) | Workspace resolution, default materialization, config loading, and backward-compatible `path=` override are in place. |
+| Package memory workspace (`~/.agentdb/memory`, `config/memory.yaml`) | Implemented | Workspace resolution, config loading, and backward-compatible `path=` override in place. `memory.yaml` is now the single source of truth for all tunable defaults via mode-based profiles (`budget_optimized`, `full_storage`, `research`) — see Centralized config below. |
 | Conversation JSONL capture | Implemented (initial) | Config-driven JSONL capture is available when `capture.conversation_jsonl` is enabled. |
 
 #### Reconcile
@@ -40,8 +40,9 @@ Current implementation is functional for the governed memory loop and adapter in
 | Feature area | State | Notes |
 |---|---|---|
 | Permission routing boundaries | Implemented | Write-time enforcement via `PermissionRouter`. |
-| Priority enforcement additive fields | Partial | External conflict flags (against caller-supplied context) are implemented. `override_instructions` is dead code — the field exists on `RetrievalResult` but no code path populates it, so "explicit override instructions on conflict" is not actually implemented, only detection is. |
-| Reconciliation trigger orchestration (`conversation_started`, `file_modified`, `cron`) | Implemented (initial) | Internal dispatcher plus `conversation_started` path are in place; broader trigger coverage remains pending. |
+| Write-time conflict detection (temporal + authority) | Implemented | `ConflictDetector` wired into `write()` — temporal conflicts auto-resolve in favour of recency; authority conflicts (agent vs. human-approved) auto-resolve in favour of human, flagged on retrieve. Semantic conflict detection is Phase 4 (requires embeddings). |
+| External-context conflict detection | Implemented | `external_context` param on `retrieve()` checks overlap between caller-supplied context and stored records; flags `external_conflict_detected` + `external_conflict_rate` stat. `override_instructions` still dead code — detection works, explicit overrides are not generated. |
+| Reconciliation trigger orchestration + `db.gateway` | Implemented | `db.gateway.subscribe`/`dispatch` is the unified surface. `conflict_detected` dispatched by `write()`. `conversation_started` dispatched by both adapters at turn start. Conflict queue (`db.gateway.conflict_queue()`), proposal workflow (`propose`/`approve`/`reject`/`list_proposals`) all live here. |
 | Embedding-backed semantic retrieval/conflicts | Planned (Phase 4) | Current retrieval is keyword/provenance/confidence/recency based; embeddings are only justified if they improve action quality. |
 
 #### Rank
@@ -52,20 +53,23 @@ Current implementation is functional for the governed memory loop and adapter in
 | Skills store + health warnings | Implemented | Versioned skills, staleness-based health scoring, warnings on retrieve. |
 | System stats surface | Implemented (initial) | Includes retrieval/outcome/conflict-rate aggregates. |
 | Entity-aware retrieval core (`entities`, `retrieve_by_entities`) | Implemented (initial) | Additive entity tagging and keyword-based entity retrieval are available in core. |
-| Provider ingestors (Anthropic/OpenAI/Google sync) | Planned (Phase 3) | Architecture intent documented; module surface pending. |
+| Provider ingestors (Anthropic/OpenAI/Google sync) | Planned (Phase 3) | Architecture intent documented; module surface pending. Deliberately deferred — validating core loop with Claude SDK + Hermes in production first. |
+| Lifecycle manager (`db.lifecycle`) | Implemented | `run_sweep()`: Step 0 archives expired records (`expiry_time ≤ now`); Step 1 optional confidence decay (off by default); Step 2 archives below `ARCHIVAL_THRESHOLD`; Step 3 archives past `STALENESS_DAYS`. `reinforce()` and `record_outcome()` also on `db.lifecycle`. `human_approved` records immune to all sweep operations. |
+| `infer` flag + `expiry_time` on `write()` | Implemented | `infer=True` routes the raw value through a caller-supplied `infer_fn` before storage (raises `ValueError` if no `infer_fn` set). `expiry_time: datetime` sets a hard TTL; sweep archives once it passes. Both apply to `agent_inferred` only; `human_approved` records are immune. |
+| Centralized config + profiles (`db.config`) | Implemented | `memory.yaml` drives all tunable defaults via mode-based profiles. Built-in profiles: `budget_optimized` (retrieve_limit=5, 2k chars, staleness=90d), `full_storage` (20, 12k, 90d), `research` (50, 24k, 180d, recency-first). User-defined profiles via `profiles:` block with optional `extends:`. `db.config` exposes the fully resolved dict. |
 
 #### Inject
 
 | Feature area | State | Notes |
 |---|---|---|
-| Query-driven retrieval into turn context | Implemented (Claude SDK path only) | The Claude adapter's `prepare_turn` retrieves at turn start. No deepagents adapter exists yet to have an equivalent path — see Adapter surfaces above. |
+| Query-driven retrieval into turn context | Implemented (Claude SDK + Hermes) | Both adapters retrieve at turn start via `prepare_turn`. `budget_tokens` param now wired end-to-end; `RetrievalResult.token_estimate` and `truncated` are live. |
 | Action-driven retrieval (`entities`, `retrieve_by_entities`, `PreToolUse` hook) | Implemented (initial) | Core entity retrieval, adapter `pre_tool_use(...)`, and downstream hook-registration surface are implemented; automatic SDK attachment remains downstream integration work. |
 | MCP server surface | Planned (Phase 5) | Not implemented in current source tree. |
 | Hardening and production controls | Planned (Phase 6) | Roadmap-only at this snapshot. |
 
 Validation status:
 - Editable install and package-style imports are validated via `pip install -e '.[dev]'`.
-- `python -m pytest -q tests/unit tests/integration/test_claude_agent_sdk_adapter.py` → 96 passed.
+- `python -m pytest -q tests/unit tests/integration/test_claude_agent_sdk_adapter.py` → 158 passed.
 - Plain `python -m pytest -q` (no path filter) currently **fails collection** with 6 `ModuleNotFoundError`s, one per adapter that doesn't exist yet (`autogen`, `crewai`, `deepagents`, `google_adk`, `langgraph`, `openai_agents`). This isn't a regression to fix — it's expected until those adapters are built (or their test files are skip-marked).
 
 The rest of this README describes architecture intent and phased roadmap behavior.
@@ -140,23 +144,24 @@ Integration manuals:
 These are the developer-facing surfaces you can use immediately in the current implementation:
 
 - `AgentDB` client (`from agentdb import AgentDB`)
-  - `write(key, value, origin, agent_id, ...)`
+  - `write(key, value, origin, agent_id, infer=False, expiry_time=None, ...)`
   - `read(key, agent_id)`
-  - `retrieve(query, agent_id, limit=..., external_context=..., session_id=...)`
-  - `record_outcome(session_id, agent_id, outcome_type, outcome_value)`
+  - `retrieve(query, agent_id, limit=..., budget_tokens=..., external_context=..., session_id=...)`
+  - `retrieve_by_entities(entities, agent_id, session_id=...)`
+  - `record_outcome(session_id, agent_id, outcome_type, outcome_value)` — backward-compat alias for `db.lifecycle.record_outcome()`
   - `system.agentdb_stats()`
   - `audit_log.replay(from_sequence=0)`
-  - `skills_api` for skill lifecycle/drift workflows:
-    - `create_skill`, `update_skill_version`, `list_skills_for_agent`,
-      `list_stale_skills_for_agent`, `list_skill_warnings_for_agent`
-  - optional initialization policy for directory tracking:
-    - `tracking_directories`
-    - `tracking_root`
-    - `tracking_max_files_per_directory`
+  - `lifecycle` — `run_sweep()`, `reinforce(record_id)`, `record_outcome(...)`
+  - `gateway` — `subscribe(trigger, handler)`, `dispatch(trigger, ...)`, `conflict_queue()`, `propose(...)`, `approve(...)`, `reject(...)`, `list_proposals(...)`
+  - `config` — returns the fully resolved config dict (mode defaults + yaml overrides)
+  - `skills_api` — `create_skill`, `update_skill_version`, `list_skills_for_agent`, `list_stale_skills_for_agent`, `list_skill_warnings_for_agent`
+  - optional initialization: `tracking_directories`, `tracking_root`, `tracking_max_files_per_directory`, `infer_fn`, `memory_dir`
 - `AgentDBBackend` (`from agentdb.backend import AgentDBBackend`)
   - `read`, `write`, `delete`, `list`, `grep`, `glob`
 - Adapters currently implemented under `src/agentdb/adapters/`
-  - Claude Agent SDK middleware only. deepagents, LangGraph, CrewAI, OpenAI Agents, Google ADK, and AutoGen are not built yet — see the Feature State Matrix above.
+  - **Claude SDK** (`AgentDBClaudeMiddleware`) — full `GatewayAdapter` subclass; `prepare_turn`, `pre_tool_use`, `finalize_turn`; proposal workflow; conflict queue; budgeted retrieval.
+  - **Hermes** (`AgentDBHermesProvider`) — 14-hook `MemoryProvider` ABC + `GatewayAdapter`; Principle 12a proven via shim tests.
+  - deepagents, LangGraph, CrewAI, OpenAI Agents, Google ADK, and AutoGen are not built yet — `AgentDBBackend` covers them generically.
 
 Example using the current retrieval/improvement loop:
 
@@ -401,10 +406,12 @@ trust_level      → sealed | human | agent | provider   (derived from origin; "
 confidence       → float 0–1, decays over time unless reinforced
 entities         → list of canonical identifiers (file paths, model names) for action-driven retrieval
 last_retrieved   → drives the ranker's recency signal
-conflict_id      → column exists (added to support ranker conflict-flagging); nothing populates it yet
+conflict_id      → populated by ConflictDetector at write time when a temporal or authority conflict is detected
+expiry_time      → optional hard TTL (datetime); lifecycle sweep archives once it passes (agent_inferred only)
+inferred         → bool; true when the value was derived by infer_fn rather than stored verbatim
 ```
 
-Planned, not yet on the record: `tier`, `expiry_policy`, `audit_sequence`, `embedding_version`, `user_id`, `session_id`. See `docs/context/database-schema.md` for the full column-by-column reference across every table, not just `MemoryRecord`.
+Planned, not yet on the record: `tier`, `expiry_policy`, `audit_sequence`, `embedding_version`, `user_id`, `session_id`. See `docs/context/database-schema.md` for the full column-by-column reference.
 
 The biography enables permission routing, lifecycle management, and provenance-weighted retrieval today; conflict detection is planned (see "Conflict detection" below). Without it you have a fancier key-value store.
 
@@ -424,29 +431,31 @@ The key prefixes below are a convention every write should follow — but there 
 
 ---
 
-## Conflict detection (design — not yet implemented against stored records)
+## Conflict detection
 
-The table below is the target design: detection running at write time, not read time, because by the time an agent is mid-execution it's too late to resolve cleanly.
+Detection runs at write time, not read time — by the time an agent is mid-execution it's too late to resolve cleanly.
 
-| Conflict type | Example | Resolution |
+| Conflict type | Status | Resolution |
 |---|---|---|
-| **Temporal** | Old instruction contradicts newer one on same key | Auto-resolved in favour of recency. Logged. |
-| **Authority** | Agent-inferred contradicts human-approved | Auto-resolved in favour of human. Agent notified. |
-| **Semantic** | "Be concise" vs "always explain your reasoning" — same authority, situationally contradictory | Queued for human review. Agent served older instruction with conflict flag. |
+| **Temporal** | **Implemented** | Auto-resolved in favour of recency. Logged. `conflict_id` stamped on both records. |
+| **Authority** | **Implemented** | Agent-inferred contradicts human-approved → auto-resolved in favour of human. `override_instructions` populated in `RetrievalResult`. `conflict_detected` dispatched via `db.gateway`. |
+| **Semantic** | Planned (Phase 4) | Requires embeddings — deferred. |
 
-**None of this exists yet.** `write()` has no conflict-checking code path, and `retrieve()` hardcodes `conflicts=[]` for records already in the store. `MemoryRecord.conflict_id` exists as a column (added to support the ranker's conflict-flagging logic) but nothing populates it.
-
-**What is implemented today** is narrower: an *external*-context check. When you pass `external_context` into `retrieve()`, AgentDB does a keyword-overlap check between that supplied context and your already-stored memory values, and flags an `external_conflict_detected` audit event + `external_conflict_rate` stat if they overlap. It does not compare stored records against each other.
+`ConflictDetector` (`governance/conflict_detector.py`) is wired into `write()`. On conflict: both records get `conflict_id`, the conflict is stored, and `db.gateway.dispatch("conflict_detected", ...)` fires so any subscriber (Slack notifier, MCP consumer, etc.) is immediately notified.
 
 ```python
-result = db.retrieve(query="communication style", agent_id="assistant", external_context=[...])
-result.conflicts       # checked first — currently always [] regardless of external_context
-result.records         # received after knowing conflict state
+# write() detects and dispatches automatically
+db.write(key="k", value="new value", origin="agent_inferred", agent_id="a")
+# If an existing record at "k" conflicts → conflict stored, dispatch fires
+
+result = db.retrieve(query="communication style", agent_id="assistant")
+result.conflicts          # list of ConflictRecord for returned records
+result.override_instructions  # human-approved wins messages for authority conflicts
 ```
 
-**Conflict flags are still assembled before memory content in the `RetrievalResult` shape**, preserving the safety property, even though nothing populates `conflicts` yet.
+External-context detection (caller-supplied context vs. stored records) is a separate, narrower check available via `external_context=` on `retrieve()` — it flags `external_conflict_detected` audit events but does not interact with the stored `conflicts` table.
 
-**Known limitation:** semantic conflict detection additionally requires embeddings (active in Phase 4) on top of the write-time detector above not existing yet. See `docs/context/database-schema.md` for the full picture of what's stored vs planned.
+**Known limitation:** semantic conflict detection (same-authority, situationally contradictory) requires Phase 4 embeddings. Until then, only temporal and authority conflicts are detected.
 
 ---
 
@@ -646,17 +655,19 @@ Agents not listed are denied all writes (`default_policy: deny`). Wildcard match
 
 ## Lifecycle management
 
-**The background lifecycle manager described below does not exist yet** (Task 9 in the plan, not started). The table is the target design, with two rows already true today via other mechanisms and one row's design under active reconsideration:
+`db.lifecycle` (`governance/lifecycle_manager.py`) is implemented. Call `db.lifecycle.run_sweep()` on demand — no background scheduler.
 
 | Event | Trigger | Action | Status |
 |---|---|---|---|
-| Confidence decay | Agent-inferred memory not retrieved within window | Score reduced 5% per cycle | Not implemented — and may not be needed: ranking already applies exponential recency decay to a record's effective relevance on every retrieval, without needing a scheduled job to mutate stored confidence. See the plan's Task 9 for the current thinking. |
-| Staleness archival | Not retrieved within 90 days | Moved to cold storage, excluded from standard retrieval | Not implemented |
-| Skill staleness | Skill health score below 0.6 | Warning surfaced in retrieval; skill not archived automatically | **Implemented** — this one works today |
-| Reinforcement | Explicit positive outcome signal | Confidence boosted, decay clock reset | **Implemented** via `record_outcome()` (reactive, not a background process) |
-| Human revocation | Explicit SDK delete | Archived with audit-log entry; history preserved | **Implemented** via `AgentDB.delete()` (2026-07-11: now routes through the permission router + audit log, not a direct store call) |
+| Hard TTL expiry | `expiry_time` field on record, checked at sweep | Archived if `expiry_time ≤ now` | **Implemented** (Step 0 of `run_sweep()`) |
+| Confidence decay | Agent-inferred memory, configurable rate (off by default) | Score reduced per sweep cycle | **Implemented** (off by default — ranking already applies recency decay at read time, making stored decay often redundant) |
+| Staleness archival | Not retrieved within `staleness_days` (default 90) | Archived, excluded from retrieval | **Implemented** |
+| Confidence threshold | Record confidence falls below `archival_threshold` (default 0.10) | Archived | **Implemented** |
+| Skill staleness | Skill health score below 0.6 | Warning surfaced in retrieval; skill not archived automatically | **Implemented** |
+| Reinforcement | Positive outcome signal | Confidence boosted, decay clock reset | **Implemented** via `db.lifecycle.reinforce(record_id)` and `db.lifecycle.record_outcome(...)` |
+| Human revocation | Explicit SDK delete | Archived with audit-log entry; history preserved | **Implemented** via `AgentDB.delete()` |
 
-**human_approved records never decay.** Only `agent_inferred` and `provider_ingested` records are subject to confidence decay, and today that only happens reactively through `record_outcome()`, not on a schedule.
+**`human_approved` records are immune to all sweep operations** — no decay, no staleness archival, no TTL expiry, regardless of field values.
 
 ---
 
