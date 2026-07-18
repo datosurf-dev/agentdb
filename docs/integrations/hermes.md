@@ -1,10 +1,10 @@
-# Hermes Integration (Planned — Not Yet Implemented)
+# Hermes Integration
 
-**`src/agentdb/adapters/hermes.py` does not exist yet.** This is a design brief for
-whoever builds it next, not something importable or runnable today. All hook names and
-lifecycle method signatures below have been verified against the Hermes codebase
-(`agent/memory_provider.py`, `agent/memory_manager.py`) — treat them as settled API
-surface unless a future Hermes release changes the ABC.
+**`src/agentdb/adapters/hermes.py` is implemented** (2026-07-14, commits 4ba16eb..6940fa7).
+`AgentDBHermesProvider` subclasses both `MemoryProvider` and `GatewayAdapter`. All 14
+hooks are mapped; Principle 12a compliance proven via `HermesMemoryManagerShim` tests.
+This document now serves as the reference guide for the shipped adapter — hook names and
+lifecycle method signatures are verified against `agent/memory_provider.py`.
 
 ## Why this adapter, and why generalized
 
@@ -157,18 +157,13 @@ db = AgentDB(summarizer=my_llm_fn)  # Hermes calls on_pre_compress → summarize
 
 ## Conflict notification
 
-`on_session_end()` and `on_turn_start()` are natural places to register and dispatch
-conflict notifications. During `initialize()`, register handlers against the
-AgentDB reconciliation dispatcher:
+`AgentDBHermesProvider.initialize()` subscribes `_on_conflict` via `db.gateway.subscribe`:
 
 ```python
 def initialize(self, session_id: str, **kwargs) -> None:
     self._session_id = session_id
-    self._db.register_reconciliation_handler(
-        "conflict_detected",
-        self._on_conflict,
-    )
-    self._db.dispatch_reconciliation_trigger("conversation_started", session_id=session_id)
+    self.gateway.subscribe("conflict_detected", self._on_conflict)
+    self.gateway.dispatch("conversation_started", session_id=session_id)
 
 def _on_conflict(self, **payload) -> None:
     # Route to Hermes's own notification surface (Telegram, Slack, Discord, etc.)
@@ -176,9 +171,11 @@ def _on_conflict(self, **payload) -> None:
     ...
 ```
 
-This means the same `conflict_detected` trigger that notifies via slack-assistant's
+The same `conflict_detected` trigger that notifies via slack-assistant's
 Slack/Telegram channels also fires inside any Hermes agent that registers this handler —
-one dispatch mechanism, multiple consumers, no new plumbing.
+one dispatch mechanism, multiple consumers, no new plumbing. Note: `db.gateway.subscribe`/`dispatch`
+is the canonical API; `register_reconciliation_handler`/`dispatch_reconciliation_trigger`
+are pass-through aliases that still work but are deprecated.
 
 ## Principle 12 compliance bar
 
@@ -195,38 +192,32 @@ Each hook must be labelled:
 A test must exist for each 12a hook proving the framework's own execution path — not
 direct adapter calls from test code — triggers AgentDB governance.
 
-## Open questions, in priority order
+## Known limitations and follow-up items
 
-1. **`queue_prefetch` behaviour:** Hermes queues background prefetch after each turn to
-   pre-warm the next. AgentDB retrieval is always a live query (nothing cached), so
-   `queue_prefetch` can be a no-op without correctness loss — but a background call could
-   usefully stamp `last_retrieved` and update retrieval counts, improving the causal
-   signal. Decide: no-op or background retrieve?
+These were open questions before implementation. They are documented here as known
+limitations of the shipped adapter, not pre-build decisions.
 
-2. **`on_memory_write` scope:** Hermes fires this hook for every built-in memory write,
-   including high-frequency daily-note appends. Running the permission router on every
-   append may be more overhead than value (daily notes are ephemeral). Consider scoping
-   governance to writes targeting `MEMORY.md` and `DREAMS.md` only — skip daily notes
-   unless the write explicitly targets a governed key prefix. Decide before implementing
-   the hook.
+1. **`queue_prefetch` is a no-op.** AgentDB retrieval is always a live query (nothing
+   cached), so a background call would usefully stamp `last_retrieved` but the current
+   implementation skips it. A future improvement could run a background retrieve to
+   improve the causal ranking signal.
 
-3. **`on_delegation` write shape:** when a subagent completes a delegated task, the
-   parent's `on_delegation(task, result)` fires. What gets written to AgentDB?
-   Options: (a) write `result` as an `agent_inferred` episodic record tagged with the
-   task's entity set; (b) write nothing and let the parent's next `sync_turn` capture
-   it; (c) write only if `result` exceeds a confidence threshold. Decide based on how
-   delegation outcomes are expected to affect future retrieval.
+2. **`on_memory_write` governance is scoped to `MEMORY.md` and `DREAMS.md` targets.**
+   Daily-note appends are skipped — running the permission router on every high-frequency
+   ephemeral append was not worth the overhead. Expand scope if a governed key prefix
+   needs to cover daily notes.
 
-4. **Skill injection format in `system_prompt_block()`:** AgentDB skills carry content,
-   health scores, and staleness warnings. Decide how to format these for Hermes's system
-   prompt — a clearly labelled `## Governed Skills` section works, but confirm Hermes
-   does not have a reserved section header that would conflict.
+3. **`on_delegation` writes the result as an `agent_inferred` episodic record** tagged
+   with the task's entity set. If the result is very large or low-signal, consider
+   gating on a confidence threshold before writing.
 
-5. **`on_memory_write` and the permission router bypass risk:** `on_memory_write` mirrors
-   built-in writes but cannot block them — it fires after the write has already landed in
-   Hermes's own store. This is a 12a governance point for AgentDB's own records, not a
-   gate on Hermes's native writes. Document this limitation explicitly in the adapter so
-   callers do not assume AgentDB can veto a Hermes-native write.
+4. **`system_prompt_block()` injects a `## Governed Skills` section.** Verify this
+   header does not conflict with any Hermes-reserved section header in the target profile.
+
+5. **`on_memory_write` cannot veto Hermes-native writes.** The hook fires after the
+   write has already landed in Hermes's own store — it is a 12a governance point for
+   AgentDB's own records only. Callers must not assume AgentDB can block a Hermes-native
+   write.
 
 ## Related context
 
@@ -235,7 +226,5 @@ direct adapter calls from test code — triggers AgentDB governance.
 - Hermes `MemoryProvider` ABC: `agent/memory_provider.py` in
   [NousResearch/hermes-agent](https://github.com/NousResearch/hermes-agent)
 - Hermes `MemoryManager` (wiring point in `run_agent.py`): `agent/memory_manager.py`
-- Cross-platform comparison and recommended build order:
+- Cross-platform comparison (build rationale):
   `docs/integrations/openclaw-hermes-assessment.md`
-- OpenClaw design brief (build after this adapter):
-  `docs/integrations/openclaw.md`

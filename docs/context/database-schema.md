@@ -1,6 +1,6 @@
 # AgentDB Database Schema & Memory Assets
 
-This document describes what is actually persisted by AgentDB today — every table, its columns, and every on-disk memory asset outside the SQL tables — and how they interact. It reflects the code as of 2026-07-11 (see `docs/superpowers/plans/2026-06-06-agentdb-revised.md` → Current Status for what's built vs planned). Where a field or store is aspirational rather than implemented, that's called out explicitly.
+This document describes what is actually persisted by AgentDB today — every table, its columns, and every on-disk memory asset outside the SQL tables — and how they interact. It reflects the code as of 2026-07-17 (see `docs/superpowers/plans/2026-06-06-agentdb-revised.md` → Current Status for what's built vs planned). Where a field or store is aspirational rather than implemented, that's called out explicitly.
 
 ## Storage topology
 
@@ -46,7 +46,9 @@ Backs `MemoryRecord` (`core/models.py`). One row per record version; a `delete()
 | `created_at` | TEXT (ISO datetime) | |
 | `entities` | TEXT (JSON list) | canonical entity identifiers (file paths, model names) attached at write time — used by `retrieve_by_entities()` and the Claude adapter's action-driven retrieval |
 | `last_retrieved` | TEXT (ISO datetime, nullable) | added 2026-07-11 for the ranking algorithm's recency signal; stamped by `increment_retrieval_count()` |
-| `conflict_id` | TEXT (nullable) | added 2026-07-11 so the ranker can flag conflicted records — **nothing populates this today**; conflict detection against stored records doesn't exist yet (see Known Gaps) |
+| `conflict_id` | TEXT (nullable) | stamped by `ConflictDetector` at write time when a temporal or authority conflict is detected; both the incoming and existing record receive the same `conflict_id` |
+| `expiry_time` | TEXT (ISO datetime, nullable) | added 2026-07-17 (Task 10C); `lifecycle.run_sweep()` Step 0 archives records where `expiry_time ≤ now`; `human_approved` records are immune |
+| `inferred` | INTEGER (bool) | added 2026-07-17 (Task 10C); set to 1 when `write(infer=True)` is used — value was passed through a caller-supplied `infer_fn` before storage |
 
 **Fields planned but not present:** `user_id`, `session_id` (as a column — session linkage today is in-memory only, see Known Gaps), `expiry_policy`, `tier`, `audit_sequence`, `embedding`, `embedding_version`. `ExpiryPolicy`/`MemoryTier` enums exist in `core/models.py` but nothing attaches them to a record yet.
 
@@ -86,7 +88,7 @@ One row per `retrieve(..., external_context=...)` call where external context wa
 | `had_external_context` | INTEGER (bool) | |
 | `had_conflict` | INTEGER (bool) | whether any external content overlapped an existing memory's value |
 
-This is the *only* conflict-detection code path that exists today — a keyword-overlap check between externally-supplied context and already-stored memory values, used to populate `external_conflict_detected` audit events and the `external_conflict_rate` stat. It is not the temporal/authority/semantic conflict detection described in the README's roadmap section — that runs at write time against other stored records and does not exist yet.
+This is one of two conflict-detection paths. The other is `ConflictDetector`, wired into `write()` — it checks the newly written record against existing stored records for temporal conflicts (same key, overlapping time window) and authority conflicts (agent vs. human-approved). The `external_retrieves` table only covers the narrower case of externally-supplied context overlapping stored values during `retrieve()` — it is not the same code path.
 
 ---
 
@@ -172,13 +174,14 @@ Created on first run, otherwise empty. No code writes into them yet — they're 
 ```
 write(key, value, origin, agent_id, entities=...)
     → PermissionRouter.check_write()  (raises PermissionDenied + audit-logs on failure)
+    → ConflictDetector.check(): temporal conflicts auto-resolve by recency; authority conflicts stamp conflict_id on both records
     → memories row inserted
+    → db.gateway.dispatch("conflict_detected", ...) if conflict detected
     → audit_log: memory_write
 
 retrieve(query, agent_id, ...)
     → memories rows matching query (substring/keyword search, pool of up to max(limit, 50))
     → MultiSignalRanker.rank(): reads origin, last_retrieved, confidence, retrieval_count, conflict_id
-        (conflict_id is always None in practice — nothing populates it — so conflict_flag is always False today)
     → top `limit` selected; increment_retrieval_count() stamps retrieval_count + last_retrieved
     → audit_log: memory_retrieve (real per-record signal_scores)
     → skills.get_for_agent(agent_id) merged in as skill_warnings (separate skills.sqlite lookup)
@@ -205,7 +208,6 @@ Skills are retrieved alongside memories in the same `retrieve()` call, but they 
 
 These are already tracked in the plan's Current Status, but are easiest to see clearly from the schema itself:
 
-- **`conflict_id` is a column with no writer.** Real conflict detection (temporal/authority/semantic, against other stored records) doesn't exist — only the narrower `external_retrieves`-backed check against externally-supplied context does.
 - **Session→record linkage is in-memory only.** A process restart between `retrieve()` and `record_outcome()` silently loses the ability to attribute the outcome to specific records — the `outcomes.linked_retrieval_sequence` column exists precisely to fix this and is unused.
 - **`file_integrity.py` is dead code** from the product's perspective — built and tested, never called.
 - **`reconciliation/` and `embeddings/` are empty placeholders** — the reconciliation dispatcher and embedding pipeline don't persist anything yet, despite the directories existing from day one.

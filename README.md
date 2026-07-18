@@ -695,7 +695,20 @@ const db = new AgentDB()
 const db = AgentDB.connect('mcp://localhost:5433')
 ```
 
-**MCP server (not yet implemented, Phase 5):** the target design is 4 tools — `memory_write`, `memory_retrieve`, `conflict_queue`, `memory_subscribe` — as a native integration point for any MCP-compatible framework. `conflict_queue`/`memory_subscribe` are thin transports over an already-implemented core mechanism (`AgentDB.register_reconciliation_handler`/`dispatch_reconciliation_trigger`, a live in-memory dispatcher — not a new event-bus subsystem to build), blocked only on real conflict detection (Task 6) existing to dispatch something worth subscribing to. That same mechanism means a Slack/Telegram notifier doesn't need MCP at all — a host app can register a handler directly. See `docs/context/capabilities.md`.
+**MCP server (implemented, Task 14, 2026-07-17):** 4 tools — `memory_write`, `memory_retrieve`, `conflict_queue`, `memory_stats` — via `FastMCP`. Stdio transport for Claude Desktop; `agentdb-mcp` console script. Add to `claude_desktop_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "agentdb": {
+      "command": "agentdb-mcp",
+      "env": { "AGENTDB_MEMORY_DIR": "/path/to/your/memory/workspace" }
+    }
+  }
+}
+```
+
+HTTP+SSE transport (`agentdb-mcp-http`) and `memory_subscribe` are deferred — push subscriptions don't work over stdio. See `docs/context/capabilities.md`.
 
 **Security note:** In embedded (in-process) mode, the permission router runs in the same process as the application. For security-sensitive deployments, server mode is required — the router runs out-of-process and cannot be reached by application code. Embedded mode is for development and prototyping.
 
@@ -703,7 +716,7 @@ const db = AgentDB.connect('mcp://localhost:5433')
 
 ## Architecture
 
-**This is the target architecture, not a diagram of what's running today.** Implemented today: `AgentDBBackend`, the permission router, the SQLite store, the multi-signal ranker, and the audit log. A live in-memory notifier dispatcher also exists (`register_reconciliation_handler`/`dispatch_reconciliation_trigger`) — narrower and less durable than the "Event bus" box below implies; see `docs/context/capabilities.md`. Not implemented: MCP server, conflict detector, budget manager, Postgres/pgvector. See `docs/context/database-schema.md` for what's actually persisted.
+**This is the target architecture, not a diagram of what's running today.** Implemented today: `AgentDBBackend`, permission router, SQLite store, multi-signal ranker, audit log, conflict detector (`ConflictDetector` — temporal + authority), lifecycle manager (`db.lifecycle`), gateway + proposal workflow (`db.gateway`), MCP server (stdio, `interface/mcp_server.py`). A live in-memory notifier dispatcher (`db.gateway.subscribe`/`dispatch`) exists — narrower and less durable than the "Event bus" box below implies; see `docs/context/capabilities.md`. Not implemented: budget manager as a standalone module, Postgres/pgvector. See `docs/context/database-schema.md` for what's actually persisted.
 
 ```
 Agent (any framework)

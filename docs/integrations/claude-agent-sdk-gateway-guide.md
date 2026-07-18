@@ -27,19 +27,18 @@ Tighten later based on observed values, not a guess — same philosophy as the
 `full_storage` → `budget_optimized` migration path already documented in
 `model-and-runtime-wiring.md`.
 
-## Permission gotcha: `proposal/` write access isn't automatic
+## Permission note: `proposal/` write access
 
 `gateway.propose()` writes to `proposal/<id>` through the normal `write()`
-path, gated by the standard permission router like any other key. **This
-does not surface until the first call** — if your `permissions.yaml` doesn't
-grant the calling `agent_id` write access under `proposal/`, `propose_skill()`
-raises `PermissionDenied` the first time anyone tries to use it, in
-production, with no earlier warning.
+path. As of 2026-07-14, `proposal/` is a framework-managed prefix
+(`FRAMEWORK_MANAGED_WRITE_PREFIXES` in `governance/permission_router.py`) and
+is **writable by default for any agent** — no explicit `permissions.yaml`
+grant needed. An explicit `cannot_write: ["proposal/"]` still blocks it for
+deployments that want to lock it down.
 
-**Recommendation:** any agent_id that will call `propose_skill()` needs an
-explicit `proposal/` entry under `can_write` — treat it the same as you would
-`memory/working/` or any other prefix the agent needs. Don't assume it's
-covered by an existing grant.
+If you are running an older version of AgentDB without this fix, you will need
+an explicit `proposal/` entry under `can_write` for any agent that calls
+`propose_skill()`. See "Friction points — resolved 2026-07-14" below.
 
 ## `agent_id` is the natural default scope for chat-originated proposals
 

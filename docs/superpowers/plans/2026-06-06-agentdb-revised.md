@@ -180,7 +180,7 @@ agentdb/
         └── permissions.test.yaml
 ```
 
-Note: the actual current layout (see Current Status above) inlines `MemoryStore`/`AuditLog`/`SystemStats` (called `SystemStats`, not `SystemTables`) inside `interface/client.py` rather than as the separate `core/` modules shown above, has no `event_bus.py`, `conflict_detector.py`, `lifecycle_manager.py`, `budget_manager.py`, `providers/`, `mcp_server.py`, `sdk-ts/`, `config/permissions.example.yaml`, or `migrations/`. This tree is the target structure for still-open work, not a description of what exists today.
+Note: the actual current layout (see Current Status above) inlines `MemoryStore`/`AuditLog` inside `interface/client.py` rather than as the separate `core/` modules shown above. `conflict_detector.py`, `lifecycle_manager.py`, and `mcp_server.py` now exist. Still absent: `event_bus.py`, `budget_manager.py` (as a standalone module), `providers/`, `sdk-ts/`, `config/permissions.example.yaml`, `migrations/`. This tree is the target structure — treat absent items as not-yet-built.
 
 **Tech Stack:** Python 3.11+, SQLite (embedded), PostgreSQL 15+ + pgvector (server), `pyyaml`, `pytest`, `numpy` (cosine similarity), `httpx` (provider sync), MCP SDK (Phase 4/5). TypeScript SDK mirrors Python interface.
 

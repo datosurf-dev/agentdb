@@ -22,25 +22,24 @@ Every capability tagged **Dual** below shares one shape: the detection logic (co
 | `file_integrity.py` (SHA-256 hashing) | Track | Dual, unbuilt | Built, unused | Could power a 12a pre-edit staleness check ("this file changed since you last saw it") *and* a 12b periodic drift sweep — same primitive, neither wired in |
 | Conversation JSONL capture | Track | N/A (pure capture) | Implemented (initial) | Logging sink, not consumed by retrieval or any dispatcher |
 | Entity tagging (`entities` field) | Track | Feeds 12a (`retrieve_by_entities`) | Implemented | |
-| Conflict detection (Task 6) | Reconcile | **Dual — the clearest example** | Missing | Detection at write time feeds 12a for free (next retrieve sees `conflict_id`); the same detection event should also dispatch a `conflict_detected` trigger for 12b consumers (human review). Neither half exists yet |
+| Conflict detection | Reconcile | **Dual — the clearest example** | Implemented (temporal + authority) | Wired into `write()` via `ConflictDetector`. Temporal conflicts auto-resolve by recency; authority conflicts flag the record and populate `override_instructions` on retrieve. `conflict_detected` dispatched via `db.gateway.dispatch`. Semantic conflict detection deferred to Phase 3 (embeddings). |
 | External-context conflict check | Reconcile | 12a only | Implemented | Returned synchronously to the calling `retrieve()`; no 12b consumer today |
-| Reconciliation triggers | Reconcile | `conversation_started` = 12a; `file_modified`/`cron` = 12b | Partial | Only `conversation_started` actually fires (inline at turn start via the Claude adapter) |
+| Reconciliation triggers | Reconcile | `conversation_started` = 12a; `conflict_detected` = 12a→12b; `file_modified`/`cron` = 12b | Partial | `conversation_started` fires from both adapters at turn start. `conflict_detected` dispatched by `write()` via `db.gateway`. `file_modified`/`cron` remain unwired. |
 | Skill health/staleness | Reconcile | **Dual** | 12a implemented, 12b missing | Recomputed fresh at every retrieve (already 12a); crossing the 0.6 threshold should also dispatch a `skill_stale` trigger — today it only ever surfaces as a warning string to whichever agent happens to retrieve |
-| Lifecycle Manager (Task 9) | Reconcile | 12b | Missing (scope narrowed 2026-07-11 to archival-only) | |
-| Notifier dispatcher (`register_reconciliation_handler`/`dispatch_reconciliation_trigger`) | Reconcile | **Is** the 12b mechanism | Implemented, narrowly used | The core capability behind every 12b row in this table. Not MCP-specific, not durable — see Principle 7 |
-| MultiSignalRanker (Task 7) | Rank | 12a | Implemented | |
+| Lifecycle Manager | Reconcile | 12b | Implemented (`db.lifecycle`) | `run_sweep()`: Step 0 expires TTL records; Step 1 optional confidence decay; Step 2 archives below threshold; Step 3 archives past staleness. `reinforce()` and `record_outcome()` also on `db.lifecycle`. `human_approved` immune to all. |
+| Notifier dispatcher (`db.gateway.subscribe`/`dispatch`) | Reconcile | **Is** the 12b mechanism | Implemented | The core capability behind every 12b row. Formerly `register_reconciliation_handler`/`dispatch_reconciliation_trigger` (pass-through aliases still work). Not MCP-specific, not durable — see Principle 7. |
+| MultiSignalRanker | Rank | 12a | Implemented | |
 | Entity-aware retrieval | Rank | 12a | Implemented | |
-| Provider ingestors (Task 10) | Rank | Ingest feeds 12a for free; a sync-caused conflict could dispatch 12b | Missing | |
+| Provider ingestors | Rank | Ingest feeds 12a for free; a sync-caused conflict could dispatch 12b | Missing (Phase 6) | |
 | `prepare_turn` / `pre_tool_use` | Inject | 12a | Implemented | |
-| MCP server (Task 14) | Inject | `memory_write`/`memory_retrieve` = transport over 12a; `conflict_queue` = transport over 12b (subscribes to the existing dispatcher) | Missing | Not a new event-bus subsystem — a thin consumer of the dispatcher row above |
-| Skill draft reconciliation pipeline (Task 13) | Reconcile | **Dual** — propose/metric-triggers = 12b (dispatches `skill_draft_proposed`/`skill_candidate_threshold_reached`); approve/reject = write-time governance (the only path allowed to touch `skills.sqlite` content) | Missing, designed | Reuses `retrieve_by_entities` matching, Task 12's conflict detector, `file_integrity.py` (finally gets a caller), the notifier dispatcher, and `agentdb_stats()` — no new subsystem. Depends on Task 12/11. Requires the `SkillStore.update()` governance fix as a prerequisite |
+| MCP server | Inject | `memory_write`/`memory_retrieve` = transport over 12a; `conflict_queue` = transport over 12b | Implemented (stdio, Task 14) | `interface/mcp_server.py`, 4 tools, `agentdb-mcp` console script. HTTP+SSE deferred. |
+| Skill draft reconciliation pipeline (Task 13) | Reconcile | **Dual** — propose/metric-triggers = 12b; approve/reject = write-time governance | Missing (Phase 3) | Depends on Task 12 (semantic conflict detection) → Task 11 (embeddings). `SkillStore.update()` governance fix can ship independently. |
 
 ## What this means for near-term work
 
-The biggest unlock isn't new plumbing — the 12b mechanism (dispatcher) already exists. It's:
+The core loop is operational. Remaining gaps in 12b coverage:
 
-1. **Task 6 (conflict detection)** dispatching a `conflict_detected` trigger when it lands.
-2. **Skill staleness** dispatching a `skill_stale` trigger the first time a skill crosses the 0.6 threshold (not on every retrieve — needs a "did this just cross" check, not a "is this below" check, to avoid firing every single retrieval).
-3. Any consumer — MCP's `conflict_queue`, or a Slack/Telegram notifier registered directly by a host app like slack-assistant — calling `db.register_reconciliation_handler("conflict_detected", handler)` once those exist.
+1. **Skill staleness** dispatching a `skill_stale` trigger the first time a skill crosses the 0.6 threshold — needs a "did this just cross" check, not "is this below," to avoid firing on every retrieve. Any consumer then registers via `db.gateway.subscribe("skill_stale", handler)`.
+2. **Phase 3** (embeddings) unlocks semantic conflict detection and Task 13's skill draft reconciliation pipeline — both correctly gated behind embeddings being active.
 
-None of this requires building an event bus. It requires wiring two new dispatch call sites into work that's already planned (Task 6, and a small addition to Task 8's skill store).
+Neither requires a new event bus — the dispatcher (`db.gateway`) already exists and is wired.

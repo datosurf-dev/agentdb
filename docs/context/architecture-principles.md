@@ -54,9 +54,9 @@ These principles define the implementation constraints for all AgentDB work.
 
     | Sub-surface | Consumer | Status |
     |---|---|---|
-    | `db.gateway` | Reconciliation dispatcher + proposal workflow + conflict queue + adapter base | Task 16 — not started |
-    | `db.lifecycle` | Archival sweep + outcome reinforcement | Task 9 — not started |
-    | `db.providers` | Anthropic / OpenAI / Google provider sync | Task 10 — not started |
+    | `db.gateway` | Reconciliation dispatcher + proposal workflow + conflict queue + adapter base | Implemented (2026-07-14) |
+    | `db.lifecycle` | Archival sweep + outcome reinforcement | Implemented (2026-07-14) |
+    | `db.providers` | Anthropic / OpenAI / Google provider sync | Not started (Phase 6) |
     | `db.system` | Introspection tables | Implemented (partial) |
     | `db.skills_api` | Skill CRUD | Implemented |
     | `db.audit_log` | Audit trail replay | Implemented |
