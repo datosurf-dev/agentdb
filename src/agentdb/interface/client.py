@@ -246,6 +246,30 @@ _MODE_DEFAULTS: dict = {
             "tracking_max_files_per_directory": 200,
         },
     },
+    "research": {
+        "lifecycle": {
+            "confidence_decay_rate": 0.0,
+            "archival_threshold": 0.05,
+            "staleness_days": 180,
+            "reinforce_rate": 0.10,
+        },
+        "retrieval": {
+            "retrieve_limit": 50,
+            "memory_budget_chars": 24000,
+            "ranker_weights": {
+                "provenance": 0.25,
+                "recency": 0.35,
+                "confidence": 0.25,
+                "causal": 0.15,
+                "semantic": 0.0,
+            },
+            "conflict_threshold": 0.85,
+        },
+        "capture": {
+            "conversation_jsonl": True,
+            "tracking_max_files_per_directory": 500,
+        },
+    },
 }
 
 
@@ -260,10 +284,27 @@ def _deep_merge(base: dict, override: dict) -> dict:
 
 
 def _resolve_config(mode: str, yaml_dict: dict) -> dict:
-    """Merge mode defaults with per-field yaml overrides. yaml_dict wins."""
-    base = _MODE_DEFAULTS.get(mode, _MODE_DEFAULTS["budget_optimized"])
-    override = {k: yaml_dict[k] for k in ("lifecycle", "retrieval", "capture") if k in yaml_dict}
-    return _deep_merge(base, override)
+    """
+    Resolve the final config dict. Priority (low → high):
+      1. Built-in mode defaults (or budget_optimized as fallback)
+      2. User-defined profile from yaml_dict["profiles"][mode] (with optional extends:)
+      3. Top-level per-field overrides (lifecycle/retrieval/capture keys in yaml_dict)
+    """
+    # Step 1: built-in base
+    if mode in _MODE_DEFAULTS:
+        base = _MODE_DEFAULTS[mode]
+    else:
+        # Step 2: look for a user-defined profile
+        user_profiles = yaml_dict.get("profiles", {})
+        user_profile = user_profiles.get(mode, {})
+        extends = user_profile.get("extends", "budget_optimized")
+        base = _MODE_DEFAULTS.get(extends, _MODE_DEFAULTS["budget_optimized"])
+        profile_override = {k: user_profile[k] for k in ("lifecycle", "retrieval", "capture") if k in user_profile}
+        base = _deep_merge(base, profile_override)
+
+    # Step 3: top-level per-field overrides always win
+    top_override = {k: yaml_dict[k] for k in ("lifecycle", "retrieval", "capture") if k in yaml_dict}
+    return _deep_merge(base, top_override)
 
 
 # ---------------------------------------------------------------------------
@@ -271,8 +312,22 @@ def _resolve_config(mode: str, yaml_dict: dict) -> dict:
 # ---------------------------------------------------------------------------
 
 _DEFAULT_MEMORY_YAML = """\
+# Built-in modes: budget_optimized | full_storage | research
+# Set mode to a name under 'profiles:' to use a custom profile.
 mode: budget_optimized
 tracked_directories: []
+
+# Optional: define custom profiles. Each profile can extend a built-in.
+# profiles:
+#   my_profile:
+#     extends: budget_optimized   # optional; defaults to budget_optimized
+#     lifecycle:
+#       staleness_days: 45
+#     retrieval:
+#       retrieve_limit: 15
+#       memory_budget_chars: 8000
+
+# Per-field overrides — applied on top of the active mode/profile.
 capture:
   conversation_jsonl: false
   tracking_max_files_per_directory: 200

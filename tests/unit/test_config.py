@@ -1,4 +1,4 @@
-"""Task 10D: centralized memory.yaml configuration wiring."""
+"""Task 10D/10E: centralized memory.yaml configuration wiring."""
 from __future__ import annotations
 
 import pytest
@@ -99,3 +99,100 @@ def test_config_property_returns_resolved_dict(tmp_path):
     assert cfg["lifecycle"]["staleness_days"] == 90
     assert cfg["retrieval"]["retrieve_limit"] == 5
     assert cfg["retrieval"]["ranker_weights"]["provenance"] == pytest.approx(0.35)
+
+
+# ---------------------------------------------------------------------------
+# research profile
+# ---------------------------------------------------------------------------
+
+def test_research_profile_retrieve_limit(tmp_path):
+    from agentdb.interface.client import AgentDB
+    db = AgentDB(memory_dir=_mem_dir(tmp_path, {"mode": "research", "tracked_directories": [str(tmp_path)]}))
+    assert db.config["retrieval"]["retrieve_limit"] == 50
+    assert db.config["retrieval"]["memory_budget_chars"] == 24000
+
+
+def test_research_profile_lifecycle(tmp_path):
+    from agentdb.interface.client import AgentDB
+    db = AgentDB(memory_dir=_mem_dir(tmp_path, {"mode": "research", "tracked_directories": [str(tmp_path)]}))
+    assert db.lifecycle.STALENESS_DAYS == 180
+    assert db.lifecycle.ARCHIVAL_THRESHOLD == pytest.approx(0.05)
+
+
+def test_research_profile_recency_weight(tmp_path):
+    from agentdb.interface.client import AgentDB
+    db = AgentDB(memory_dir=_mem_dir(tmp_path, {"mode": "research", "tracked_directories": [str(tmp_path)]}))
+    assert db._ranker.w_recency == pytest.approx(0.35)
+    assert db._ranker.w_provenance == pytest.approx(0.25)
+
+
+# ---------------------------------------------------------------------------
+# User-defined profiles
+# ---------------------------------------------------------------------------
+
+def test_user_defined_profile_resolves(tmp_path):
+    from agentdb.interface.client import AgentDB
+    db = AgentDB(
+        memory_dir=_mem_dir(
+            tmp_path,
+            {
+                "mode": "my_profile",
+                "tracked_directories": [],
+                "profiles": {
+                    "my_profile": {
+                        "retrieval": {"retrieve_limit": 15, "memory_budget_chars": 8000},
+                    }
+                },
+            },
+        )
+    )
+    assert db.config["retrieval"]["retrieve_limit"] == 15
+    assert db.config["retrieval"]["memory_budget_chars"] == 8000
+
+
+def test_user_defined_profile_extends_builtin(tmp_path):
+    from agentdb.interface.client import AgentDB
+    db = AgentDB(
+        memory_dir=_mem_dir(
+            tmp_path,
+            {
+                "mode": "my_research",
+                "tracked_directories": [str(tmp_path)],
+                "profiles": {
+                    "my_research": {
+                        "extends": "research",
+                        "lifecycle": {"staleness_days": 60},
+                    }
+                },
+            },
+        )
+    )
+    # Inherits research retrieve_limit but overrides staleness
+    assert db.config["retrieval"]["retrieve_limit"] == 50
+    assert db.lifecycle.STALENESS_DAYS == 60
+
+
+def test_user_defined_profile_top_level_override_still_wins(tmp_path):
+    from agentdb.interface.client import AgentDB
+    db = AgentDB(
+        memory_dir=_mem_dir(
+            tmp_path,
+            {
+                "mode": "my_profile",
+                "tracked_directories": [],
+                "profiles": {
+                    "my_profile": {
+                        "retrieval": {"retrieve_limit": 15},
+                    }
+                },
+                "retrieval": {"retrieve_limit": 7},  # top-level override wins
+            },
+        )
+    )
+    assert db.config["retrieval"]["retrieve_limit"] == 7
+
+
+def test_unknown_mode_falls_back_to_budget_optimized(tmp_path):
+    from agentdb.interface.client import AgentDB
+    db = AgentDB(memory_dir=_mem_dir(tmp_path, {"mode": "nonexistent", "tracked_directories": []}))
+    assert db.config["retrieval"]["retrieve_limit"] == 5
