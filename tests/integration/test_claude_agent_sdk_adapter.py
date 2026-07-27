@@ -39,6 +39,57 @@ def test_prepare_turn_enforces_retrieve_and_builds_messages(tmp_path):
     assert any(entry.event_type == EVENT_MEMORY_RETRIEVE for entry in entries)
 
 
+def test_prepare_turn_isolate_by_agent_true_excludes_other_agent_records(tmp_path):
+    db = AgentDB(path=tmp_path / "test.db", permissions_path=PERMS)
+    db.write(
+        key="memory/working/other_agent_note",
+        value="use concise bullets",
+        origin="agent_inferred",
+        agent_id="coder_agent",
+    )
+    db.write(
+        key="memory/working/mine_note",
+        value="use concise bullets",
+        origin="agent_inferred",
+        agent_id="research_agent",
+    )
+
+    middleware = AgentDBClaudeMiddleware(
+        db=db, agent_id="research_agent", profile="budget_optimized", isolate_by_agent=True,
+    )
+    _, retrieval = middleware.prepare_turn(
+        user_query="concise bullets", session_id="sess-isolated-1",
+    )
+
+    assert [r.key for r in retrieval.records] == ["memory/working/mine_note"]
+
+
+def test_prepare_turn_isolate_by_agent_default_false_returns_mixed_pool(tmp_path):
+    db = AgentDB(path=tmp_path / "test.db", permissions_path=PERMS)
+    db.write(
+        key="memory/working/other_agent_note",
+        value="use concise bullets",
+        origin="agent_inferred",
+        agent_id="coder_agent",
+    )
+    db.write(
+        key="memory/working/mine_note",
+        value="use concise bullets",
+        origin="agent_inferred",
+        agent_id="research_agent",
+    )
+
+    middleware = AgentDBClaudeMiddleware(db=db, agent_id="research_agent", profile="budget_optimized")
+    _, retrieval = middleware.prepare_turn(
+        user_query="concise bullets", session_id="sess-mixed-1",
+    )
+
+    assert {r.key for r in retrieval.records} == {
+        "memory/working/other_agent_note",
+        "memory/working/mine_note",
+    }
+
+
 def test_prepare_turn_conversation_started_trigger_can_influence_retrieval(tmp_path):
     workspace_root = tmp_path / "memory-home"
     db = AgentDB(memory_dir=workspace_root, permissions_path=PERMS)

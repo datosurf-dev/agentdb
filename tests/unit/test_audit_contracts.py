@@ -39,6 +39,7 @@ def test_memory_retrieve_event_payload_schema(tmp_path):
         "session_id",
         "trigger_source",
         "reconciliation_run_id",
+        "isolate_by_agent",
     }
     assert isinstance(retrieve_entry.payload["query"], str)
     assert isinstance(retrieve_entry.payload["record_ids"], list)
@@ -46,6 +47,7 @@ def test_memory_retrieve_event_payload_schema(tmp_path):
     assert retrieve_entry.payload["session_id"] == session_id
     assert retrieve_entry.payload["trigger_source"] == "query"
     assert retrieve_entry.payload["reconciliation_run_id"] is None
+    assert retrieve_entry.payload["isolate_by_agent"] is False
 
 
 def test_external_conflict_event_payload_schema(tmp_path):

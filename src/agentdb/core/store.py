@@ -210,10 +210,13 @@ class MemoryStore:
     def list_by_agent(self, agent_id: str) -> list[MemoryRecord]:
         return [r for r in self._by_id.values() if r.agent_id == agent_id and not r.archived]
 
-    def search(self, query: str, limit: int = 5) -> list[MemoryRecord]:
+    def search(self, query: str, limit: int = 5, agent_id: Optional[str] = None) -> list[MemoryRecord]:
         """
         Simple text search: find records whose key or value contains
-        any word from query (case-insensitive).
+        any word from query (case-insensitive). agent_id, if given, is
+        applied during the scan (before the `limit` slice below) so an
+        isolated caller's own matches can't be truncated away by another
+        agent's larger matching set.
         """
         words = [w.lower() for w in query.split() if w]
         if not words:
@@ -222,6 +225,8 @@ class MemoryStore:
         results: list[MemoryRecord] = []
         for record in self._by_id.values():
             if record.archived:
+                continue
+            if agent_id is not None and record.agent_id != agent_id:
                 continue
             key_lower = record.key.lower()
             value_str = (
@@ -234,10 +239,14 @@ class MemoryStore:
 
         return results[:limit]
 
-    def search_by_entities(self, entities: list[str]) -> list[MemoryRecord]:
+    def search_by_entities(self, entities: list[str], agent_id: Optional[str] = None) -> list[MemoryRecord]:
         """
         Find records where record.entities has overlap with the given entities.
         Fallback: search key and value for entity name substrings.
+        agent_id, if given, is applied inline in BOTH passes below — not as a
+        filter on the final chosen list — so an isolated caller's fallback
+        search is scoped to their own records rather than being gated by
+        whether OTHER agents had entity-tag hits.
         """
         if not entities:
             return []
@@ -248,6 +257,8 @@ class MemoryStore:
         matches: list[MemoryRecord] = []
         for record in self._by_id.values():
             if record.archived:
+                continue
+            if agent_id is not None and record.agent_id != agent_id:
                 continue
             record_entities = set(e.lower() for e in (record.entities or []))
             if record_entities & entity_set:
@@ -260,6 +271,8 @@ class MemoryStore:
         fallback: list[MemoryRecord] = []
         for record in self._by_id.values():
             if record.archived:
+                continue
+            if agent_id is not None and record.agent_id != agent_id:
                 continue
             key_lower = record.key.lower()
             value_str = (

@@ -665,8 +665,11 @@ class AgentDB:
         session_id: Optional[str] = None,
         external_context: Optional[list[dict]] = None,
         budget_tokens: Optional[int] = None,
+        isolate_by_agent: bool = False,
     ) -> RetrievalResult:
-        candidates = self._store.search(query, limit=max(limit, 50))
+        candidates = self._store.search(
+            query, limit=max(limit, 50), agent_id=agent_id if isolate_by_agent else None,
+        )
         ranked = self._ranker.rank(query, candidates, agent_id=agent_id)[:limit]
         ranked_records = [rr.record for rr in ranked]
 
@@ -705,6 +708,7 @@ class AgentDB:
                 "session_id": session_id,
                 "trigger_source": "query",
                 "reconciliation_run_id": None,
+                "isolate_by_agent": isolate_by_agent,
             },
         )
 
@@ -787,8 +791,11 @@ class AgentDB:
         entities: list[str],
         agent_id: str,
         session_id: Optional[str] = None,
+        isolate_by_agent: bool = False,
     ) -> RetrievalResult:
-        records = self._store.search_by_entities(entities)
+        records = self._store.search_by_entities(
+            entities, agent_id=agent_id if isolate_by_agent else None,
+        )
 
         record_ids = [r.id for r in records]
 
@@ -808,6 +815,7 @@ class AgentDB:
                 "trigger_source": "entity",
                 "entities": entities,
                 "reconciliation_run_id": None,
+                "isolate_by_agent": isolate_by_agent,
             },
         )
 

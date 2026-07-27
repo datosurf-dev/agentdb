@@ -87,6 +87,26 @@ def test_memory_retrieve_respects_limit(db):
     assert len(result["records"]) <= 2
 
 
+def test_memory_retrieve_isolates_by_agent_when_requested(db):
+    from agentdb.interface.mcp_server import memory_write, memory_retrieve
+    memory_write(key="mine", value="widget note", origin="agent_inferred", agent_id="a")
+    memory_write(key="other", value="widget note", origin="agent_inferred", agent_id="b")
+
+    result = memory_retrieve(query="widget", agent_id="a", isolate_by_agent=True)
+
+    assert [r["key"] for r in result["records"]] == ["mine"]
+
+
+def test_memory_retrieve_default_returns_mixed_pool(db):
+    from agentdb.interface.mcp_server import memory_write, memory_retrieve
+    memory_write(key="mine", value="widget note", origin="agent_inferred", agent_id="a")
+    memory_write(key="other", value="widget note", origin="agent_inferred", agent_id="b")
+
+    result = memory_retrieve(query="widget", agent_id="a")
+
+    assert {r["key"] for r in result["records"]} == {"mine", "other"}
+
+
 # ---------------------------------------------------------------------------
 # conflict_queue
 # ---------------------------------------------------------------------------

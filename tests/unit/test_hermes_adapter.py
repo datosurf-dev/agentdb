@@ -16,6 +16,13 @@ def provider(db):
     return p
 
 
+@pytest.fixture
+def isolated_provider(db):
+    p = AgentDBHermesProvider(db=db, agent_id="test-agent", isolate_by_agent=True)
+    p.initialize("session-1")
+    return p
+
+
 def test_initialize_sets_session_id(db):
     p = AgentDBHermesProvider(db=db, agent_id="a1")
     p.initialize("sess-abc")
@@ -32,6 +39,35 @@ def test_prefetch_returns_records(provider, db):
     db.write(key="pref/k", value="hello hermes", origin="agent_inferred", agent_id="test-agent")
     records = provider.prefetch("hello", session_id="session-1")
     assert isinstance(records, list)
+
+
+def test_prefetch_default_returns_mixed_pool(provider, db):
+    db.write(key="pref/mine", value="hello hermes", origin="agent_inferred", agent_id="test-agent")
+    db.write(key="pref/other", value="hello hermes", origin="agent_inferred", agent_id="other-agent")
+
+    records = provider.prefetch("hello", session_id="session-1")
+
+    assert {r.key for r in records} == {"pref/mine", "pref/other"}
+
+
+def test_prefetch_isolates_by_agent_when_enabled(isolated_provider, db):
+    db.write(key="pref/mine", value="hello hermes", origin="agent_inferred", agent_id="test-agent")
+    db.write(key="pref/other", value="hello hermes", origin="agent_inferred", agent_id="other-agent")
+
+    records = isolated_provider.prefetch("hello", session_id="session-1")
+
+    assert [r.key for r in records] == ["pref/mine"]
+
+
+def test_handle_tool_call_memory_search_isolates_by_agent_when_enabled(isolated_provider, db):
+    db.write(key="pref/mine", value="hello hermes", origin="agent_inferred", agent_id="test-agent")
+    db.write(key="pref/other", value="hello hermes", origin="agent_inferred", agent_id="other-agent")
+
+    records = isolated_provider.handle_tool_call(
+        "memory_search", {"query": "hello"}, session_id="session-1",
+    )
+
+    assert [r.key for r in records] == ["pref/mine"]
 
 
 def test_sync_turn_writes_memory(provider, db):

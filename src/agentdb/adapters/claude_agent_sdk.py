@@ -118,9 +118,11 @@ class AgentDBClaudeMiddleware(GatewayAdapter):
         memory_budget_chars: Optional[int] = None,
         memory_budget_tokens: Optional[int] = None,
         conversation_started_callback: Optional[Callable[..., Any]] = None,
+        isolate_by_agent: bool = False,
     ):
         super().__init__(db, agent_id, profile)
         self._conversation_started_callback = conversation_started_callback
+        self._isolate_by_agent = isolate_by_agent
         self.gateway.subscribe("conflict_detected", self._on_conflict)
         if profile == "full_storage":
             base = FULL_STORAGE_PROFILE
@@ -167,6 +169,7 @@ class AgentDBClaudeMiddleware(GatewayAdapter):
             external_context=external_context,
             session_id=session_id,
             budget_tokens=self.profile.memory_budget_tokens,
+            isolate_by_agent=self._isolate_by_agent,
         )
 
         messages: list[dict[str, str]] = []
