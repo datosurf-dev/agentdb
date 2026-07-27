@@ -39,6 +39,31 @@ def test_prepare_turn_enforces_retrieve_and_builds_messages(tmp_path):
     assert any(entry.event_type == EVENT_MEMORY_RETRIEVE for entry in entries)
 
 
+def test_prepare_turn_orders_override_instructions_before_memory_content(tmp_path):
+    """Principle 9: conflict flags must be assembled BEFORE human-approved
+    memories, not after — an agent must know a memory is contested before it
+    receives the memory content itself."""
+    db = AgentDB(path=tmp_path / "test.db", permissions_path=PERMS)
+    db.write("memory/working/pref_lang", "English", origin="human_approved", agent_id="research_agent")
+    db.write("memory/working/pref_lang", "French", origin="agent_inferred", agent_id="research_agent")
+
+    middleware = AgentDBClaudeMiddleware(db=db, agent_id="research_agent", profile="budget_optimized")
+    messages, retrieval = middleware.prepare_turn(
+        user_query="lang", session_id="sess-order-1",
+    )
+
+    assert retrieval.override_instructions, "test setup must produce a real authority conflict"
+    override_index = next(
+        i for i, m in enumerate(messages)
+        if m["role"] == "system" and m["content"].startswith("Override instruction:")
+    )
+    memory_index = next(
+        i for i, m in enumerate(messages)
+        if m["role"] == "system" and "Governed memory context" in m["content"]
+    )
+    assert override_index < memory_index
+
+
 def test_prepare_turn_isolate_by_agent_true_excludes_other_agent_records(tmp_path):
     db = AgentDB(path=tmp_path / "test.db", permissions_path=PERMS)
     db.write(

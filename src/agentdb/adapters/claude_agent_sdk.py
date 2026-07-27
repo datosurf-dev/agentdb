@@ -176,6 +176,12 @@ class AgentDBClaudeMiddleware(GatewayAdapter):
         if system_prompt:
             messages.append({"role": "system", "content": system_prompt})
 
+        # Principle 9: conflict flags must be assembled BEFORE human-approved
+        # memories, not after — an agent must know a memory is contested
+        # before it receives the memory content itself.
+        for instruction in retrieval.override_instructions:
+            messages.append({"role": "system", "content": f"Override instruction: {instruction}"})
+
         memory_context = self._build_memory_context(retrieval)
         if memory_context:
             messages.append(
@@ -187,9 +193,6 @@ class AgentDBClaudeMiddleware(GatewayAdapter):
                     ),
                 }
             )
-
-        for instruction in retrieval.override_instructions:
-            messages.append({"role": "system", "content": f"Override instruction: {instruction}"})
 
         for msg in base_messages or []:
             messages.append(msg)
