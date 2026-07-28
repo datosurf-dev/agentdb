@@ -68,16 +68,9 @@ class AgentDBHermesProvider(MemoryProvider, GatewayAdapter):
         # Register with Hermes MemoryManager, then let Hermes call hooks.
     """
 
-    def __init__(
-        self,
-        db: "AgentDB",
-        agent_id: str,
-        profile: str = "budget_optimized",
-        isolate_by_agent: bool = False,
-    ) -> None:
-        GatewayAdapter.__init__(self, db, agent_id, profile)
+    def __init__(self, db: "AgentDB", agent_id: str) -> None:
+        GatewayAdapter.__init__(self, db, agent_id, profile=db.config_for(agent_id)["name"])
         self._session_id: str = ""
-        self._isolate_by_agent = isolate_by_agent
 
     # ------------------------------------------------------------------
     # Phase 1 — core governed memory loop (Principle 12a)
@@ -91,10 +84,7 @@ class AgentDBHermesProvider(MemoryProvider, GatewayAdapter):
 
     def prefetch(self, query: str, *, session_id: str) -> list:
         """Return governed records ranked for this query. [12a]"""
-        result = self._db.retrieve(
-            query, agent_id=self._agent_id, session_id=session_id,
-            isolate_by_agent=self._isolate_by_agent,
-        )
+        result = self._db.retrieve(query, agent_id=self._agent_id, session_id=session_id)
         return result.records
 
     def sync_turn(self, user: str, asst: str, *, session_id: str) -> None:
@@ -157,10 +147,7 @@ class AgentDBHermesProvider(MemoryProvider, GatewayAdapter):
             return self._db.read(key, agent_id=self._agent_id)
         if name == "memory_search":
             query = args.get("query", "")
-            return self._db.retrieve(
-                query, agent_id=self._agent_id, session_id=session_id,
-                isolate_by_agent=self._isolate_by_agent,
-            ).records
+            return self._db.retrieve(query, agent_id=self._agent_id, session_id=session_id).records
         return None
 
     def shutdown(self) -> None:

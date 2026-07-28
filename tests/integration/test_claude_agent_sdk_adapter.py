@@ -15,6 +15,22 @@ from agentdb.interface.client import EVENT_MEMORY_OUTCOME, EVENT_MEMORY_RETRIEVE
 PERMS = Path(__file__).parent.parent / "fixtures" / "permissions.test.yaml"
 
 
+def _mem_dir_with_profile(tmp_path, profile_name):
+    """Build a memory_dir whose memory.yaml selects a named built-in profile.
+
+    full_storage requires a non-empty top-level tracked_directories list to
+    pass AgentDB's own construction-time validation.
+    """
+    workspace_root = tmp_path / "memory-home"
+    config_dir = workspace_root / "config"
+    config_dir.mkdir(parents=True)
+    lines = ["profile:", f"  name: {profile_name}"]
+    if profile_name == "full_storage":
+        lines += ["tracked_directories:", "  - placeholder"]
+    (config_dir / "memory.yaml").write_text("\n".join(lines), encoding="utf-8")
+    return workspace_root
+
+
 def test_prepare_turn_enforces_retrieve_and_builds_messages(tmp_path):
     db = AgentDB(path=tmp_path / "test.db", permissions_path=PERMS)
     db.write(
@@ -25,7 +41,7 @@ def test_prepare_turn_enforces_retrieve_and_builds_messages(tmp_path):
         session_id="sess-claude-1",
     )
 
-    middleware = AgentDBClaudeMiddleware(db=db, agent_id="research_agent", profile="budget_optimized")
+    middleware = AgentDBClaudeMiddleware(db=db, agent_id="research_agent")
     messages, retrieval = middleware.prepare_turn(
         user_query="how should I answer?",
         session_id="sess-claude-1",
@@ -47,7 +63,7 @@ def test_prepare_turn_orders_override_instructions_before_memory_content(tmp_pat
     db.write("memory/working/pref_lang", "English", origin="human_approved", agent_id="research_agent")
     db.write("memory/working/pref_lang", "French", origin="agent_inferred", agent_id="research_agent")
 
-    middleware = AgentDBClaudeMiddleware(db=db, agent_id="research_agent", profile="budget_optimized")
+    middleware = AgentDBClaudeMiddleware(db=db, agent_id="research_agent")
     messages, retrieval = middleware.prepare_turn(
         user_query="lang", session_id="sess-order-1",
     )
@@ -64,8 +80,22 @@ def test_prepare_turn_orders_override_instructions_before_memory_content(tmp_pat
     assert override_index < memory_index
 
 
-def test_prepare_turn_isolate_by_agent_true_excludes_other_agent_records(tmp_path):
-    db = AgentDB(path=tmp_path / "test.db", permissions_path=PERMS)
+def test_prepare_turn_isolates_when_agent_listed_under_profile_agents(tmp_path):
+    workspace_root = tmp_path / "memory-home"
+    config_dir = workspace_root / "config"
+    config_dir.mkdir(parents=True)
+    (config_dir / "memory.yaml").write_text(
+        "\n".join(
+            [
+                "profile:",
+                "  name: budget_optimized",
+                "  agents:",
+                "    research_agent: {}",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    db = AgentDB(memory_dir=workspace_root, permissions_path=PERMS)
     db.write(
         key="memory/working/other_agent_note",
         value="use concise bullets",
@@ -79,9 +109,7 @@ def test_prepare_turn_isolate_by_agent_true_excludes_other_agent_records(tmp_pat
         agent_id="research_agent",
     )
 
-    middleware = AgentDBClaudeMiddleware(
-        db=db, agent_id="research_agent", profile="budget_optimized", isolate_by_agent=True,
-    )
+    middleware = AgentDBClaudeMiddleware(db=db, agent_id="research_agent")
     _, retrieval = middleware.prepare_turn(
         user_query="concise bullets", session_id="sess-isolated-1",
     )
@@ -89,7 +117,7 @@ def test_prepare_turn_isolate_by_agent_true_excludes_other_agent_records(tmp_pat
     assert [r.key for r in retrieval.records] == ["memory/working/mine_note"]
 
 
-def test_prepare_turn_isolate_by_agent_default_false_returns_mixed_pool(tmp_path):
+def test_prepare_turn_returns_mixed_pool_when_agent_not_listed(tmp_path):
     db = AgentDB(path=tmp_path / "test.db", permissions_path=PERMS)
     db.write(
         key="memory/working/other_agent_note",
@@ -104,7 +132,7 @@ def test_prepare_turn_isolate_by_agent_default_false_returns_mixed_pool(tmp_path
         agent_id="research_agent",
     )
 
-    middleware = AgentDBClaudeMiddleware(db=db, agent_id="research_agent", profile="budget_optimized")
+    middleware = AgentDBClaudeMiddleware(db=db, agent_id="research_agent")
     _, retrieval = middleware.prepare_turn(
         user_query="concise bullets", session_id="sess-mixed-1",
     )
@@ -121,7 +149,6 @@ def test_prepare_turn_conversation_started_trigger_can_influence_retrieval(tmp_p
     middleware = AgentDBClaudeMiddleware(
         db=db,
         agent_id="research_agent",
-        profile="budget_optimized",
         conversation_started_callback=lambda **kwargs: kwargs["db"].write(
             key="memory/working/turn_start_hint",
             value="always mention the tracked workspace note",
@@ -146,8 +173,8 @@ def test_prepare_turn_conversation_started_trigger_can_influence_retrieval(tmp_p
 
 
 def test_run_turn_full_storage_auto_persists_and_records_outcome(tmp_path):
-    db = AgentDB(path=tmp_path / "test.db", permissions_path=PERMS)
-    middleware = AgentDBClaudeMiddleware(db=db, agent_id="research_agent", profile="full_storage")
+    db = AgentDB(memory_dir=_mem_dir_with_profile(tmp_path, "full_storage"), permissions_path=PERMS)
+    middleware = AgentDBClaudeMiddleware(db=db, agent_id="research_agent")
 
     response = middleware.run_turn(
         user_query="summarize this",
@@ -167,8 +194,28 @@ def test_run_turn_full_storage_auto_persists_and_records_outcome(tmp_path):
     assert any(entry.event_type == EVENT_MEMORY_WRITE for entry in entries)
 
 
+def _mem_dir_with_context_token_limit(tmp_path, limit):
+    workspace_root = tmp_path / "memory-home"
+    config_dir = workspace_root / "config"
+    config_dir.mkdir(parents=True)
+    (config_dir / "memory.yaml").write_text(
+        "\n".join(
+            [
+                "profile:",
+                "  name: budget_optimized",
+                "  injection:",
+                f"    context_token_limit: {limit}",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    return workspace_root
+
+
 def test_prepare_turn_passes_memory_budget_tokens_and_reports_truncation(tmp_path):
-    db = AgentDB(path=tmp_path / "test.db", permissions_path=PERMS)
+    db = AgentDB(
+        memory_dir=_mem_dir_with_context_token_limit(tmp_path, 60), permissions_path=PERMS,
+    )
     for i in range(5):
         db.write(
             key=f"memory/working/note_{i}",
@@ -178,12 +225,7 @@ def test_prepare_turn_passes_memory_budget_tokens_and_reports_truncation(tmp_pat
             session_id="sess-budget-1",
         )
 
-    middleware = AgentDBClaudeMiddleware(
-        db=db,
-        agent_id="research_agent",
-        profile="full_storage",
-        memory_budget_tokens=60,
-    )
+    middleware = AgentDBClaudeMiddleware(db=db, agent_id="research_agent")
 
     _, retrieval = middleware.prepare_turn(
         user_query="note",
@@ -204,7 +246,7 @@ def test_prepare_turn_without_memory_budget_tokens_does_not_truncate(tmp_path):
         session_id="sess-budget-2",
     )
 
-    middleware = AgentDBClaudeMiddleware(db=db, agent_id="research_agent", profile="full_storage")
+    middleware = AgentDBClaudeMiddleware(db=db, agent_id="research_agent")
 
     _, retrieval = middleware.prepare_turn(
         user_query="note",
@@ -216,7 +258,7 @@ def test_prepare_turn_without_memory_budget_tokens_does_not_truncate(tmp_path):
 
 def test_middleware_init_registers_conflict_handler(tmp_path):
     db = AgentDB(path=tmp_path / "test.db", permissions_path=PERMS)
-    AgentDBClaudeMiddleware(db=db, agent_id="research_agent", profile="budget_optimized")
+    AgentDBClaudeMiddleware(db=db, agent_id="research_agent")
     assert "conflict_detected" in db.gateway._handlers
 
 
@@ -224,7 +266,7 @@ def test_prepare_turn_dispatches_conversation_started_trigger(tmp_path):
     db = AgentDB(path=tmp_path / "test.db", permissions_path=PERMS)
     dispatched = []
     db.gateway.subscribe("conversation_started", lambda **kw: dispatched.append(kw))
-    middleware = AgentDBClaudeMiddleware(db=db, agent_id="research_agent", profile="budget_optimized")
+    middleware = AgentDBClaudeMiddleware(db=db, agent_id="research_agent")
 
     middleware.prepare_turn(user_query="hi", session_id="sess-gateway-1")
 
@@ -234,14 +276,14 @@ def test_prepare_turn_dispatches_conversation_started_trigger(tmp_path):
 
 def test_pending_conflicts_returns_gateway_conflict_queue(tmp_path):
     db = AgentDB(path=tmp_path / "test.db", permissions_path=PERMS)
-    middleware = AgentDBClaudeMiddleware(db=db, agent_id="research_agent", profile="budget_optimized")
+    middleware = AgentDBClaudeMiddleware(db=db, agent_id="research_agent")
 
     assert middleware.pending_conflicts() == db.gateway.conflict_queue(resolved=False)
 
 
 def test_propose_skill_creates_pending_proposal(tmp_path):
     db = AgentDB(path=tmp_path / "test.db", permissions_path=PERMS)
-    middleware = AgentDBClaudeMiddleware(db=db, agent_id="research_agent", profile="budget_optimized")
+    middleware = AgentDBClaudeMiddleware(db=db, agent_id="research_agent")
 
     proposal_id = middleware.propose_skill(
         name="dbt-style",
@@ -255,7 +297,7 @@ def test_propose_skill_creates_pending_proposal(tmp_path):
 
 def test_approve_proposal_creates_skill(tmp_path):
     db = AgentDB(path=tmp_path / "test.db", permissions_path=PERMS)
-    middleware = AgentDBClaudeMiddleware(db=db, agent_id="research_agent", profile="budget_optimized")
+    middleware = AgentDBClaudeMiddleware(db=db, agent_id="research_agent")
     proposal_id = middleware.propose_skill(
         name="dbt-style",
         content="Use concise bullet points.",
@@ -270,7 +312,7 @@ def test_approve_proposal_creates_skill(tmp_path):
 
 def test_reject_proposal_does_not_create_skill(tmp_path):
     db = AgentDB(path=tmp_path / "test.db", permissions_path=PERMS)
-    middleware = AgentDBClaudeMiddleware(db=db, agent_id="research_agent", profile="budget_optimized")
+    middleware = AgentDBClaudeMiddleware(db=db, agent_id="research_agent")
     proposal_id = middleware.propose_skill(
         name="dbt-style",
         content="Use concise bullet points.",
@@ -287,7 +329,7 @@ def test_reject_proposal_does_not_create_skill(tmp_path):
 
 def test_budget_optimized_no_auto_persist_without_explicit_writes(tmp_path):
     db = AgentDB(path=tmp_path / "test.db", permissions_path=PERMS)
-    middleware = AgentDBClaudeMiddleware(db=db, agent_id="research_agent", profile="budget_optimized")
+    middleware = AgentDBClaudeMiddleware(db=db, agent_id="research_agent")
 
     middleware.run_turn(
         user_query="what did user prefer?",
@@ -300,8 +342,8 @@ def test_budget_optimized_no_auto_persist_without_explicit_writes(tmp_path):
 
 
 def test_finalize_turn_tags_persisted_records_with_touched_entities(tmp_path):
-    db = AgentDB(path=tmp_path / "test.db", permissions_path=PERMS)
-    middleware = AgentDBClaudeMiddleware(db=db, agent_id="research_agent", profile="full_storage")
+    db = AgentDB(memory_dir=_mem_dir_with_profile(tmp_path, "full_storage"), permissions_path=PERMS)
+    middleware = AgentDBClaudeMiddleware(db=db, agent_id="research_agent")
 
     middleware.finalize_turn(
         session_id="sess-claude-entities-1",
@@ -317,7 +359,7 @@ def test_finalize_turn_tags_persisted_records_with_touched_entities(tmp_path):
 
 def test_finalize_turn_applies_touched_entities_to_explicit_memory_writes(tmp_path):
     db = AgentDB(path=tmp_path / "test.db", permissions_path=PERMS)
-    middleware = AgentDBClaudeMiddleware(db=db, agent_id="research_agent", profile="budget_optimized")
+    middleware = AgentDBClaudeMiddleware(db=db, agent_id="research_agent")
 
     middleware.finalize_turn(
         session_id="sess-claude-entities-2",
@@ -339,7 +381,7 @@ def test_finalize_turn_applies_touched_entities_to_explicit_memory_writes(tmp_pa
 
 def test_finalize_turn_persists_explicit_memory_writes(tmp_path):
     db = AgentDB(path=tmp_path / "test.db", permissions_path=PERMS)
-    middleware = AgentDBClaudeMiddleware(db=db, agent_id="research_agent", profile="budget_optimized")
+    middleware = AgentDBClaudeMiddleware(db=db, agent_id="research_agent")
 
     middleware.finalize_turn(
         session_id="sess-claude-4",
@@ -360,7 +402,7 @@ def test_finalize_turn_persists_explicit_memory_writes(tmp_path):
 
 def test_finalize_turn_persists_directory_tracking_with_message_link(tmp_path):
     db = AgentDB(path=tmp_path / "test.db", permissions_path=PERMS)
-    middleware = AgentDBClaudeMiddleware(db=db, agent_id="research_agent", profile="budget_optimized")
+    middleware = AgentDBClaudeMiddleware(db=db, agent_id="research_agent")
     tracked_dir = tmp_path / "skills"
     tracked_dir.mkdir()
     (tracked_dir / "a.md").write_text("critical content", encoding="utf-8")
@@ -395,7 +437,7 @@ def test_finalize_turn_uses_agentdb_default_tracking_directories(tmp_path):
         tracking_root=tmp_path,
         tracking_max_files_per_directory=50,
     )
-    middleware = AgentDBClaudeMiddleware(db=db, agent_id="research_agent", profile="budget_optimized")
+    middleware = AgentDBClaudeMiddleware(db=db, agent_id="research_agent")
 
     middleware.finalize_turn(
         session_id="sess-claude-6",
@@ -423,9 +465,9 @@ def test_finalize_turn_writes_conversation_jsonl_when_enabled(tmp_path):
             [
                 "profile:",
                 "  name: budget_optimized",
+                "  capture:",
+                "    conversation_jsonl: true",
                 "tracked_directories: []",
-                "capture:",
-                "  conversation_jsonl: true",
                 "reconciliation:",
                 "  triggers:",
                 "    - conversation_started",
@@ -437,7 +479,7 @@ def test_finalize_turn_writes_conversation_jsonl_when_enabled(tmp_path):
         encoding="utf-8",
     )
     db = AgentDB(memory_dir=workspace_root, permissions_path=PERMS)
-    middleware = AgentDBClaudeMiddleware(db=db, agent_id="research_agent", profile="budget_optimized")
+    middleware = AgentDBClaudeMiddleware(db=db, agent_id="research_agent")
 
     middleware.finalize_turn(
         session_id="sess-jsonl-1",
@@ -457,10 +499,46 @@ def test_finalize_turn_writes_conversation_jsonl_when_enabled(tmp_path):
     assert payload["model_response"] == "Here is the summary."
 
 
+def test_finalize_turn_conversation_jsonl_does_not_trigger_auto_persist_on_budget_optimized(tmp_path):
+    """Regression: conversation_jsonl and auto_persist_response are independent
+    settings, not the same boolean under two names."""
+    workspace_root = tmp_path / "memory-home"
+    config_dir = workspace_root / "config"
+    config_dir.mkdir(parents=True)
+    (config_dir / "memory.yaml").write_text(
+        "\n".join(
+            [
+                "profile:",
+                "  name: budget_optimized",
+                "  capture:",
+                "    conversation_jsonl: true",
+                "tracked_directories: []",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    db = AgentDB(memory_dir=workspace_root, permissions_path=PERMS)
+    middleware = AgentDBClaudeMiddleware(db=db, agent_id="research_agent")
+
+    middleware.finalize_turn(
+        session_id="sess-decoupled-1",
+        model_response="a response",
+        user_query="a query",
+    )
+
+    # conversation_jsonl=true should still write the transcript file...
+    conv_file = workspace_root / "conversations" / "research_agent--sess-decoupled-1.jsonl"
+    assert conv_file.exists()
+    # ...but budget_optimized's auto_persist_response=False must still mean no
+    # episodic record gets auto-persisted, exactly like before this whole plan.
+    raw_records = db._store.list_by_agent("research_agent")
+    assert not any(r.key.startswith("memory/episodic/claude/") for r in raw_records)
+
+
 def test_finalize_turn_skips_conversation_jsonl_when_disabled(tmp_path):
     workspace_root = tmp_path / "memory-home"
     db = AgentDB(memory_dir=workspace_root, permissions_path=PERMS)
-    middleware = AgentDBClaudeMiddleware(db=db, agent_id="research_agent", profile="budget_optimized")
+    middleware = AgentDBClaudeMiddleware(db=db, agent_id="research_agent")
 
     middleware.finalize_turn(
         session_id="sess-jsonl-2",
@@ -474,7 +552,7 @@ def test_finalize_turn_skips_conversation_jsonl_when_disabled(tmp_path):
 
 
 def test_runtime_wrapper_from_claude_client_minimal_flow(tmp_path):
-    db = AgentDB(path=tmp_path / "test.db", permissions_path=PERMS)
+    db = AgentDB(memory_dir=_mem_dir_with_profile(tmp_path, "full_storage"), permissions_path=PERMS)
 
     class FakeMessagesAPI:
         def create(self, **kwargs):
@@ -486,7 +564,6 @@ def test_runtime_wrapper_from_claude_client_minimal_flow(tmp_path):
         agent_id="research_agent",
         client=fake_client,
         model="claude-sonnet-test",
-        profile="full_storage",
         system_prompt="You are a Slack assistant.",
     )
     result = runtime.handle_turn(
@@ -505,7 +582,9 @@ def test_runtime_wrapper_from_claude_client_minimal_flow(tmp_path):
 
 
 def test_runtime_wrapper_from_claude_client_threads_memory_budget_tokens(tmp_path):
-    db = AgentDB(path=tmp_path / "test.db", permissions_path=PERMS)
+    db = AgentDB(
+        memory_dir=_mem_dir_with_context_token_limit(tmp_path, 60), permissions_path=PERMS,
+    )
     for i in range(5):
         db.write(
             key=f"memory/working/note_{i}",
@@ -525,8 +604,6 @@ def test_runtime_wrapper_from_claude_client_threads_memory_budget_tokens(tmp_pat
         agent_id="research_agent",
         client=fake_client,
         model="claude-sonnet-test",
-        profile="full_storage",
-        memory_budget_tokens=60,
     )
     result = runtime.handle_turn(
         user_query="note",
@@ -546,7 +623,7 @@ def test_build_action_context_uses_edit_file_path_and_model_name(tmp_path):
         agent_id="research_agent",
         entities=["models/marts/core/report_model.sql", "report_model"],
     )
-    middleware = AgentDBClaudeMiddleware(db=db, agent_id="research_agent", profile="budget_optimized")
+    middleware = AgentDBClaudeMiddleware(db=db, agent_id="research_agent")
 
     context = middleware.build_action_context(
         tool_name="Edit",
@@ -567,7 +644,7 @@ def test_build_action_context_uses_bash_dbt_select_target(tmp_path):
         agent_id="research_agent",
         entities=["report_model"],
     )
-    middleware = AgentDBClaudeMiddleware(db=db, agent_id="research_agent", profile="budget_optimized")
+    middleware = AgentDBClaudeMiddleware(db=db, agent_id="research_agent")
 
     context = middleware.build_action_context(
         tool_name="Bash",
@@ -581,7 +658,7 @@ def test_build_action_context_uses_bash_dbt_select_target(tmp_path):
 
 def test_build_action_context_is_noop_when_tool_has_no_entity(tmp_path):
     db = AgentDB(path=tmp_path / "test.db", permissions_path=PERMS)
-    middleware = AgentDBClaudeMiddleware(db=db, agent_id="research_agent", profile="budget_optimized")
+    middleware = AgentDBClaudeMiddleware(db=db, agent_id="research_agent")
 
     context = middleware.build_action_context(
         tool_name="Bash",
@@ -601,7 +678,7 @@ def test_pre_tool_use_returns_additional_context_and_touched_entities(tmp_path):
         agent_id="research_agent",
         entities=["models/marts/core/report_model.sql", "report_model"],
     )
-    middleware = AgentDBClaudeMiddleware(db=db, agent_id="research_agent", profile="budget_optimized")
+    middleware = AgentDBClaudeMiddleware(db=db, agent_id="research_agent")
 
     payload = middleware.pre_tool_use(
         tool_name="Edit",
@@ -616,7 +693,7 @@ def test_pre_tool_use_returns_additional_context_and_touched_entities(tmp_path):
 
 def test_pre_tool_use_is_noop_when_no_matching_context(tmp_path):
     db = AgentDB(path=tmp_path / "test.db", permissions_path=PERMS)
-    middleware = AgentDBClaudeMiddleware(db=db, agent_id="research_agent", profile="budget_optimized")
+    middleware = AgentDBClaudeMiddleware(db=db, agent_id="research_agent")
 
     payload = middleware.pre_tool_use(
         tool_name="Edit",
@@ -636,7 +713,7 @@ def test_build_hook_handlers_exposes_pre_tool_use_contract(tmp_path):
         agent_id="research_agent",
         entities=["models/marts/core/report_model.sql", "report_model"],
     )
-    middleware = AgentDBClaudeMiddleware(db=db, agent_id="research_agent", profile="budget_optimized")
+    middleware = AgentDBClaudeMiddleware(db=db, agent_id="research_agent")
 
     hooks = middleware.build_hook_handlers()
 
@@ -663,7 +740,6 @@ def test_runtime_get_sdk_hooks_delegates_to_middleware(tmp_path):
         agent_id="research_agent",
         client=fake_client,
         model="claude-sonnet-test",
-        profile="budget_optimized",
     )
 
     hooks = runtime.get_sdk_hooks()
@@ -674,8 +750,8 @@ def test_runtime_get_sdk_hooks_delegates_to_middleware(tmp_path):
 
 @pytest.mark.asyncio
 async def test_run_turn_async_full_storage_persists_and_records_outcome(tmp_path):
-    db = AgentDB(path=tmp_path / "test.db", permissions_path=PERMS)
-    middleware = AgentDBClaudeMiddleware(db=db, agent_id="research_agent", profile="full_storage")
+    db = AgentDB(memory_dir=_mem_dir_with_profile(tmp_path, "full_storage"), permissions_path=PERMS)
+    middleware = AgentDBClaudeMiddleware(db=db, agent_id="research_agent")
 
     async def fake_model_async(messages):
         return "async summary response"
@@ -699,7 +775,7 @@ async def test_run_turn_async_full_storage_persists_and_records_outcome(tmp_path
 @pytest.mark.asyncio
 async def test_run_turn_async_budget_optimized_no_auto_persist(tmp_path):
     db = AgentDB(path=tmp_path / "test.db", permissions_path=PERMS)
-    middleware = AgentDBClaudeMiddleware(db=db, agent_id="research_agent", profile="budget_optimized")
+    middleware = AgentDBClaudeMiddleware(db=db, agent_id="research_agent")
 
     async def fake_model_async(messages):
         return "no persist"
@@ -724,7 +800,7 @@ async def test_prepare_turn_async_retrieves_memory(tmp_path):
         agent_id="research_agent",
         session_id="sess-async-3",
     )
-    middleware = AgentDBClaudeMiddleware(db=db, agent_id="research_agent", profile="budget_optimized")
+    middleware = AgentDBClaudeMiddleware(db=db, agent_id="research_agent")
 
     messages, retrieval = await middleware.prepare_turn_async(
         user_query="how should I respond?",
@@ -768,7 +844,6 @@ async def test_from_sdk_client_handle_turn_async(tmp_path):
         db=db,
         agent_id="research_agent",
         sdk_client_factory=sdk_client_factory,
-        profile="full_storage",
         system_prompt="You are a Slack assistant.",
     )
 
@@ -788,7 +863,9 @@ async def test_from_sdk_client_handle_turn_async(tmp_path):
 
 @pytest.mark.asyncio
 async def test_from_sdk_client_threads_memory_budget_tokens(tmp_path):
-    db = AgentDB(path=tmp_path / "test.db", permissions_path=PERMS)
+    db = AgentDB(
+        memory_dir=_mem_dir_with_context_token_limit(tmp_path, 60), permissions_path=PERMS,
+    )
     for i in range(5):
         db.write(
             key=f"memory/working/note_{i}",
@@ -821,8 +898,6 @@ async def test_from_sdk_client_threads_memory_budget_tokens(tmp_path):
         db=db,
         agent_id="research_agent",
         sdk_client_factory=sdk_client_factory,
-        profile="full_storage",
-        memory_budget_tokens=60,
     )
 
     result = await runtime.handle_turn_async(

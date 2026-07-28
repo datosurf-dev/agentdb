@@ -22,8 +22,9 @@ class GatewayAdapter:
     override prepare_turn, pre_tool_use, and finalize_turn.
 
     ``self.profile_name`` holds the raw profile string passed at construction.
-    Subclasses that resolve it to a typed object (e.g. ClaudeAdapterProfile)
-    should store that resolved form in ``self.profile``, shadowing this base.
+    Subclasses that need the fully resolved per-agent config should call
+    ``db.config_for(agent_id)`` themselves and store it (e.g. AgentDBClaudeMiddleware's
+    ``self._resolved``) rather than reconstructing profile data by hand.
     """
 
     def __init__(

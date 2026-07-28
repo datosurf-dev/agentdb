@@ -48,6 +48,7 @@ class InjectionSettings:
 class CaptureSettings:
     conversation_jsonl: bool
     tracking_max_files_per_directory: int
+    auto_persist_response: bool
 
 
 @dataclass(frozen=True)
@@ -75,7 +76,9 @@ BUDGET_OPTIMIZED = Profile(
         ranker_weights=RankerWeights(provenance=0.35, recency=0.25, confidence=0.25, causal=0.15, semantic=0.0),
     ),
     injection=InjectionSettings(context_token_limit=1000, memory_budget_chars=2000, **_SHARED_INJECTION_TEXT),
-    capture=CaptureSettings(conversation_jsonl=False, tracking_max_files_per_directory=200),
+    capture=CaptureSettings(
+        conversation_jsonl=False, tracking_max_files_per_directory=200, auto_persist_response=False,
+    ),
 )
 
 FULL_STORAGE = Profile(
@@ -88,7 +91,9 @@ FULL_STORAGE = Profile(
         ranker_weights=RankerWeights(provenance=0.35, recency=0.25, confidence=0.25, causal=0.15, semantic=0.0),
     ),
     injection=InjectionSettings(context_token_limit=3500, memory_budget_chars=12000, **_SHARED_INJECTION_TEXT),
-    capture=CaptureSettings(conversation_jsonl=True, tracking_max_files_per_directory=200),
+    capture=CaptureSettings(
+        conversation_jsonl=True, tracking_max_files_per_directory=200, auto_persist_response=True,
+    ),
 )
 
 RESEARCH = Profile(
@@ -101,7 +106,9 @@ RESEARCH = Profile(
         ranker_weights=RankerWeights(provenance=0.25, recency=0.35, confidence=0.25, causal=0.15, semantic=0.0),
     ),
     injection=InjectionSettings(context_token_limit=8000, memory_budget_chars=24000, **_SHARED_INJECTION_TEXT),
-    capture=CaptureSettings(conversation_jsonl=True, tracking_max_files_per_directory=500),
+    capture=CaptureSettings(
+        conversation_jsonl=True, tracking_max_files_per_directory=500, auto_persist_response=True,
+    ),
 )
 
 BUILTIN_PROFILES: dict[str, Profile] = {p.name: p for p in (BUDGET_OPTIMIZED, FULL_STORAGE, RESEARCH)}

@@ -26,30 +26,6 @@ if TYPE_CHECKING:
     from ..interface.client import AgentDB, RetrievalResult
 
 
-@dataclass(frozen=True)
-class ClaudeAdapterProfile:
-    name: str
-    retrieve_limit: int
-    memory_budget_chars: int
-    auto_persist_response: bool
-    memory_budget_tokens: Optional[int] = None
-
-
-FULL_STORAGE_PROFILE = ClaudeAdapterProfile(
-    name="full_storage",
-    retrieve_limit=20,
-    memory_budget_chars=12000,
-    auto_persist_response=True,
-)
-
-BUDGET_OPTIMIZED_PROFILE = ClaudeAdapterProfile(
-    name="budget_optimized",
-    retrieve_limit=5,
-    memory_budget_chars=2000,
-    auto_persist_response=False,
-)
-
-
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -113,32 +89,13 @@ class AgentDBClaudeMiddleware(GatewayAdapter):
         self,
         db: "AgentDB",
         agent_id: str,
-        profile: str = "budget_optimized",
-        retrieve_limit: Optional[int] = None,
-        memory_budget_chars: Optional[int] = None,
-        memory_budget_tokens: Optional[int] = None,
         conversation_started_callback: Optional[Callable[..., Any]] = None,
-        isolate_by_agent: bool = False,
     ):
-        super().__init__(db, agent_id, profile)
+        resolved = db.config_for(agent_id)
+        super().__init__(db, agent_id, profile=resolved["name"])
         self._conversation_started_callback = conversation_started_callback
-        self._isolate_by_agent = isolate_by_agent
+        self._resolved = resolved
         self.gateway.subscribe("conflict_detected", self._on_conflict)
-        if profile == "full_storage":
-            base = FULL_STORAGE_PROFILE
-        else:
-            base = BUDGET_OPTIMIZED_PROFILE
-        self.profile = ClaudeAdapterProfile(
-            name=base.name,
-            retrieve_limit=retrieve_limit if retrieve_limit is not None else base.retrieve_limit,
-            memory_budget_chars=(
-                memory_budget_chars if memory_budget_chars is not None else base.memory_budget_chars
-            ),
-            auto_persist_response=base.auto_persist_response,
-            memory_budget_tokens=(
-                memory_budget_tokens if memory_budget_tokens is not None else base.memory_budget_tokens
-            ),
-        )
 
     def prepare_turn(
         self,
@@ -165,11 +122,10 @@ class AgentDBClaudeMiddleware(GatewayAdapter):
         retrieval = self._db.retrieve(
             query=user_query,
             agent_id=self._agent_id,
-            limit=self.profile.retrieve_limit,
+            limit=self._resolved["retrieval"]["retrieve_limit"],
             external_context=external_context,
             session_id=session_id,
-            budget_tokens=self.profile.memory_budget_tokens,
-            isolate_by_agent=self._isolate_by_agent,
+            budget_tokens=self._resolved["injection"]["context_token_limit"],
         )
 
         messages: list[dict[str, str]] = []
@@ -179,18 +135,16 @@ class AgentDBClaudeMiddleware(GatewayAdapter):
         # Principle 9: conflict flags must be assembled BEFORE human-approved
         # memories, not after — an agent must know a memory is contested
         # before it receives the memory content itself.
+        override_prefix = self._resolved["injection"]["override_prefix"]
         for instruction in retrieval.override_instructions:
-            messages.append({"role": "system", "content": f"Override instruction: {instruction}"})
+            messages.append({"role": "system", "content": f"{override_prefix} {instruction}"})
 
         memory_context = self._build_memory_context(retrieval)
         if memory_context:
             messages.append(
                 {
                     "role": "system",
-                    "content": (
-                        "Governed memory context (higher priority than inferred context):\n"
-                        f"{memory_context}"
-                    ),
+                    "content": f"{self._resolved['injection']['memory_header']}\n{memory_context}",
                 }
             )
 
@@ -219,14 +173,14 @@ class AgentDBClaudeMiddleware(GatewayAdapter):
         Post-response hook: persist memory updates and optional outcome signal.
         """
         writes = list(memory_writes or [])
-        if self.profile.auto_persist_response and model_response:
+        if self._resolved["capture"]["auto_persist_response"] and model_response:
             writes.append(
                 {
                     "key": self._response_key(session_id),
                     "value": {
                         "response": model_response,
                         "captured_at": _utcnow().isoformat(),
-                        "profile": self.profile.name,
+                        "profile": self._resolved["name"],
                     },
                     "origin": "agent_inferred",
                 }
@@ -244,8 +198,7 @@ class AgentDBClaudeMiddleware(GatewayAdapter):
 
         # Write conversation JSONL if enabled
         if user_query is not None:
-            memory_config = getattr(self._db, "memory_config", {})
-            capture_cfg = memory_config.get("capture", {}) if memory_config else {}
+            capture_cfg = self._resolved["capture"]
             if capture_cfg.get("conversation_jsonl", False):
                 memory_dir = getattr(self._db, "memory_dir", None)
                 if memory_dir is not None:
@@ -492,7 +445,8 @@ class AgentDBClaudeMiddleware(GatewayAdapter):
     def _build_memory_context(self, retrieval: "RetrievalResult") -> str:
         if not retrieval.records:
             return ""
-        remaining = self.profile.memory_budget_chars
+        remaining = self._resolved["injection"]["memory_budget_chars"]
+        line_format = self._resolved["injection"]["record_line_format"]
         chunks: list[str] = []
         for record in retrieval.records:
             value = record.value
@@ -500,7 +454,7 @@ class AgentDBClaudeMiddleware(GatewayAdapter):
                 value_text = json.dumps(value, ensure_ascii=True)
             else:
                 value_text = str(value)
-            line = f"- {record.key}: {value_text}"
+            line = line_format.format(key=record.key, value=value_text)
             if len(line) > remaining:
                 break
             chunks.append(line)
@@ -664,21 +618,10 @@ class AgentDBClaudeRuntime:
         agent_id: str,
         client: Any,
         model: str,
-        profile: str = "budget_optimized",
         system_prompt: Optional[str] = None,
-        retrieve_limit: Optional[int] = None,
-        memory_budget_chars: Optional[int] = None,
-        memory_budget_tokens: Optional[int] = None,
         max_tokens: int = 1024,
     ) -> "AgentDBClaudeRuntime":
-        middleware = AgentDBClaudeMiddleware(
-            db=db,
-            agent_id=agent_id,
-            profile=profile,
-            retrieve_limit=retrieve_limit,
-            memory_budget_chars=memory_budget_chars,
-            memory_budget_tokens=memory_budget_tokens,
-        )
+        middleware = AgentDBClaudeMiddleware(db=db, agent_id=agent_id)
 
         def _invoke(messages: list[dict[str, str]]) -> Any:
             system_blocks = [m["content"] for m in messages if m.get("role") == "system"]
@@ -712,11 +655,7 @@ class AgentDBClaudeRuntime:
         db: "AgentDB",
         agent_id: str,
         sdk_client_factory: Callable[[str], Any],
-        profile: str = "budget_optimized",
         system_prompt: Optional[str] = None,
-        retrieve_limit: Optional[int] = None,
-        memory_budget_chars: Optional[int] = None,
-        memory_budget_tokens: Optional[int] = None,
     ) -> "AgentDBClaudeRuntime":
         """
         Build a runtime that wraps a ClaudeSDKClient (agentic subprocess).
@@ -726,14 +665,7 @@ class AgentDBClaudeRuntime:
             async-for client.receive_response() yielding messages with
             .content (list of blocks with .text) or .is_error/.result.
         """
-        middleware = AgentDBClaudeMiddleware(
-            db=db,
-            agent_id=agent_id,
-            profile=profile,
-            retrieve_limit=retrieve_limit,
-            memory_budget_chars=memory_budget_chars,
-            memory_budget_tokens=memory_budget_tokens,
-        )
+        middleware = AgentDBClaudeMiddleware(db=db, agent_id=agent_id)
         instance = cls(
             middleware=middleware,
             invoke_model=lambda messages: "",

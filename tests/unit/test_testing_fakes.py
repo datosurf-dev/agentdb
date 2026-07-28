@@ -14,10 +14,12 @@ from agentdb.adapters.claude_agent_sdk import AgentDBClaudeMiddleware
 from agentdb.testing import FakeAgentDBClaudeMiddleware
 
 # The fake deliberately covers only the params relevant to gateway/proposal
-# testing and constructor-wiring assertions — not retrieve_limit/
-# memory_budget_chars/conversation_started_callback, which only affect turn
-# behavior (prepare_turn/finalize_turn) the fake doesn't implement.
-CURATED_PARAMS = ("db", "agent_id", "profile", "memory_budget_tokens")
+# testing and constructor-wiring assertions — not conversation_started_callback,
+# which only affects turn behavior (prepare_turn/finalize_turn) the fake
+# doesn't implement. profile/retrieve_limit/memory_budget_chars/
+# memory_budget_tokens/isolate_by_agent no longer exist on the real
+# constructor at all — config is resolved entirely from db.config_for(agent_id).
+CURATED_PARAMS = ("db", "agent_id")
 
 
 def test_fake_curated_params_still_exist_on_real_middleware():
@@ -36,35 +38,31 @@ def test_fake_accepts_the_same_curated_params():
 
 
 def test_fake_construction_stores_curated_params():
-    fake = FakeAgentDBClaudeMiddleware(
-        db=object(), agent_id="test-agent", profile="budget_optimized", memory_budget_tokens=42
-    )
+    fake = FakeAgentDBClaudeMiddleware(db=object(), agent_id="test-agent")
     assert fake.agent_id == "test-agent"
-    assert fake.profile == "budget_optimized"
-    assert fake.memory_budget_tokens == 42
 
 
 def test_fake_pending_conflicts_defaults_empty():
-    fake = FakeAgentDBClaudeMiddleware(db=object(), agent_id="a", profile="budget_optimized")
+    fake = FakeAgentDBClaudeMiddleware(db=object(), agent_id="a")
     assert fake.pending_conflicts() == []
 
 
 def test_fake_propose_then_list_pending():
-    fake = FakeAgentDBClaudeMiddleware(db=object(), agent_id="a", profile="budget_optimized")
+    fake = FakeAgentDBClaudeMiddleware(db=object(), agent_id="a")
     proposal_id = fake.propose_skill(name="n", content="c", scope=["a"])
     pending = fake.list_proposals(status="pending")
     assert any(p["proposal_id"] == proposal_id for p in pending)
 
 
 def test_fake_approve_removes_from_pending():
-    fake = FakeAgentDBClaudeMiddleware(db=object(), agent_id="a", profile="budget_optimized")
+    fake = FakeAgentDBClaudeMiddleware(db=object(), agent_id="a")
     proposal_id = fake.propose_skill(name="n", content="c", scope=["a"])
     fake.approve_proposal(proposal_id)
     assert not any(p["proposal_id"] == proposal_id for p in fake.list_proposals(status="pending"))
 
 
 def test_fake_reject_removes_from_pending():
-    fake = FakeAgentDBClaudeMiddleware(db=object(), agent_id="a", profile="budget_optimized")
+    fake = FakeAgentDBClaudeMiddleware(db=object(), agent_id="a")
     proposal_id = fake.propose_skill(name="n", content="c", scope=["a"])
     fake.reject_proposal(proposal_id, reason="not needed")
     assert not any(p["proposal_id"] == proposal_id for p in fake.list_proposals(status="pending"))

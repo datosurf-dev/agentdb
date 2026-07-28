@@ -31,13 +31,9 @@ class FakeAgentDBClaudeMiddleware:
         self,
         db: Any,
         agent_id: str,
-        profile: str = "budget_optimized",
-        memory_budget_tokens: Optional[int] = None,
     ) -> None:
         self.db = db
         self.agent_id = agent_id
-        self.profile = profile
-        self.memory_budget_tokens = memory_budget_tokens
         self._conflicts: list = []
         self._proposals: dict[str, dict] = {}
 
