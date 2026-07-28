@@ -614,16 +614,20 @@ class AgentDB:
         self,
         query: str,
         agent_id: str,
-        limit: int = 5,
+        limit: Optional[int] = None,
         session_id: Optional[str] = None,
         external_context: Optional[list[dict]] = None,
         budget_tokens: Optional[int] = None,
-        isolate_by_agent: bool = False,
     ) -> RetrievalResult:
+        agent_config = self.config_for(agent_id)
+        isolate_by_agent = agent_config["isolate_by_agent"]
+        resolved_limit = limit if limit is not None else agent_config["retrieval"]["retrieve_limit"]
+        resolved_budget_tokens = budget_tokens if budget_tokens is not None else agent_config["injection"]["context_token_limit"]
+
         candidates = self._store.search(
-            query, limit=max(limit, 50), agent_id=agent_id if isolate_by_agent else None,
+            query, limit=max(resolved_limit, 50), agent_id=agent_id if isolate_by_agent else None,
         )
-        ranked = self._ranker.rank(query, candidates, agent_id=agent_id)[:limit]
+        ranked = self._ranker.rank(query, candidates, agent_id=agent_id)[:resolved_limit]
         ranked_records = [rr.record for rr in ranked]
 
         # Budget cap
@@ -632,7 +636,7 @@ class AgentDB:
         truncated = False
         for record in ranked_records:
             est = _estimate_tokens(record)
-            if budget_tokens is not None and token_total + est > budget_tokens:
+            if resolved_budget_tokens is not None and token_total + est > resolved_budget_tokens:
                 truncated = True
                 break
             selected.append(record)
@@ -744,8 +748,9 @@ class AgentDB:
         entities: list[str],
         agent_id: str,
         session_id: Optional[str] = None,
-        isolate_by_agent: bool = False,
     ) -> RetrievalResult:
+        agent_config = self.config_for(agent_id)
+        isolate_by_agent = agent_config["isolate_by_agent"]
         records = self._store.search_by_entities(
             entities, agent_id=agent_id if isolate_by_agent else None,
         )
