@@ -228,6 +228,11 @@ def _deep_merge(base: dict, override: dict) -> dict:
 
 
 def _validate_and_merge_overrides(base: dict, profile_block: dict, where: str) -> dict:
+    if not isinstance(profile_block, dict):
+        raise ConfigurationError(
+            f"{where}: expected a mapping (e.g. '{where}:\n  name: ...'), got "
+            f"{type(profile_block).__name__} ({profile_block!r})"
+        )
     result = dict(base)
     for key in profile_block:
         if key in ("name", "agents"):
@@ -237,17 +242,41 @@ def _validate_and_merge_overrides(base: dict, profile_block: dict, where: str) -
                 f"{where}: unknown key '{key}' (expected one of {_OVERRIDE_SECTIONS}, 'name', or 'agents')"
             )
         section_override = profile_block[key]
+        if not isinstance(section_override, dict):
+            raise ConfigurationError(
+                f"{where}.{key}: expected a mapping, got {type(section_override).__name__} ({section_override!r})"
+            )
         base_section = result.get(key, {})
         for field, value in section_override.items():
             if field not in base_section:
                 raise ConfigurationError(f"{where}.{key}: unknown field '{field}'")
-            expected_type = type(base_section[field])
-            if not isinstance(value, expected_type):
-                raise ConfigurationError(
-                    f"{where}.{key}.{field}: expected {expected_type.__name__}, got {type(value).__name__} ({value!r})"
-                )
+            base_value = base_section[field]
+            if isinstance(base_value, dict):
+                if not isinstance(value, dict):
+                    raise ConfigurationError(
+                        f"{where}.{key}.{field}: expected dict, got {type(value).__name__} ({value!r})"
+                    )
+                unknown = set(value) - set(base_value)
+                if unknown:
+                    raise ConfigurationError(f"{where}.{key}.{field}: unknown field(s) {sorted(unknown)}")
+                for sub_field, sub_value in value.items():
+                    expected_sub_type = type(base_value[sub_field])
+                    if not isinstance(sub_value, expected_sub_type):
+                        raise ConfigurationError(
+                            f"{where}.{key}.{field}.{sub_field}: expected {expected_sub_type.__name__}, "
+                            f"got {type(sub_value).__name__} ({sub_value!r})"
+                        )
+            else:
+                expected_type = type(base_value)
+                if not isinstance(value, expected_type):
+                    raise ConfigurationError(
+                        f"{where}.{key}.{field}: expected {expected_type.__name__}, got {type(value).__name__} ({value!r})"
+                    )
         result[key] = _deep_merge(base_section, section_override)
     return result
+
+
+_LEGACY_ROOT_KEYS = ("mode", "profiles", "retrieval", "injection", "lifecycle", "capture")
 
 
 def _resolve_config(yaml_dict: dict) -> dict:
@@ -258,7 +287,21 @@ def _resolve_config(yaml_dict: dict) -> dict:
     Raises ConfigurationError on any unrecognized name, key, or wrong type --
     never silently substitutes a default.
     """
+    if yaml_dict:
+        stale_keys = [k for k in _LEGACY_ROOT_KEYS if k in yaml_dict]
+        if stale_keys:
+            raise ConfigurationError(
+                f"memory.yaml has old-schema root key(s) {stale_keys} -- these must nest under "
+                f"a single top-level 'profile:' key now (e.g. 'capture:' becomes "
+                f"'profile.capture:'), see docs/superpowers/specs/"
+                f"2026-07-27-unified-profile-configuration-design.md"
+            )
     profile_block = yaml_dict.get("profile", {}) if yaml_dict else {}
+    if not isinstance(profile_block, dict):
+        raise ConfigurationError(
+            f"profile: expected a mapping (e.g. 'profile:\n  name: ...'), got "
+            f"{type(profile_block).__name__} ({profile_block!r})"
+        )
     name = profile_block.get("name")
     if not name:
         raise ConfigurationError("profile.name is required")
@@ -340,12 +383,19 @@ class AgentDB:
             with config_path.open("r", encoding="utf-8") as f:
                 self.memory_config = yaml.safe_load(f) or {}
 
-            # Validate full_storage profile
-            if self.memory_config.get("profile", {}).get("name") == "full_storage":
+            # Validate full_storage profile. profile may be a non-dict (e.g. a
+            # bare scalar like `profile: research`) here -- that's a config
+            # error, but it's _resolve_config's job (below) to raise it with a
+            # proper ConfigurationError; this check just needs to not crash on
+            # its way there.
+            _profile_block_for_check = self.memory_config.get("profile", {})
+            if not isinstance(_profile_block_for_check, dict):
+                _profile_block_for_check = {}
+            if _profile_block_for_check.get("name") == "full_storage":
                 td = self.memory_config.get("tracked_directories", [])
                 if not td:
                     raise ValueError(
-                        "tracked_directories must be non-empty when mode is 'full_storage'"
+                        "tracked_directories must be non-empty when profile.name is 'full_storage'"
                     )
 
         # Determine DB path
@@ -387,6 +437,13 @@ class AgentDB:
             self._resolved_config = _resolve_config(self.memory_config)
         else:
             self._resolved_config = _builtin_profile_dict("budget_optimized")
+
+        # Eagerly validate every profile.agents.* block now, so a typo in any
+        # bot's config is a startup failure, not a failure the first time
+        # that specific bot happens to retrieve.
+        agents = self.memory_config.get("profile", {}).get("agents", {}) if self.memory_config else {}
+        for agent_id in agents:
+            self.config_for(agent_id)
 
         # Tracking config
         self.tracking_directories: list[str] = tracking_directories or []
@@ -465,10 +522,10 @@ class AgentDB:
         on top. isolate_by_agent is derived here -- True iff agent_id is listed
         -- and is never accepted as an input anywhere in this codebase."""
         agents = self.memory_config.get("profile", {}).get("agents", {}) if self.memory_config else {}
-        agent_block = agents.get(agent_id)
-        if agent_block is None:
+        if agent_id not in agents:
             return {**self.config, "isolate_by_agent": False}
 
+        agent_block = agents[agent_id] or {}
         base = _builtin_profile_dict(agent_block["name"]) if "name" in agent_block else self.config
         resolved = _validate_and_merge_overrides(base, agent_block, where=f"profile.agents.{agent_id}")
         return {**resolved, "isolate_by_agent": True}

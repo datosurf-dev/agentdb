@@ -92,7 +92,6 @@ def test_memory_retrieve_isolates_when_agent_listed_under_profile_agents(db, mon
     from agentdb import AgentDB
     import yaml
 
-    mem_dir = db.memory_dir if getattr(db, "memory_dir", None) else None
     # This fixture's `db` (see reset_server_db) has no memory_dir -- build a
     # fresh one with agent "a" listed under profile.agents, and point the
     # module-level singleton at it for this test only.

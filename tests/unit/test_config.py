@@ -153,3 +153,45 @@ def test_empty_memory_yaml_raises_configuration_error_not_silent_fallback(tmp_pa
 
     with pytest.raises(ConfigurationError, match="profile.name"):
         AgentDB(memory_dir=workspace_root)
+
+
+def test_legacy_root_level_capture_key_raises_configuration_error(tmp_path):
+    from agentdb.interface.client import AgentDB, ConfigurationError
+    with pytest.raises(ConfigurationError, match="capture"):
+        AgentDB(
+            memory_dir=_mem_dir(
+                tmp_path,
+                {"profile": {"name": "budget_optimized"}, "capture": {"conversation_jsonl": True}, "tracked_directories": []},
+            ),
+        )
+
+
+def test_profile_as_bare_scalar_raises_configuration_error_not_attribute_error(tmp_path):
+    from agentdb.interface.client import AgentDB, ConfigurationError
+    with pytest.raises(ConfigurationError):
+        AgentDB(memory_dir=_mem_dir(tmp_path, {"profile": "research", "tracked_directories": [str(tmp_path)]}))
+
+
+def test_empty_override_section_raises_configuration_error_not_attribute_error(tmp_path):
+    from agentdb.interface.client import AgentDB, ConfigurationError
+    with pytest.raises(ConfigurationError):
+        AgentDB(
+            memory_dir=_mem_dir(
+                tmp_path,
+                {"profile": {"name": "budget_optimized", "retrieval": None}, "tracked_directories": []},
+            ),
+        )
+
+
+def test_unknown_ranker_weight_field_raises_configuration_error(tmp_path):
+    from agentdb.interface.client import AgentDB, ConfigurationError
+    with pytest.raises(ConfigurationError, match="provenence"):
+        AgentDB(
+            memory_dir=_mem_dir(
+                tmp_path,
+                {
+                    "profile": {"name": "budget_optimized", "retrieval": {"ranker_weights": {"provenence": 0.9}}},
+                    "tracked_directories": [],
+                },
+            ),
+        )

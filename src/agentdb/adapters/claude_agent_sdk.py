@@ -72,7 +72,6 @@ def _extract_text_from_model_response(raw_response: Any) -> str:
 @dataclass(frozen=True)
 class ClaudeRuntimeConfig:
     model: str
-    profile: str = "budget_optimized"
     system_prompt: Optional[str] = None
     max_tokens: int = 1024
 
