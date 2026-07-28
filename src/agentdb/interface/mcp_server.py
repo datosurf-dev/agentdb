@@ -51,10 +51,9 @@ def memory_write(
 def memory_retrieve(
     query: str,
     agent_id: str,
-    limit: int = 5,
+    limit: Optional[int] = None,
     session_id: Optional[str] = None,
     budget_tokens: Optional[int] = None,
-    isolate_by_agent: bool = False,
 ) -> dict:
     """Retrieve governed memory records ranked by multi-signal ranker."""
     result = _get_db().retrieve(
@@ -63,7 +62,6 @@ def memory_retrieve(
         limit=limit,
         session_id=session_id,
         budget_tokens=budget_tokens,
-        isolate_by_agent=isolate_by_agent,
     )
     return {
         "records": [

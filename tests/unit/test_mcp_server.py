@@ -87,12 +87,29 @@ def test_memory_retrieve_respects_limit(db):
     assert len(result["records"]) <= 2
 
 
-def test_memory_retrieve_isolates_by_agent_when_requested(db):
+def test_memory_retrieve_isolates_when_agent_listed_under_profile_agents(db, monkeypatch):
+    from agentdb.interface import mcp_server
+    from agentdb import AgentDB
+    import yaml
+
+    mem_dir = db.memory_dir if getattr(db, "memory_dir", None) else None
+    # This fixture's `db` (see reset_server_db) has no memory_dir -- build a
+    # fresh one with agent "a" listed under profile.agents, and point the
+    # module-level singleton at it for this test only.
+    import pathlib
+    d = pathlib.Path(str(db._path)).parent / "isolated_mem"
+    (d / "config").mkdir(parents=True)
+    (d / "config" / "memory.yaml").write_text(
+        yaml.dump({"profile": {"name": "budget_optimized", "agents": {"a": {}}}}), encoding="utf-8",
+    )
+    isolated_db = AgentDB(memory_dir=d)
+    monkeypatch.setattr(mcp_server, "_db", isolated_db)
+
     from agentdb.interface.mcp_server import memory_write, memory_retrieve
     memory_write(key="mine", value="widget note", origin="agent_inferred", agent_id="a")
     memory_write(key="other", value="widget note", origin="agent_inferred", agent_id="b")
 
-    result = memory_retrieve(query="widget", agent_id="a", isolate_by_agent=True)
+    result = memory_retrieve(query="widget", agent_id="a")
 
     assert [r["key"] for r in result["records"]] == ["mine"]
 
