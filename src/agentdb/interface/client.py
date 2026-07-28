@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
 import sqlite3
@@ -13,6 +14,7 @@ from typing import Any, Callable, Optional
 import yaml
 
 from ..core.models import ConflictRecord, MemoryRecord, Skill
+from ..core.profiles import BUILTIN_PROFILES
 from ..core.store import MemoryStore
 from ..core.system import SystemStats
 from ..gateway import Gateway
@@ -194,83 +196,25 @@ class SkillsAPI:
 
 
 # ---------------------------------------------------------------------------
-# Mode-based defaults and config resolution
+# Profile-based defaults and config resolution
 # ---------------------------------------------------------------------------
 
-_MODE_DEFAULTS: dict = {
-    "budget_optimized": {
-        "lifecycle": {
-            "confidence_decay_rate": 0.0,
-            "archival_threshold": 0.10,
-            "staleness_days": 90,
-            "reinforce_rate": 0.10,
-        },
-        "retrieval": {
-            "retrieve_limit": 5,
-            "memory_budget_chars": 2000,
-            "ranker_weights": {
-                "provenance": 0.35,
-                "recency": 0.25,
-                "confidence": 0.25,
-                "causal": 0.15,
-                "semantic": 0.0,
-            },
-            "conflict_threshold": 0.85,
-        },
-        "capture": {
-            "conversation_jsonl": False,
-            "tracking_max_files_per_directory": 200,
-        },
-    },
-    "full_storage": {
-        "lifecycle": {
-            "confidence_decay_rate": 0.0,
-            "archival_threshold": 0.10,
-            "staleness_days": 90,
-            "reinforce_rate": 0.10,
-        },
-        "retrieval": {
-            "retrieve_limit": 20,
-            "memory_budget_chars": 12000,
-            "ranker_weights": {
-                "provenance": 0.35,
-                "recency": 0.25,
-                "confidence": 0.25,
-                "causal": 0.15,
-                "semantic": 0.0,
-            },
-            "conflict_threshold": 0.85,
-        },
-        "capture": {
-            "conversation_jsonl": True,
-            "tracking_max_files_per_directory": 200,
-        },
-    },
-    "research": {
-        "lifecycle": {
-            "confidence_decay_rate": 0.0,
-            "archival_threshold": 0.05,
-            "staleness_days": 180,
-            "reinforce_rate": 0.10,
-        },
-        "retrieval": {
-            "retrieve_limit": 50,
-            "memory_budget_chars": 24000,
-            "ranker_weights": {
-                "provenance": 0.25,
-                "recency": 0.35,
-                "confidence": 0.25,
-                "causal": 0.15,
-                "semantic": 0.0,
-            },
-            "conflict_threshold": 0.85,
-        },
-        "capture": {
-            "conversation_jsonl": True,
-            "tracking_max_files_per_directory": 500,
-        },
-    },
-}
+class ConfigurationError(Exception):
+    """Raised for any invalid memory.yaml profile configuration. Never
+    silently substituted for a default -- see Design Principle in
+    docs/superpowers/specs/2026-07-27-unified-profile-configuration-design.md."""
+
+
+_OVERRIDE_SECTIONS = ("retrieval", "injection", "lifecycle", "capture")
+
+
+def _builtin_profile_dict(name: str) -> dict:
+    if name not in BUILTIN_PROFILES:
+        raise ConfigurationError(
+            f"profile.name '{name}' is not a recognized built-in profile "
+            f"(expected one of {sorted(BUILTIN_PROFILES.keys())})"
+        )
+    return dataclasses.asdict(BUILTIN_PROFILES[name])
 
 
 def _deep_merge(base: dict, override: dict) -> dict:
@@ -283,28 +227,43 @@ def _deep_merge(base: dict, override: dict) -> dict:
     return result
 
 
-def _resolve_config(mode: str, yaml_dict: dict) -> dict:
-    """
-    Resolve the final config dict. Priority (low → high):
-      1. Built-in mode defaults (or budget_optimized as fallback)
-      2. User-defined profile from yaml_dict["profiles"][mode] (with optional extends:)
-      3. Top-level per-field overrides (lifecycle/retrieval/capture keys in yaml_dict)
-    """
-    # Step 1: built-in base
-    if mode in _MODE_DEFAULTS:
-        base = _MODE_DEFAULTS[mode]
-    else:
-        # Step 2: look for a user-defined profile
-        user_profiles = yaml_dict.get("profiles", {})
-        user_profile = user_profiles.get(mode, {})
-        extends = user_profile.get("extends", "budget_optimized")
-        base = _MODE_DEFAULTS.get(extends, _MODE_DEFAULTS["budget_optimized"])
-        profile_override = {k: user_profile[k] for k in ("lifecycle", "retrieval", "capture") if k in user_profile}
-        base = _deep_merge(base, profile_override)
+def _validate_and_merge_overrides(base: dict, profile_block: dict, where: str) -> dict:
+    result = dict(base)
+    for key in profile_block:
+        if key in ("name", "agents"):
+            continue
+        if key not in _OVERRIDE_SECTIONS:
+            raise ConfigurationError(
+                f"{where}: unknown key '{key}' (expected one of {_OVERRIDE_SECTIONS}, 'name', or 'agents')"
+            )
+        section_override = profile_block[key]
+        base_section = result.get(key, {})
+        for field, value in section_override.items():
+            if field not in base_section:
+                raise ConfigurationError(f"{where}.{key}: unknown field '{field}'")
+            expected_type = type(base_section[field])
+            if not isinstance(value, expected_type):
+                raise ConfigurationError(
+                    f"{where}.{key}.{field}: expected {expected_type.__name__}, got {type(value).__name__} ({value!r})"
+                )
+        result[key] = _deep_merge(base_section, section_override)
+    return result
 
-    # Step 3: top-level per-field overrides always win
-    top_override = {k: yaml_dict[k] for k in ("lifecycle", "retrieval", "capture") if k in yaml_dict}
-    return _deep_merge(base, top_override)
+
+def _resolve_config(yaml_dict: dict) -> dict:
+    """
+    Resolve the final config dict from the new single-root `profile:` schema.
+    Priority (low -> high): built-in profile defaults, then override sections
+    (retrieval/injection/lifecycle/capture) declared directly under profile:.
+    Raises ConfigurationError on any unrecognized name, key, or wrong type --
+    never silently substitutes a default.
+    """
+    profile_block = yaml_dict.get("profile", {}) if yaml_dict else {}
+    name = profile_block.get("name")
+    if not name:
+        raise ConfigurationError("profile.name is required")
+    base = _builtin_profile_dict(name)
+    return _validate_and_merge_overrides(base, profile_block, where="profile")
 
 
 # ---------------------------------------------------------------------------
@@ -312,40 +271,12 @@ def _resolve_config(mode: str, yaml_dict: dict) -> dict:
 # ---------------------------------------------------------------------------
 
 _DEFAULT_MEMORY_YAML = """\
-# Built-in modes: budget_optimized | full_storage | research
-# Set mode to a name under 'profiles:' to use a custom profile.
-mode: budget_optimized
-tracked_directories: []
+# profile.name: budget_optimized | full_storage | research
+# Any of retrieval:/injection:/lifecycle:/capture: declared alongside name
+# override just those fields on top of the named profile.
+profile:
+  name: budget_optimized
 
-# Optional: define custom profiles. Each profile can extend a built-in.
-# profiles:
-#   my_profile:
-#     extends: budget_optimized   # optional; defaults to budget_optimized
-#     lifecycle:
-#       staleness_days: 45
-#     retrieval:
-#       retrieve_limit: 15
-#       memory_budget_chars: 8000
-
-# Per-field overrides — applied on top of the active mode/profile.
-capture:
-  conversation_jsonl: false
-  tracking_max_files_per_directory: 200
-lifecycle:
-  confidence_decay_rate: 0.0
-  archival_threshold: 0.10
-  staleness_days: 90
-  reinforce_rate: 0.10
-retrieval:
-  retrieve_limit: 5
-  memory_budget_chars: 2000
-  ranker_weights:
-    provenance: 0.35
-    recency: 0.25
-    confidence: 0.25
-    causal: 0.15
-    semantic: 0.0
-  conflict_threshold: 0.85
 reconciliation:
   triggers:
     - conversation_started
@@ -409,8 +340,8 @@ class AgentDB:
             with config_path.open("r", encoding="utf-8") as f:
                 self.memory_config = yaml.safe_load(f) or {}
 
-            # Validate full_storage mode
-            if self.memory_config.get("mode") == "full_storage":
+            # Validate full_storage profile
+            if self.memory_config.get("profile", {}).get("name") == "full_storage":
                 td = self.memory_config.get("tracked_directories", [])
                 if not td:
                     raise ValueError(
@@ -445,9 +376,17 @@ class AgentDB:
         # Initialize outcomes table
         self._init_outcomes_table()
 
-        # Resolve mode-based config
-        mode = self.memory_config.get("mode", "budget_optimized") if self.memory_config else "budget_optimized"
-        self._resolved_config = _resolve_config(mode, self.memory_config)
+        # Resolve profile-based config. When no memory_dir was provided at
+        # all, there is no config file to speak of and we fall back to the
+        # budget_optimized built-in directly -- this is "no config given"
+        # rather than "invalid config". But if memory_dir WAS provided, any
+        # memory_config content (including a blank/empty file that parses to
+        # None/{}) goes through _resolve_config's strict profile.name
+        # validation -- never a silent fallback.
+        if self.memory_dir is not None:
+            self._resolved_config = _resolve_config(self.memory_config)
+        else:
+            self._resolved_config = _builtin_profile_dict("budget_optimized")
 
         # Tracking config
         self.tracking_directories: list[str] = tracking_directories or []
@@ -517,7 +456,7 @@ class AgentDB:
 
     @property
     def config(self) -> dict:
-        """Fully resolved config: mode defaults merged with memory.yaml overrides."""
+        """Fully resolved config: profile defaults merged with memory.yaml overrides."""
         return self._resolved_config
 
     def _init_outcomes_table(self) -> None:

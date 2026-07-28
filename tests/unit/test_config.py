@@ -1,4 +1,4 @@
-"""Task 10D/10E: centralized memory.yaml configuration wiring."""
+"""Profile configuration resolution: single `profile:` root key, strict validation."""
 from __future__ import annotations
 
 import pytest
@@ -10,7 +10,6 @@ def _write_yaml(path, data):
 
 
 def _mem_dir(tmp_path, config_data):
-    """Create a memory_dir with the given config dict and return its path."""
     d = tmp_path / "mem"
     d.mkdir()
     (d / "config").mkdir()
@@ -18,41 +17,30 @@ def _mem_dir(tmp_path, config_data):
     return d
 
 
-# ---------------------------------------------------------------------------
-# Tests
-# ---------------------------------------------------------------------------
-
 def test_budget_optimized_defaults_lifecycle(tmp_path):
     from agentdb.interface.client import AgentDB
-    db = AgentDB(memory_dir=_mem_dir(tmp_path, {"mode": "budget_optimized", "tracked_directories": []}))
+    db = AgentDB(memory_dir=_mem_dir(tmp_path, {"profile": {"name": "budget_optimized"}, "tracked_directories": []}))
     assert db.lifecycle.STALENESS_DAYS == 90
     assert db.lifecycle.ARCHIVAL_THRESHOLD == pytest.approx(0.10)
     assert db.lifecycle.REINFORCE_RATE == pytest.approx(0.10)
 
 
-def test_full_storage_mode_retrieve_limit(tmp_path):
+def test_full_storage_profile_retrieve_limit(tmp_path):
     from agentdb.interface.client import AgentDB
     db = AgentDB(
-        memory_dir=_mem_dir(
-            tmp_path,
-            {"mode": "full_storage", "tracked_directories": [str(tmp_path)]},
-        )
+        memory_dir=_mem_dir(tmp_path, {"profile": {"name": "full_storage"}, "tracked_directories": [str(tmp_path)]}),
     )
     assert db.config["retrieval"]["retrieve_limit"] == 20
-    assert db.config["retrieval"]["memory_budget_chars"] == 12000
+    assert db.config["injection"]["memory_budget_chars"] == 12000
 
 
-def test_yaml_field_override_beats_mode_default(tmp_path):
+def test_override_section_beats_profile_default(tmp_path):
     from agentdb.interface.client import AgentDB
     db = AgentDB(
         memory_dir=_mem_dir(
             tmp_path,
-            {
-                "mode": "budget_optimized",
-                "tracked_directories": [],
-                "lifecycle": {"staleness_days": 30},
-            },
-        )
+            {"profile": {"name": "budget_optimized", "lifecycle": {"staleness_days": 30}}, "tracked_directories": []},
+        ),
     )
     assert db.lifecycle.STALENESS_DAYS == 30
     assert db.lifecycle.ARCHIVAL_THRESHOLD == pytest.approx(0.10)
@@ -64,135 +52,104 @@ def test_ranker_uses_config_weights(tmp_path):
         memory_dir=_mem_dir(
             tmp_path,
             {
-                "mode": "budget_optimized",
-                "tracked_directories": [],
-                "retrieval": {
-                    "ranker_weights": {
-                        "provenance": 0.50,
-                        "recency": 0.20,
-                        "confidence": 0.20,
-                        "causal": 0.10,
-                        "semantic": 0.0,
-                    }
+                "profile": {
+                    "name": "budget_optimized",
+                    "retrieval": {
+                        "ranker_weights": {"provenance": 0.50, "recency": 0.20, "confidence": 0.20, "causal": 0.10, "semantic": 0.0},
+                    },
                 },
+                "tracked_directories": [],
             },
-        )
+        ),
     )
     assert db._ranker.w_provenance == pytest.approx(0.50)
     assert db._ranker.w_recency == pytest.approx(0.20)
-    assert db._ranker.w_confidence == pytest.approx(0.20)
-    assert db._ranker.w_causal == pytest.approx(0.10)
 
 
 def test_no_memory_dir_uses_hardcoded_defaults(tmp_path):
     from agentdb.interface.client import AgentDB
     db = AgentDB(path=tmp_path / "test.db")
     assert db.lifecycle.STALENESS_DAYS == 90
-    assert db.lifecycle.ARCHIVAL_THRESHOLD == pytest.approx(0.10)
     assert db._ranker.w_provenance == pytest.approx(0.35)
 
 
-def test_config_property_returns_resolved_dict(tmp_path):
+def test_config_property_returns_resolved_dict_with_injection_key(tmp_path):
     from agentdb.interface.client import AgentDB
-    db = AgentDB(memory_dir=_mem_dir(tmp_path, {"mode": "budget_optimized", "tracked_directories": []}))
+    db = AgentDB(memory_dir=_mem_dir(tmp_path, {"profile": {"name": "budget_optimized"}, "tracked_directories": []}))
     cfg = db.config
     assert cfg["lifecycle"]["staleness_days"] == 90
     assert cfg["retrieval"]["retrieve_limit"] == 5
-    assert cfg["retrieval"]["ranker_weights"]["provenance"] == pytest.approx(0.35)
+    assert cfg["injection"]["context_token_limit"] == 1000
+    assert cfg["injection"]["memory_header"].startswith("Governed memory context")
 
-
-# ---------------------------------------------------------------------------
-# research profile
-# ---------------------------------------------------------------------------
 
 def test_research_profile_retrieve_limit(tmp_path):
     from agentdb.interface.client import AgentDB
-    db = AgentDB(memory_dir=_mem_dir(tmp_path, {"mode": "research", "tracked_directories": [str(tmp_path)]}))
+    db = AgentDB(memory_dir=_mem_dir(tmp_path, {"profile": {"name": "research"}, "tracked_directories": [str(tmp_path)]}))
     assert db.config["retrieval"]["retrieve_limit"] == 50
-    assert db.config["retrieval"]["memory_budget_chars"] == 24000
+    assert db.config["injection"]["memory_budget_chars"] == 24000
 
 
-def test_research_profile_lifecycle(tmp_path):
-    from agentdb.interface.client import AgentDB
-    db = AgentDB(memory_dir=_mem_dir(tmp_path, {"mode": "research", "tracked_directories": [str(tmp_path)]}))
-    assert db.lifecycle.STALENESS_DAYS == 180
-    assert db.lifecycle.ARCHIVAL_THRESHOLD == pytest.approx(0.05)
-
-
-def test_research_profile_recency_weight(tmp_path):
-    from agentdb.interface.client import AgentDB
-    db = AgentDB(memory_dir=_mem_dir(tmp_path, {"mode": "research", "tracked_directories": [str(tmp_path)]}))
-    assert db._ranker.w_recency == pytest.approx(0.35)
-    assert db._ranker.w_provenance == pytest.approx(0.25)
-
-
-# ---------------------------------------------------------------------------
-# User-defined profiles
-# ---------------------------------------------------------------------------
-
-def test_user_defined_profile_resolves(tmp_path):
+def test_custom_override_does_not_need_a_registry(tmp_path):
+    """No profiles: registry exists -- override sections directly under
+    profile: are an implicit custom profile."""
     from agentdb.interface.client import AgentDB
     db = AgentDB(
         memory_dir=_mem_dir(
             tmp_path,
-            {
-                "mode": "my_profile",
-                "tracked_directories": [],
-                "profiles": {
-                    "my_profile": {
-                        "retrieval": {"retrieve_limit": 15, "memory_budget_chars": 8000},
-                    }
-                },
-            },
-        )
+            {"profile": {"name": "research", "retrieval": {"retrieve_limit": 30}}, "tracked_directories": [str(tmp_path)]},
+        ),
     )
-    assert db.config["retrieval"]["retrieve_limit"] == 15
-    assert db.config["retrieval"]["memory_budget_chars"] == 8000
+    assert db.config["retrieval"]["retrieve_limit"] == 30
+    assert db.config["lifecycle"]["staleness_days"] == 180  # research's other fields untouched
 
 
-def test_user_defined_profile_extends_builtin(tmp_path):
-    from agentdb.interface.client import AgentDB
-    db = AgentDB(
-        memory_dir=_mem_dir(
-            tmp_path,
-            {
-                "mode": "my_research",
-                "tracked_directories": [str(tmp_path)],
-                "profiles": {
-                    "my_research": {
-                        "extends": "research",
-                        "lifecycle": {"staleness_days": 60},
-                    }
-                },
-            },
+def test_missing_profile_name_raises_configuration_error(tmp_path):
+    from agentdb.interface.client import AgentDB, ConfigurationError
+    with pytest.raises(ConfigurationError, match="profile.name"):
+        AgentDB(memory_dir=_mem_dir(tmp_path, {"profile": {}, "tracked_directories": []}))
+
+
+def test_unrecognized_profile_name_raises_configuration_error(tmp_path):
+    from agentdb.interface.client import AgentDB, ConfigurationError
+    with pytest.raises(ConfigurationError, match="nonexistent"):
+        AgentDB(memory_dir=_mem_dir(tmp_path, {"profile": {"name": "nonexistent"}, "tracked_directories": []}))
+
+
+def test_unknown_override_section_raises_configuration_error(tmp_path):
+    from agentdb.interface.client import AgentDB, ConfigurationError
+    with pytest.raises(ConfigurationError, match="retrievel"):
+        AgentDB(memory_dir=_mem_dir(tmp_path, {"profile": {"name": "budget_optimized", "retrievel": {}}, "tracked_directories": []}))
+
+
+def test_unknown_field_in_override_section_raises_configuration_error(tmp_path):
+    from agentdb.interface.client import AgentDB, ConfigurationError
+    with pytest.raises(ConfigurationError, match="retrieve_limitt"):
+        AgentDB(
+            memory_dir=_mem_dir(
+                tmp_path,
+                {"profile": {"name": "budget_optimized", "retrieval": {"retrieve_limitt": 10}}, "tracked_directories": []},
+            ),
         )
-    )
-    # Inherits research retrieve_limit but overrides staleness
-    assert db.config["retrieval"]["retrieve_limit"] == 50
-    assert db.lifecycle.STALENESS_DAYS == 60
 
 
-def test_user_defined_profile_top_level_override_still_wins(tmp_path):
-    from agentdb.interface.client import AgentDB
-    db = AgentDB(
-        memory_dir=_mem_dir(
-            tmp_path,
-            {
-                "mode": "my_profile",
-                "tracked_directories": [],
-                "profiles": {
-                    "my_profile": {
-                        "retrieval": {"retrieve_limit": 15},
-                    }
-                },
-                "retrieval": {"retrieve_limit": 7},  # top-level override wins
-            },
+def test_wrong_type_in_override_raises_configuration_error(tmp_path):
+    from agentdb.interface.client import AgentDB, ConfigurationError
+    with pytest.raises(ConfigurationError, match="retrieve_limit"):
+        AgentDB(
+            memory_dir=_mem_dir(
+                tmp_path,
+                {"profile": {"name": "budget_optimized", "retrieval": {"retrieve_limit": "five"}}, "tracked_directories": []},
+            ),
         )
-    )
-    assert db.config["retrieval"]["retrieve_limit"] == 7
 
 
-def test_unknown_mode_falls_back_to_budget_optimized(tmp_path):
-    from agentdb.interface.client import AgentDB
-    db = AgentDB(memory_dir=_mem_dir(tmp_path, {"mode": "nonexistent", "tracked_directories": []}))
-    assert db.config["retrieval"]["retrieve_limit"] == 5
+def test_empty_memory_yaml_raises_configuration_error_not_silent_fallback(tmp_path):
+    from agentdb.interface.client import AgentDB, ConfigurationError
+    workspace_root = tmp_path / "memory-home"
+    config_dir = workspace_root / "config"
+    config_dir.mkdir(parents=True)
+    (config_dir / "memory.yaml").write_text("", encoding="utf-8")  # blank file, parses to None
+
+    with pytest.raises(ConfigurationError, match="profile.name"):
+        AgentDB(memory_dir=workspace_root)

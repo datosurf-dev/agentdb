@@ -421,7 +421,8 @@ def test_finalize_turn_writes_conversation_jsonl_when_enabled(tmp_path):
     (config_dir / "memory.yaml").write_text(
         "\n".join(
             [
-                "mode: budget_optimized",
+                "profile:",
+                "  name: budget_optimized",
                 "tracked_directories: []",
                 "capture:",
                 "  conversation_jsonl: true",

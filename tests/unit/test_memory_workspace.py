@@ -22,7 +22,7 @@ def test_memory_workspace_creates_default_layout(tmp_path):
     assert (workspace_root / "reconciliation").is_dir()
     assert (workspace_root / "logs").is_dir()
     assert db._path == (workspace_root / "database" / "agentdb.sqlite").resolve()
-    assert db.memory_config["mode"] == "budget_optimized"
+    assert db.memory_config["profile"]["name"] == "budget_optimized"
 
 
 def test_memory_workspace_env_precedence_prefers_memory_dir(tmp_path, monkeypatch):
@@ -55,7 +55,8 @@ def test_invalid_full_storage_config_requires_tracked_directories(tmp_path):
     config_path.write_text(
         "\n".join(
             [
-                "mode: full_storage",
+                "profile:",
+                "  name: full_storage",
                 "tracked_directories: []",
                 "capture:",
                 "  conversation_jsonl: true",
