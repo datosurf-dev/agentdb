@@ -459,6 +459,20 @@ class AgentDB:
         """Fully resolved config: profile defaults merged with memory.yaml overrides."""
         return self._resolved_config
 
+    def config_for(self, agent_id: str) -> dict:
+        """Resolved config for a specific agent: the global profile resolution,
+        with this agent's own overrides (if listed under profile.agents) merged
+        on top. isolate_by_agent is derived here -- True iff agent_id is listed
+        -- and is never accepted as an input anywhere in this codebase."""
+        agents = self.memory_config.get("profile", {}).get("agents", {}) if self.memory_config else {}
+        agent_block = agents.get(agent_id)
+        if agent_block is None:
+            return {**self.config, "isolate_by_agent": False}
+
+        base = _builtin_profile_dict(agent_block["name"]) if "name" in agent_block else self.config
+        resolved = _validate_and_merge_overrides(base, agent_block, where=f"profile.agents.{agent_id}")
+        return {**resolved, "isolate_by_agent": True}
+
     def _init_outcomes_table(self) -> None:
         with self._store._connect() as conn:
             conn.execute(_CREATE_OUTCOMES)
