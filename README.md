@@ -8,13 +8,13 @@ AgentDB is designed to improve agent behavior without becoming another layer of 
 
 ## Architecture Confirmation
 
-The full architecture pitch and the numbered design principles (now including Principle 12's real-time-enforcement vs. async-integrity-check split for adapters) live in one canonical place — this section just points to it instead of repeating it:
+The full architecture pitch and the numbered design principles live in one canonical place — this section just points to it instead of repeating it:
 
-- Architecture & design principles: `/Users/jm/Documents/github/agentdb/docs/context/architecture-principles.md`
-- Capabilities by type: `/Users/jm/Documents/github/agentdb/docs/context/capabilities.md`
-- Global agent instructions: `/Users/jm/Documents/github/agentdb/AGENTS.md`
-- Plan (active/open work): `/Users/jm/Documents/github/agentdb/docs/superpowers/plans/2026-06-06-agentdb-revised.md`
-- Completed work tracker: `/Users/jm/Documents/github/agentdb/docs/superpowers/plans/completed-tasks.md`
+- Architecture & design principles: `/agentdb/docs/context/architecture-principles.md`
+- Capabilities by type: `/agentdb/docs/context/capabilities.md`
+- Global agent instructions: `/agentdb/AGENTS.md`
+- Plan (active/open work): `/agentdb/docs/superpowers/plans/2026-06-06-agentdb-revised.md`
+- Completed work tracker: `/agentdb/docs/superpowers/plans/completed-tasks.md`
 
 ## Current Repository Status (As Of 2026-07-17)
 
