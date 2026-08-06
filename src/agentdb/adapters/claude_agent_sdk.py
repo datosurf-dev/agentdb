@@ -441,6 +441,15 @@ class AgentDBClaudeMiddleware(GatewayAdapter):
         ts = _utcnow().strftime("%Y%m%dT%H%M%S%f")
         return f"memory/episodic/claude/{self._agent_id}/{session_id}/{ts}"
 
+    # Keys matching these substrings are stored for reconciliation but
+    # excluded from context injection — they're operational metadata,
+    # not useful memories for the model.
+    _INJECTION_EXCLUDED_KEY_PATTERNS = ("/directory_tracking/",)
+
+    # Episodic response records can be very large; cap them so one turn's
+    # response doesn't exhaust the whole memory budget.
+    _MAX_EPISODIC_VALUE_CHARS = 2000
+
     def _build_memory_context(self, retrieval: "RetrievalResult") -> str:
         if not retrieval.records:
             return ""
@@ -448,11 +457,15 @@ class AgentDBClaudeMiddleware(GatewayAdapter):
         line_format = self._resolved["injection"]["record_line_format"]
         chunks: list[str] = []
         for record in retrieval.records:
+            if any(pat in record.key for pat in self._INJECTION_EXCLUDED_KEY_PATTERNS):
+                continue
             value = record.value
             if isinstance(value, (dict, list)):
                 value_text = json.dumps(value, ensure_ascii=True)
             else:
                 value_text = str(value)
+            if len(value_text) > self._MAX_EPISODIC_VALUE_CHARS:
+                value_text = value_text[: self._MAX_EPISODIC_VALUE_CHARS] + "…"
             line = line_format.format(key=record.key, value=value_text)
             if len(line) > remaining:
                 break
