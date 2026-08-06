@@ -16,8 +16,10 @@ def test_budget_optimized_matches_documented_values():
 
 
 def test_full_storage_matches_documented_values():
-    assert FULL_STORAGE.retrieval.retrieve_limit == 20
-    assert FULL_STORAGE.injection.memory_budget_chars == 12000
+    assert FULL_STORAGE.retrieval.retrieve_limit == 200
+    assert FULL_STORAGE.injection.memory_budget_chars == 200000
+    assert FULL_STORAGE.lifecycle.archival_threshold == 0.0
+    assert FULL_STORAGE.lifecycle.staleness_days == 3650
     assert FULL_STORAGE.capture.conversation_jsonl is True
 
 

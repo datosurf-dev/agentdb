@@ -30,8 +30,8 @@ def test_full_storage_profile_retrieve_limit(tmp_path):
     db = AgentDB(
         memory_dir=_mem_dir(tmp_path, {"profile": {"name": "full_storage"}, "tracked_directories": [str(tmp_path)]}),
     )
-    assert db.config["retrieval"]["retrieve_limit"] == 20
-    assert db.config["injection"]["memory_budget_chars"] == 12000
+    assert db.config["retrieval"]["retrieve_limit"] == 200
+    assert db.config["injection"]["memory_budget_chars"] == 200000
 
 
 def test_override_section_beats_profile_default(tmp_path):

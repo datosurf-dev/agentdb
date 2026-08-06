@@ -59,7 +59,7 @@ def test_agent_can_switch_to_a_different_base_profile(tmp_path):
     cfg = db.config_for("telegram_assistant_work")
 
     assert cfg["isolate_by_agent"] is True
-    assert cfg["retrieval"]["retrieve_limit"] == 20  # full_storage's value, not research's 50
+    assert cfg["retrieval"]["retrieve_limit"] == 200  # full_storage's value, not research's 50
 
 
 def test_agent_block_unknown_field_raises_configuration_error(tmp_path):

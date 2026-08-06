@@ -84,15 +84,15 @@ BUDGET_OPTIMIZED = Profile(
 FULL_STORAGE = Profile(
     name="full_storage",
     lifecycle=LifecycleSettings(
-        confidence_decay_rate=0.0, archival_threshold=0.10, staleness_days=90, reinforce_rate=0.10,
+        confidence_decay_rate=0.0, archival_threshold=0.0, staleness_days=3650, reinforce_rate=0.10,
     ),
     retrieval=RetrievalSettings(
-        retrieve_limit=20, conflict_threshold=0.85,
+        retrieve_limit=200, conflict_threshold=0.85,
         ranker_weights=RankerWeights(provenance=0.35, recency=0.25, confidence=0.25, causal=0.15, semantic=0.0),
     ),
-    injection=InjectionSettings(context_token_limit=3500, memory_budget_chars=12000, **_SHARED_INJECTION_TEXT),
+    injection=InjectionSettings(context_token_limit=50000, memory_budget_chars=200000, **_SHARED_INJECTION_TEXT),
     capture=CaptureSettings(
-        conversation_jsonl=True, tracking_max_files_per_directory=200, auto_persist_response=True,
+        conversation_jsonl=True, tracking_max_files_per_directory=10000, auto_persist_response=True,
     ),
 )
 
