@@ -32,6 +32,7 @@ class RankerWeights:
 class RetrievalSettings:
     retrieve_limit: int
     conflict_threshold: float  # currently unused elsewhere in the codebase; reserved
+    min_composite_score: float  # records ranked below this score are excluded; 0.0 = no threshold
     ranker_weights: RankerWeights
 
 
@@ -72,7 +73,7 @@ BUDGET_OPTIMIZED = Profile(
         confidence_decay_rate=0.0, archival_threshold=0.10, staleness_days=90, reinforce_rate=0.10,
     ),
     retrieval=RetrievalSettings(
-        retrieve_limit=5, conflict_threshold=0.85,
+        retrieve_limit=5, conflict_threshold=0.85, min_composite_score=0.0,
         ranker_weights=RankerWeights(provenance=0.35, recency=0.25, confidence=0.25, causal=0.15, semantic=0.0),
     ),
     injection=InjectionSettings(context_token_limit=1000, memory_budget_chars=2000, **_SHARED_INJECTION_TEXT),
@@ -87,7 +88,7 @@ FULL_STORAGE = Profile(
         confidence_decay_rate=0.0, archival_threshold=0.0, staleness_days=3650, reinforce_rate=0.10,
     ),
     retrieval=RetrievalSettings(
-        retrieve_limit=200, conflict_threshold=0.85,
+        retrieve_limit=200, conflict_threshold=0.85, min_composite_score=0.0,
         ranker_weights=RankerWeights(provenance=0.35, recency=0.25, confidence=0.25, causal=0.15, semantic=0.0),
     ),
     injection=InjectionSettings(context_token_limit=50000, memory_budget_chars=200000, **_SHARED_INJECTION_TEXT),
@@ -102,7 +103,7 @@ RESEARCH = Profile(
         confidence_decay_rate=0.0, archival_threshold=0.05, staleness_days=180, reinforce_rate=0.10,
     ),
     retrieval=RetrievalSettings(
-        retrieve_limit=50, conflict_threshold=0.85,
+        retrieve_limit=50, conflict_threshold=0.85, min_composite_score=0.0,
         ranker_weights=RankerWeights(provenance=0.25, recency=0.35, confidence=0.25, causal=0.15, semantic=0.0),
     ),
     injection=InjectionSettings(context_token_limit=8000, memory_budget_chars=24000, **_SHARED_INJECTION_TEXT),

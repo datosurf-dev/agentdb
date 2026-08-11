@@ -684,14 +684,32 @@ class AgentDB:
         candidates = self._store.search(
             query, limit=max(resolved_limit, 50), agent_id=agent_id if isolate_by_agent else None,
         )
-        ranked = self._ranker.rank(query, candidates, agent_id=agent_id)[:resolved_limit]
-        ranked_records = [rr.record for rr in ranked]
+
+        # Scope episodic records to the current session. Episodic records are
+        # session-local by design; cross-session insights should be promoted to
+        # structured non-episodic keys. Non-episodic records pass through unfiltered.
+        _EPISODIC_PREFIX = "memory/episodic/"
+        if session_id is not None:
+            candidates = [
+                r for r in candidates
+                if _EPISODIC_PREFIX not in r.key or f"/{session_id}/" in r.key
+            ]
+
+        ranked_all = self._ranker.rank(query, candidates, agent_id=agent_id)
+
+        # Drop records that don't meet the minimum relevance threshold.
+        min_score = agent_config["retrieval"]["min_composite_score"]
+        if min_score > 0.0:
+            ranked_all = [rr for rr in ranked_all if rr.composite_score >= min_score]
+
+        ranked = ranked_all[:resolved_limit]
 
         # Budget cap
         selected: list[MemoryRecord] = []
         token_total = 0
         truncated = False
-        for record in ranked_records:
+        for rr in ranked:
+            record = rr.record
             est = _estimate_tokens(record)
             if resolved_budget_tokens is not None and token_total + est > resolved_budget_tokens:
                 truncated = True
