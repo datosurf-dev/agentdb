@@ -676,6 +676,7 @@ class AgentDB:
         session_id: Optional[str] = None,
         external_context: Optional[list[dict]] = None,
         budget_tokens: Optional[int] = None,
+        working_dirs: Optional[list[str]] = None,
     ) -> RetrievalResult:
         agent_config = self.config_for(agent_id)
         isolate_by_agent = agent_config["isolate_by_agent"]
@@ -696,7 +697,7 @@ class AgentDB:
                 if _EPISODIC_PREFIX not in r.key or f"/{session_id}/" in r.key
             ]
 
-        ranked_all = self._ranker.rank(query, candidates, agent_id=agent_id)
+        ranked_all = self._ranker.rank(query, candidates, agent_id=agent_id, session_working_dirs=working_dirs)
 
         # Drop records that don't meet the minimum relevance threshold.
         min_score = agent_config["retrieval"]["min_composite_score"]

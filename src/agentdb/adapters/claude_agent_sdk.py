@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Optional
 import json
+import os
 
 from ..core.directory_tracking import collect_directory_snapshots
 from ..gateway.adapter import GatewayAdapter
@@ -94,6 +95,7 @@ class AgentDBClaudeMiddleware(GatewayAdapter):
         super().__init__(db, agent_id, profile=resolved["name"])
         self._conversation_started_callback = conversation_started_callback
         self._resolved = resolved
+        self._session_working_dirs: dict[str, list[str]] = {}
         self.gateway.subscribe("conflict_detected", self._on_conflict)
 
     def prepare_turn(
@@ -104,11 +106,16 @@ class AgentDBClaudeMiddleware(GatewayAdapter):
         system_prompt: Optional[str] = None,
         external_context: Optional[list[dict[str, Any]]] = None,
         base_messages: Optional[list[dict[str, str]]] = None,
+        working_dirs: Optional[list[str]] = None,
     ) -> tuple[list[dict[str, str]], "RetrievalResult"]:
         """
         Enforced pre-response hook: always retrieves governed memory first.
         Returns model messages and raw retrieval result for optional inspection.
         """
+        if working_dirs is not None:
+            self._session_working_dirs[session_id] = [
+                os.path.realpath(d) for d in working_dirs
+            ]
         if self._conversation_started_callback is not None:
             self._conversation_started_callback(
                 db=self._db,
@@ -125,6 +132,7 @@ class AgentDBClaudeMiddleware(GatewayAdapter):
             external_context=external_context,
             session_id=session_id,
             budget_tokens=self._resolved["injection"]["context_token_limit"],
+            working_dirs=self._session_working_dirs.get(session_id),
         )
 
         messages: list[dict[str, str]] = []
@@ -316,6 +324,7 @@ class AgentDBClaudeMiddleware(GatewayAdapter):
         system_prompt: Optional[str] = None,
         external_context: Optional[list[dict[str, Any]]] = None,
         base_messages: Optional[list[dict[str, str]]] = None,
+        working_dirs: Optional[list[str]] = None,
     ) -> tuple[list[dict[str, str]], "RetrievalResult"]:
         return self.prepare_turn(
             user_query=user_query,
@@ -323,6 +332,7 @@ class AgentDBClaudeMiddleware(GatewayAdapter):
             system_prompt=system_prompt,
             external_context=external_context,
             base_messages=base_messages,
+            working_dirs=working_dirs,
         )
 
     async def finalize_turn_async(

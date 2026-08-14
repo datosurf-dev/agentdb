@@ -907,3 +907,77 @@ async def test_from_sdk_client_threads_memory_budget_tokens(tmp_path):
 
     assert result["retrieval"].truncated is True
     assert result["retrieval"].token_estimate <= 60
+
+
+def test_prepare_turn_accepts_working_dirs_and_stores_per_session(tmp_path):
+    """prepare_turn() must accept working_dirs, normalize them via os.path.realpath,
+    store them keyed by session_id, and pass them to retrieve() without error."""
+    import os as _os
+    db = AgentDB(path=tmp_path / "test.db", permissions_path=PERMS)
+    db.write(
+        key="memory/working/note",
+        value="relevant note",
+        origin="agent_inferred",
+        agent_id="research_agent",
+        session_id="sess-wdirs-1",
+    )
+    middleware = AgentDBClaudeMiddleware(db=db, agent_id="research_agent")
+
+    messages, retrieval = middleware.prepare_turn(
+        user_query="note",
+        session_id="sess-wdirs-1",
+        working_dirs=["/home/user/repo-a", "/home/user/repo-b"],
+    )
+
+    # working_dirs are normalized and stored for the session
+    assert middleware._session_working_dirs["sess-wdirs-1"] == [
+        _os.path.realpath("/home/user/repo-a"),
+        _os.path.realpath("/home/user/repo-b"),
+    ]
+    # retrieve still returns a result (working_dirs flows through without breaking anything)
+    assert retrieval is not None
+    assert messages[-1]["role"] == "user"
+    assert messages[-1]["content"] == "note"
+
+
+def test_prepare_turn_working_dirs_persists_across_turns(tmp_path):
+    """Once working_dirs are set for a session, subsequent turns without the param
+    still carry the stored dirs to retrieve()."""
+    import os as _os
+    db = AgentDB(path=tmp_path / "test.db", permissions_path=PERMS)
+    middleware = AgentDBClaudeMiddleware(db=db, agent_id="research_agent")
+
+    # First turn: set working_dirs
+    middleware.prepare_turn(
+        user_query="first turn",
+        session_id="sess-wdirs-persist",
+        working_dirs=["/home/user/project-x"],
+    )
+    assert "sess-wdirs-persist" in middleware._session_working_dirs
+
+    # Second turn: no working_dirs param — stored dirs must still be present
+    middleware.prepare_turn(
+        user_query="second turn",
+        session_id="sess-wdirs-persist",
+    )
+    assert middleware._session_working_dirs["sess-wdirs-persist"] == [
+        _os.path.realpath("/home/user/project-x")
+    ]
+
+
+def test_retrieve_accepts_working_dirs_param(tmp_path):
+    """AgentDB.retrieve() must accept working_dirs without error even when weight=0."""
+    mem_dir = tmp_path / "ws"
+    mem_dir.mkdir()
+    (mem_dir / "config").mkdir()
+    (mem_dir / "config" / "memory.yaml").write_text(
+        "profile:\n  name: budget_optimized\nagents:\n  ag: {}\n"
+    )
+    db = AgentDB(path=str(tmp_path / "db.db"), memory_dir=str(mem_dir))
+    db.write(key="memory/org/x", value="v", origin="agent_inferred", agent_id="ag")
+    result = db.retrieve(
+        query="x",
+        agent_id="ag",
+        working_dirs=["/home/user/repo-a"],
+    )
+    assert result is not None
