@@ -207,8 +207,11 @@ Answers: "Given what is stored, what should the agent see?"
 | Causal (approx) | 0.15 | freq_score · recency_weight | 2 |
 | Causal (full) | 0.15 | CausalGraph.success_rate(record_id) | 5 |
 | Semantic | 0.0→0.20 | cosine(query_emb, record_emb) | 4 |
+| Workspace overlap | 0.0 (opt-in) | Jaccard(session_working_dirs, record.working_dirs); 0.5 neutral when either side empty | 2 |
 
 When semantic is activated in Phase 4, redistribute: provenance 0.30, recency 0.20, confidence 0.20, causal 0.10, semantic 0.20. Weights must always sum to 1.0 — enforced in the `MultiSignalRanker` constructor.
+
+When workspace_overlap is enabled, reduce other weights proportionally to maintain sum = 1.0 (e.g. set `workspace: 0.10` and reduce one other weight by 0.10).
 
 When CausalGraph activates in Phase 5, the causal weight and position in the formula are unchanged — only the computation inside `_causal_score()` changes. No weight redistribution needed.
 

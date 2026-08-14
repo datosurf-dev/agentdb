@@ -159,7 +159,7 @@ should follow the same pattern.
 | **Embeddings** | Provider-level config (model name, API key) | Provider-level config | `embedding_model` in `memory.yaml`, configurable callable | All three treat the embedding model as a config detail, not a hard dependency. |
 | **Skills** | Basic; no versioning or health score | Autonomous creation; agentskills.io format | Versioned records, computed health score, staleness warnings | AgentDB's skills are governance-grade; OpenClaw/Hermes skills are agent-authored. The governance layer sits above, not replacing. |
 | **Pre-compaction summarization** | Built-in flush reminder (no summarization) | `on_pre_compress()` returns a string summary | Summarizer callable (`AgentDB(summarizer=fn)`) — None by default (truncation fallback) | The summarizer callable is the shared abstraction: Hermes calls it via `on_pre_compress`, OpenClaw via the sidecar's compaction endpoint. |
-| **Cross-session recall** | FTS5 hybrid search across daily files | FTS5 + LLM summarization | Retrieval algorithm (provenance + recency + confidence + causal) | AgentDB's retrieval adds governance signals on top of both platforms' own search. |
+| **Cross-session recall** | FTS5 hybrid search across daily files | FTS5 + LLM summarization | Retrieval algorithm (provenance + recency + confidence + causal + workspace_overlap) | AgentDB's retrieval adds governance signals on top of both platforms' own search. workspace_overlap is opt-in (weight 0.0 by default). |
 
 ---
 
@@ -203,7 +203,7 @@ provenance, detect conflicts, and manage skills. The platform's native format
 
 - Write-time permission enforcement (what gets written, by whom, to which zone)
 - Provenance tagging (human-approved vs agent-inferred)
-- Multi-signal ranking on retrieval (provenance 0.35, recency 0.25, confidence 0.25, causal 0.15)
+- Multi-signal ranking on retrieval (provenance 0.35, recency 0.25, confidence 0.25, causal 0.15, workspace_overlap 0.0 opt-in)
 - Governed skills with computed health scores
 - Conflict detection and audit trail
 - Outcome-based confidence reinforcement
