@@ -26,6 +26,7 @@ class RankerWeights:
     confidence: float
     causal: float
     semantic: float
+    workspace: float = 0.0  # opt-in; weight 0.0 = disabled
 
 
 @dataclass(frozen=True)
@@ -74,7 +75,7 @@ BUDGET_OPTIMIZED = Profile(
     ),
     retrieval=RetrievalSettings(
         retrieve_limit=5, conflict_threshold=0.85, min_composite_score=0.0,
-        ranker_weights=RankerWeights(provenance=0.35, recency=0.25, confidence=0.25, causal=0.15, semantic=0.0),
+        ranker_weights=RankerWeights(provenance=0.35, recency=0.25, confidence=0.25, causal=0.15, semantic=0.0, workspace=0.0),
     ),
     injection=InjectionSettings(context_token_limit=1000, memory_budget_chars=2000, **_SHARED_INJECTION_TEXT),
     capture=CaptureSettings(
@@ -89,7 +90,7 @@ FULL_STORAGE = Profile(
     ),
     retrieval=RetrievalSettings(
         retrieve_limit=200, conflict_threshold=0.85, min_composite_score=0.0,
-        ranker_weights=RankerWeights(provenance=0.35, recency=0.25, confidence=0.25, causal=0.15, semantic=0.0),
+        ranker_weights=RankerWeights(provenance=0.35, recency=0.25, confidence=0.25, causal=0.15, semantic=0.0, workspace=0.0),
     ),
     injection=InjectionSettings(context_token_limit=50000, memory_budget_chars=200000, **_SHARED_INJECTION_TEXT),
     capture=CaptureSettings(
@@ -104,7 +105,7 @@ RESEARCH = Profile(
     ),
     retrieval=RetrievalSettings(
         retrieve_limit=50, conflict_threshold=0.85, min_composite_score=0.0,
-        ranker_weights=RankerWeights(provenance=0.25, recency=0.35, confidence=0.25, causal=0.15, semantic=0.0),
+        ranker_weights=RankerWeights(provenance=0.25, recency=0.35, confidence=0.25, causal=0.15, semantic=0.0, workspace=0.0),
     ),
     injection=InjectionSettings(context_token_limit=8000, memory_budget_chars=24000, **_SHARED_INJECTION_TEXT),
     capture=CaptureSettings(

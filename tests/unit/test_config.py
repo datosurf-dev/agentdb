@@ -195,3 +195,27 @@ def test_unknown_ranker_weight_field_raises_configuration_error(tmp_path):
                 },
             ),
         )
+
+
+def test_workspace_weight_in_yaml_config_stored_in_resolved_config(tmp_path):
+    """Test that workspace weight is accepted from YAML and stored in resolved config.
+
+    Note: The weights must still sum to 1.0 for the existing 5 signals,
+    since workspace support in the ranker is added in Task 3.
+    """
+    from agentdb.interface.client import AgentDB
+    db = AgentDB(
+        memory_dir=_mem_dir(
+            tmp_path,
+            {
+                "profile": {
+                    "name": "budget_optimized",
+                    "retrieval": {
+                        "ranker_weights": {"provenance": 0.35, "recency": 0.25, "confidence": 0.25, "causal": 0.15, "semantic": 0.0, "workspace": 0.0},
+                    },
+                },
+                "tracked_directories": [],
+            },
+        ),
+    )
+    assert db.config["retrieval"]["ranker_weights"]["workspace"] == pytest.approx(0.0)

@@ -1,6 +1,8 @@
 import dataclasses
 
-from agentdb.core.profiles import BUILTIN_PROFILES, BUDGET_OPTIMIZED, FULL_STORAGE, RESEARCH
+from agentdb.core.profiles import (
+    BUILTIN_PROFILES, BUDGET_OPTIMIZED, FULL_STORAGE, RESEARCH, RankerWeights
+)
 
 
 def test_builtin_profiles_has_exactly_three_entries():
@@ -34,3 +36,26 @@ def test_profile_converts_cleanly_to_nested_dict():
     d = dataclasses.asdict(BUDGET_OPTIMIZED)
     assert d["retrieval"]["retrieve_limit"] == 5
     assert d["injection"]["memory_header"].startswith("Governed memory context")
+
+
+def test_ranker_weights_has_workspace_field():
+    w = RankerWeights(
+        provenance=0.35, recency=0.25, confidence=0.25,
+        causal=0.15, semantic=0.0, workspace=0.0
+    )
+    assert w.workspace == 0.0
+
+
+def test_builtin_profiles_include_workspace_weight():
+    for profile in (BUDGET_OPTIMIZED, FULL_STORAGE, RESEARCH):
+        assert hasattr(profile.retrieval.ranker_weights, "workspace")
+        assert profile.retrieval.ranker_weights.workspace == 0.0
+
+
+def test_weights_sum_to_one_including_workspace():
+    w = RankerWeights(
+        provenance=0.30, recency=0.25, confidence=0.25,
+        causal=0.10, semantic=0.0, workspace=0.10
+    )
+    total = w.provenance + w.recency + w.confidence + w.causal + w.semantic + w.workspace
+    assert abs(total - 1.0) < 1e-9
