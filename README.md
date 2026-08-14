@@ -480,6 +480,7 @@ Signal weights (all configurable, enforced to sum to 1.0 in `MultiSignalRanker`'
 | Confidence | 0.25 | No — Mem0 baseline |
 | Causal (WAL-derived, approximated) | 0.15 | **Yes** |
 | Semantic (cosine similarity) | 0.0 | No — Mem0 baseline |
+| Workspace (working-directory overlap) | 0.0 | **Yes** |
 
 **Target redistribution once Phase 4 activates embeddings** (not active yet):
 

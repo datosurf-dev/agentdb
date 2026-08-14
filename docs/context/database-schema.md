@@ -49,6 +49,7 @@ Backs `MemoryRecord` (`core/models.py`). One row per record version; a `delete()
 | `conflict_id` | TEXT (nullable) | stamped by `ConflictDetector` at write time when a temporal or authority conflict is detected; both the incoming and existing record receive the same `conflict_id` |
 | `expiry_time` | TEXT (ISO datetime, nullable) | added 2026-07-17 (Task 10C); `lifecycle.run_sweep()` Step 0 archives records where `expiry_time ≤ now`; `human_approved` records are immune |
 | `inferred` | INTEGER (bool) | added 2026-07-17 (Task 10C); set to 1 when `write(infer=True)` is used — value was passed through a caller-supplied `infer_fn` before storage |
+| `working_dirs` | TEXT (JSON list) | added 2026-08-14 (Task 6); normalized absolute paths active at write time. Empty by default. Used by workspace_overlap ranker signal. |
 
 **Fields planned but not present:** `user_id`, `session_id` (as a column — session linkage today is in-memory only, see Known Gaps), `expiry_policy`, `tier`, `audit_sequence`, `embedding`, `embedding_version`. `ExpiryPolicy`/`MemoryTier` enums exist in `core/models.py` but nothing attaches them to a record yet.
 

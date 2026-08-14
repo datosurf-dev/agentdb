@@ -80,6 +80,7 @@ profile:
       confidence: 0.25
       causal: 0.15
       semantic: 0.0
+      workspace: 0.0    # working-directory overlap (Jaccard). Opt-in: set > 0 and reduce other weights to maintain sum=1.0
 
   injection:                  # optional
     context_token_limit: 4000     # was the memory_budget_tokens adapter kwarg
