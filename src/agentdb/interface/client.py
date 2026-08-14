@@ -561,6 +561,7 @@ class AgentDB:
         confidence: Optional[float] = None,
         infer: bool = False,
         expiry_time: Optional["datetime"] = None,
+        working_dirs: Optional[list[str]] = None,
     ) -> MemoryRecord:
         if infer:
             if self._infer_fn is None:
@@ -598,6 +599,7 @@ class AgentDB:
             entities=list(entities) if entities else [],
             expiry_time=expiry_time,
             inferred=infer,
+            working_dirs=[os.path.realpath(d) for d in (working_dirs or [])],
         )
 
         # Conflict detection: check before persisting

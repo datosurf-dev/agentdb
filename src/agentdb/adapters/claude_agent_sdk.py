@@ -179,21 +179,10 @@ class AgentDBClaudeMiddleware(GatewayAdapter):
         """
         Post-response hook: persist memory updates and optional outcome signal.
         """
-        writes = list(memory_writes or [])
-        if self._resolved["capture"]["auto_persist_response"] and model_response:
-            writes.append(
-                {
-                    "key": self._response_key(session_id),
-                    "value": {
-                        "response": model_response,
-                        "captured_at": _utcnow().isoformat(),
-                        "profile": self._resolved["name"],
-                    },
-                    "origin": "agent_inferred",
-                }
-            )
+        session_dirs = self._session_working_dirs.get(session_id)
 
-        for item in writes:
+        explicit_writes = list(memory_writes or [])
+        for item in explicit_writes:
             self._db.write(
                 key=item["key"],
                 value=item["value"],
@@ -201,6 +190,22 @@ class AgentDBClaudeMiddleware(GatewayAdapter):
                 agent_id=self._agent_id,
                 session_id=session_id,
                 entities=touched_entities or [],
+                working_dirs=session_dirs,
+            )
+
+        if self._resolved["capture"]["auto_persist_response"] and model_response:
+            self._db.write(
+                key=self._response_key(session_id),
+                value={
+                    "response": model_response,
+                    "captured_at": _utcnow().isoformat(),
+                    "profile": self._resolved["name"],
+                },
+                origin="agent_inferred",
+                agent_id=self._agent_id,
+                session_id=session_id,
+                entities=touched_entities or [],
+                working_dirs=session_dirs,
             )
 
         # Write conversation JSONL if enabled

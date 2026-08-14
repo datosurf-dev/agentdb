@@ -15,20 +15,27 @@ from agentdb.interface.client import EVENT_MEMORY_OUTCOME, EVENT_MEMORY_RETRIEVE
 PERMS = Path(__file__).parent.parent / "fixtures" / "permissions.test.yaml"
 
 
-def _mem_dir_with_profile(tmp_path, profile_name):
+def _mem_dir_with_profile(tmp_path, profile_name_or_yaml):
     """Build a memory_dir whose memory.yaml selects a named built-in profile.
 
-    full_storage requires a non-empty top-level tracked_directories list to
-    pass AgentDB's own construction-time validation.
+    Accepts either a plain profile name string (e.g. "full_storage") or a full
+    YAML block string.  full_storage requires a non-empty top-level
+    tracked_directories list to pass AgentDB's own construction-time validation.
     """
     workspace_root = tmp_path / "memory-home"
     config_dir = workspace_root / "config"
-    config_dir.mkdir(parents=True)
-    lines = ["profile:", f"  name: {profile_name}"]
-    if profile_name == "full_storage":
-        lines += ["tracked_directories:", "  - placeholder"]
-    (config_dir / "memory.yaml").write_text("\n".join(lines), encoding="utf-8")
-    return workspace_root
+    config_dir.mkdir(parents=True, exist_ok=True)
+    # Detect whether caller passed a raw YAML block (contains newlines or colons)
+    if "\n" in profile_name_or_yaml or ":" in profile_name_or_yaml:
+        yaml_content = profile_name_or_yaml
+    else:
+        profile_name = profile_name_or_yaml
+        lines = ["profile:", f"  name: {profile_name}"]
+        if profile_name == "full_storage":
+            lines += ["tracked_directories:", "  - placeholder"]
+        yaml_content = "\n".join(lines)
+    (config_dir / "memory.yaml").write_text(yaml_content, encoding="utf-8")
+    return str(workspace_root)
 
 
 def test_prepare_turn_enforces_retrieve_and_builds_messages(tmp_path):
@@ -981,3 +988,72 @@ def test_retrieve_accepts_working_dirs_param(tmp_path):
         working_dirs=["/home/user/repo-a"],
     )
     assert result is not None
+
+
+def test_records_stamped_with_working_dirs_and_ranked_higher(tmp_path):
+    """End-to-end: records written in session A's working_dirs score above records
+    from session B's dirs when retrieved in a session with A's dirs."""
+    import os
+    mem_dir = _mem_dir_with_profile(tmp_path, """
+profile:
+  name: budget_optimized
+  retrieval:
+    retrieve_limit: 10
+    min_composite_score: 0.0
+    ranker_weights:
+      provenance: 0.25
+      recency: 0.25
+      confidence: 0.25
+      causal: 0.10
+      semantic: 0.0
+      workspace: 0.15
+  agents:
+    agent_a: {}
+""")
+    db = AgentDB(path=str(tmp_path / "db.db"), memory_dir=mem_dir)
+    mw = AgentDBClaudeMiddleware(db=db, agent_id="agent_a")
+
+    # Session 1: working in /project-dbt — writes a record
+    mw.prepare_turn(
+        user_query="dbt query",
+        session_id="sess-dbt",
+        working_dirs=["/project-dbt"],
+    )
+    mw.finalize_turn(
+        session_id="sess-dbt",
+        model_response="dbt response",
+        memory_writes=[{
+            "key": "memory/org/dbt-fact",
+            "value": "models are in /project-dbt/models",
+            "origin": "agent_inferred",
+        }],
+    )
+
+    # Session 2: working in /project-other — writes a record
+    mw.prepare_turn(
+        user_query="other query",
+        session_id="sess-other",
+        working_dirs=["/project-other"],
+    )
+    mw.finalize_turn(
+        session_id="sess-other",
+        model_response="other response",
+        memory_writes=[{
+            "key": "memory/org/other-fact",
+            "value": "something from other project",
+            "origin": "agent_inferred",
+        }],
+    )
+
+    # New session: working in /project-dbt — retrieves; dbt-fact should rank higher
+    messages, result = mw.prepare_turn(
+        user_query="tell me about dbt",
+        session_id="sess-new",
+        working_dirs=["/project-dbt"],
+    )
+    record_keys = [r.key for r in result.records]
+    assert "memory/org/dbt-fact" in record_keys
+    dbt_idx = record_keys.index("memory/org/dbt-fact")
+    if "memory/org/other-fact" in record_keys:
+        other_idx = record_keys.index("memory/org/other-fact")
+        assert dbt_idx < other_idx, "dbt-fact should rank above other-fact"
