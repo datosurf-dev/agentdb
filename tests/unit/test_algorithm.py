@@ -94,3 +94,117 @@ def test_never_retrieved_record_falls_back_to_created_at_for_recency():
                       trust_level=TrustLevel.AGENT, agent_id="a1")
     results = ranker.rank("query", [r], agent_id="a1")
     assert results[0].signal_breakdown["recency"] > 0.9
+
+
+def _rec_with_dirs(working_dirs, **kwargs):
+    """Helper: build a MemoryRecord with working_dirs set."""
+    defaults = dict(
+        key="memory/org/test", value="v", origin="agent_inferred",
+        trust_level="agent", agent_id="ag", confidence=1.0,
+    )
+    defaults.update(kwargs)
+    return MemoryRecord(**defaults, working_dirs=working_dirs)
+
+
+def test_workspace_score_neutral_when_no_session_dirs():
+    ranker = MultiSignalRanker(
+        weight_provenance=0.25, weight_recency=0.25, weight_confidence=0.25,
+        weight_causal=0.15, weight_semantic=0.0, weight_workspace=0.10,
+    )
+    rec = _rec_with_dirs(["/home/user/repo-a"])
+    # No session dirs → neutral score (0.5) for workspace signal
+    score = ranker._workspace_score(rec, session_working_dirs=None)
+    assert score == 0.5
+
+
+def test_workspace_score_neutral_when_record_has_no_dirs():
+    ranker = MultiSignalRanker(
+        weight_provenance=0.25, weight_recency=0.25, weight_confidence=0.25,
+        weight_causal=0.15, weight_semantic=0.0, weight_workspace=0.10,
+    )
+    rec = _rec_with_dirs([])
+    score = ranker._workspace_score(rec, session_working_dirs=["/home/user/repo-a"])
+    assert score == 0.5
+
+
+def test_workspace_score_full_overlap():
+    ranker = MultiSignalRanker(
+        weight_provenance=0.25, weight_recency=0.25, weight_confidence=0.25,
+        weight_causal=0.15, weight_semantic=0.0, weight_workspace=0.10,
+    )
+    rec = _rec_with_dirs(["/home/user/repo-a", "/home/user/repo-b"])
+    score = ranker._workspace_score(
+        rec, session_working_dirs=["/home/user/repo-a", "/home/user/repo-b"]
+    )
+    assert score == 1.0
+
+
+def test_workspace_score_partial_overlap():
+    ranker = MultiSignalRanker(
+        weight_provenance=0.25, weight_recency=0.25, weight_confidence=0.25,
+        weight_causal=0.15, weight_semantic=0.0, weight_workspace=0.10,
+    )
+    rec = _rec_with_dirs(["/home/user/repo-a", "/home/user/repo-b"])
+    # intersection={repo-a}, union={repo-a, repo-b, repo-c} → 1/3
+    score = ranker._workspace_score(
+        rec, session_working_dirs=["/home/user/repo-a", "/home/user/repo-c"]
+    )
+    assert abs(score - 1/3) < 1e-9
+
+
+def test_workspace_score_zero_overlap():
+    ranker = MultiSignalRanker(
+        weight_provenance=0.25, weight_recency=0.25, weight_confidence=0.25,
+        weight_causal=0.15, weight_semantic=0.0, weight_workspace=0.10,
+    )
+    rec = _rec_with_dirs(["/home/user/repo-a"])
+    score = ranker._workspace_score(
+        rec, session_working_dirs=["/home/user/repo-b"]
+    )
+    assert score == 0.0
+
+
+def test_workspace_boosts_matching_dir_record_above_non_matching():
+    """Records written in the active working dir rank above those from other dirs."""
+    ranker = MultiSignalRanker(
+        weight_provenance=0.25, weight_recency=0.25, weight_confidence=0.25,
+        weight_causal=0.10, weight_semantic=0.0, weight_workspace=0.15,
+    )
+    matching = _rec_with_dirs(["/home/user/dbt"])
+    different = _rec_with_dirs(["/home/user/other-repo"])
+
+    ranked = ranker.rank(
+        query="some query",
+        candidates=[different, matching],
+        agent_id="ag",
+        session_working_dirs=["/home/user/dbt"],
+    )
+    # matching record should rank first
+    assert ranked[0].record.working_dirs == ["/home/user/dbt"]
+
+
+def test_workspace_signal_in_breakdown():
+    ranker = MultiSignalRanker(
+        weight_provenance=0.25, weight_recency=0.25, weight_confidence=0.25,
+        weight_causal=0.15, weight_semantic=0.0, weight_workspace=0.10,
+    )
+    rec = _rec_with_dirs(["/home/user/repo-a"])
+    ranked = ranker.rank(
+        "q", [rec], "ag", session_working_dirs=["/home/user/repo-a"]
+    )
+    assert "workspace" in ranked[0].signal_breakdown
+
+
+def test_workspace_disabled_when_weight_zero():
+    """weight_workspace=0.0 means workspace signal has no effect on scores."""
+    ranker = MultiSignalRanker(
+        weight_provenance=0.35, weight_recency=0.25, weight_confidence=0.25,
+        weight_causal=0.15, weight_semantic=0.0, weight_workspace=0.0,
+    )
+    with_dirs = _rec_with_dirs(["/home/user/repo-a"])
+    without_dirs = _rec_with_dirs([])
+
+    ranked_with = ranker.rank("q", [with_dirs], "ag", session_working_dirs=["/home/user/repo-a"])
+    ranked_without = ranker.rank("q", [without_dirs], "ag", session_working_dirs=["/home/user/repo-a"])
+    # Scores should be identical because workspace weight is 0
+    assert ranked_with[0].composite_score == ranked_without[0].composite_score

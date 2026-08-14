@@ -466,6 +466,7 @@ class AgentDB:
             weight_confidence=rw["confidence"],
             weight_causal=rw["causal"],
             weight_semantic=rw["semantic"],
+            weight_workspace=rw.get("workspace", 0.0),
             staleness_days=lc["staleness_days"],
         )
 

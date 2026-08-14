@@ -67,13 +67,14 @@ class MultiSignalRanker:
         weight_confidence: float = 0.25,
         weight_causal: float = 0.15,
         weight_semantic: float = 0.0,  # activated in Phase 3
+        weight_workspace: float = 0.0,  # Jaccard overlap with session working dirs
         recency_lambda: float = 0.01,  # decay rate; 0.01 ~= half-life 69 days
         staleness_days: int = 90,
         provenance_scores: Optional[dict] = None,
     ):
         total = (
             weight_provenance + weight_recency + weight_confidence
-            + weight_causal + weight_semantic
+            + weight_causal + weight_semantic + weight_workspace
         )
         if abs(total - 1.0) > 1e-6:
             raise ValueError(f"Signal weights must sum to 1.0, got {total}")
@@ -82,6 +83,7 @@ class MultiSignalRanker:
         self.w_confidence = weight_confidence
         self.w_causal = weight_causal
         self.w_semantic = weight_semantic
+        self.w_workspace = weight_workspace
         self._lambda = recency_lambda
         self._staleness_days = staleness_days
         self._provenance = provenance_scores or _PROVENANCE_SCORES
@@ -93,6 +95,7 @@ class MultiSignalRanker:
         agent_id: str,
         query_embedding: Optional[list] = None,
         session_id: Optional[str] = None,
+        session_working_dirs: Optional[list] = None,
     ) -> list:
         if not candidates:
             return []
@@ -109,6 +112,7 @@ class MultiSignalRanker:
                 self._semantic_score(query_embedding, embedding)
                 if query_embedding and embedding else 0.0
             )
+            workspace = self._workspace_score(record, session_working_dirs)
 
             composite = (
                 self.w_provenance * prov
@@ -116,6 +120,7 @@ class MultiSignalRanker:
                 + self.w_confidence * conf
                 + self.w_causal * causal
                 + self.w_semantic * sem
+                + self.w_workspace * workspace
             )
 
             ref_time = self._reference_time(record)
@@ -129,6 +134,7 @@ class MultiSignalRanker:
                     "confidence": round(conf, 4),
                     "causal": round(causal, 4),
                     "semantic": round(sem, 4),
+                    "workspace": round(workspace, 4),
                 },
                 conflict_flag=bool(getattr(record, "conflict_id", None)),
                 staleness_warning=days_since > self._staleness_days,
@@ -168,6 +174,22 @@ class MultiSignalRanker:
         freq_score = min(math.log(record.retrieval_count + 1) / math.log(101), 1.0)
         recency_weight = self._recency_score(record, now)
         return freq_score * recency_weight
+
+    def _workspace_score(
+        self, record: "MemoryRecord", session_working_dirs: Optional[list]
+    ) -> float:
+        """Jaccard similarity between record's working_dirs and session's working_dirs.
+
+        Returns 0.5 (neutral) when either side has no data, so legacy records
+        are not penalized and sessions with no working_dirs don't distort scores.
+        """
+        rec_dirs = set(getattr(record, "working_dirs", []) or [])
+        sess_dirs = set(session_working_dirs or [])
+        if not rec_dirs or not sess_dirs:
+            return 0.5
+        intersection = rec_dirs & sess_dirs
+        union = rec_dirs | sess_dirs
+        return len(intersection) / len(union)
 
     def _semantic_score(self, query_embedding: list, record_embedding: list) -> float:
         """Cosine similarity. Uses numpy if available, falls back to pure
