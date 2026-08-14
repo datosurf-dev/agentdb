@@ -59,6 +59,7 @@ class MemoryRecord:
     conflict_id: Optional[str] = None
     expiry_time: Optional[datetime] = None
     inferred: bool = False
+    working_dirs: list = field(default_factory=list)
 
 
 @dataclass
