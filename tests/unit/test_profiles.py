@@ -35,7 +35,7 @@ def test_research_matches_documented_values():
 def test_profile_converts_cleanly_to_nested_dict():
     d = dataclasses.asdict(BUDGET_OPTIMIZED)
     assert d["retrieval"]["retrieve_limit"] == 5
-    assert d["injection"]["memory_header"].startswith("Governed memory context")
+    assert d["injection"]["memory_header"].startswith("Background context from previous sessions")
 
 
 def test_ranker_weights_has_workspace_field():

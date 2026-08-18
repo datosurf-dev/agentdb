@@ -80,7 +80,7 @@ def test_config_property_returns_resolved_dict_with_injection_key(tmp_path):
     assert cfg["lifecycle"]["staleness_days"] == 90
     assert cfg["retrieval"]["retrieve_limit"] == 5
     assert cfg["injection"]["context_token_limit"] == 1000
-    assert cfg["injection"]["memory_header"].startswith("Governed memory context")
+    assert cfg["injection"]["memory_header"].startswith("Background context from previous sessions")
 
 
 def test_research_profile_retrieve_limit(tmp_path):

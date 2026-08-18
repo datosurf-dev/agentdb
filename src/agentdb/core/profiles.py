@@ -63,7 +63,7 @@ class Profile:
 
 
 _SHARED_INJECTION_TEXT = dict(
-    memory_header="Governed memory context (higher priority than inferred context):",
+    memory_header="Background context from previous sessions (supplemental — current conversation and user request take priority):",
     override_prefix="Override instruction:",
     record_line_format="- {key}: {value}",
 )
