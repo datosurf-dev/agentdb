@@ -57,7 +57,7 @@ def test_prepare_turn_enforces_retrieve_and_builds_messages(tmp_path):
 
     assert len(retrieval.records) >= 1
     assert messages[0]["role"] == "system"
-    assert any("Governed memory context" in m["content"] for m in messages if m["role"] == "system")
+    assert any("Background context from previous sessions" in m["content"] for m in messages if m["role"] == "system")
     entries = db.audit_log.replay(from_sequence=0)
     assert any(entry.event_type == EVENT_MEMORY_RETRIEVE for entry in entries)
 
@@ -82,7 +82,7 @@ def test_prepare_turn_orders_override_instructions_before_memory_content(tmp_pat
     )
     memory_index = next(
         i for i, m in enumerate(messages)
-        if m["role"] == "system" and "Governed memory context" in m["content"]
+        if m["role"] == "system" and "Background context from previous sessions" in m["content"]
     )
     assert override_index < memory_index
 
@@ -816,7 +816,7 @@ async def test_prepare_turn_async_retrieves_memory(tmp_path):
     )
 
     assert len(retrieval.records) >= 1
-    assert any("Governed memory context" in m["content"] for m in messages if m["role"] == "system")
+    assert any("Background context from previous sessions" in m["content"] for m in messages if m["role"] == "system")
 
 
 @pytest.mark.asyncio
