@@ -60,6 +60,7 @@ class MemoryRecord:
     expiry_time: Optional[datetime] = None
     inferred: bool = False
     working_dirs: list = field(default_factory=list)
+    embedding: Optional[list[float]] = field(default=None, repr=False)
 
 
 @dataclass
