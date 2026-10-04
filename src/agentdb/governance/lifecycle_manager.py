@@ -130,6 +130,15 @@ class LifecycleManager:
                 self._store.archive_record(record.id)
                 archived_ids.add(record.id)
 
+        # Embedding orphan cleanup
+        if self._embedding_store is not None:
+            active_memory_ids = [r.id for r in self._store.list_all()]
+            self._embedding_store.prune_orphans("memories", active_memory_ids)
+
+            if self._skill_store is not None:
+                active_skill_ids = self._skill_store.list_all_active_ids()
+                self._embedding_store.prune_orphans("skills", active_skill_ids)
+
         return {"decayed": decayed, "archived": len(archived_ids)}
 
     # ------------------------------------------------------------------
