@@ -5,7 +5,7 @@ import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from ..core.models import Skill
 
@@ -83,9 +83,14 @@ def _compute_health(skill: Skill) -> tuple[float, list[str]]:
 
 
 class SkillStore:
-    def __init__(self, db_path: Any) -> None:
+    def __init__(
+        self,
+        db_path: Any,
+        on_stale_crossing: Optional[Callable[[str], None]] = None,
+    ) -> None:
         self._db_path = Path(db_path)
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
+        self.on_stale_crossing = on_stale_crossing
         with self._connect() as conn:
             conn.execute(_CREATE_SKILLS_TABLE)
 
@@ -227,7 +232,8 @@ class SkillStore:
     def get_for_agent(self, agent_id: str) -> list[Skill]:
         """
         Returns non-archived skills where agent_id is in scope.
-        Computes health_score based on staleness.
+        Computes health_score based on staleness. Fires on_stale_crossing
+        callback exactly once when health first crosses below 0.6.
         """
         with self._connect() as conn:
             rows = conn.execute(
@@ -241,17 +247,24 @@ class SkillStore:
         seen_ids: set[str] = set()
         for row in rows:
             skill = _row_to_skill(row)
-            # Only return the latest version per skill id
             if skill.id in seen_ids:
                 continue
-            scope = skill.scope
-            if agent_id in scope:
-                seen_ids.add(skill.id)
-                # Compute health score
-                health_score, reasons = _compute_health(skill)
-                skill.health_score = health_score
-                skill.health_score_reasons = reasons
-                results.append(skill)
+            if agent_id not in skill.scope:
+                continue
+            seen_ids.add(skill.id)
+
+            stored_health = skill.health_score  # from DB — reflects last persisted score
+            new_health, reasons = _compute_health(skill)
+            skill.health_score = new_health
+            skill.health_score_reasons = reasons
+
+            # Detect first-time crossing below 0.6: persist so it won't re-fire
+            if stored_health >= 0.6 and new_health < 0.6:
+                self._persist_health_score(skill.id, skill.version, new_health)
+                if self.on_stale_crossing is not None:
+                    self.on_stale_crossing(skill.id)
+
+            results.append(skill)
 
         return results
 
@@ -264,6 +277,13 @@ class SkillStore:
                 WHERE id = ? AND archived = 0
                 """,
                 (now, skill_id),
+            )
+
+    def _persist_health_score(self, skill_id: str, version: str, health_score: float) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE skills SET health_score = ? WHERE id = ? AND version = ?",
+                (health_score, skill_id, version),
             )
 
     def archive(self, skill_id: str, version: str) -> None:

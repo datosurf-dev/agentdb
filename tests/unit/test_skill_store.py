@@ -129,3 +129,40 @@ def test_update_allowed_after_archiving_previous_version(store):
     # Only v1 active — update allowed
     updated = store.update("s-ok", content="v3 content", new_version="3.0.0")
     assert updated.version == "3.0.0"
+
+
+# --- skill_stale 12b dispatch ---
+
+def test_stale_crossing_callback_fires_once(store):
+    """Callback fires the first time health crosses below 0.6, not on subsequent retrieves."""
+    crossed_ids = []
+    store.on_stale_crossing = crossed_ids.append
+
+    stale_skill = _skill(id="s-stale-cb")
+    stale_skill.created_at = stale_skill.created_at - timedelta(days=65)
+    store.create(stale_skill)
+
+    # First retrieve: computed health < 0.6, stored was 1.0 → crossing detected
+    store.get_for_agent("research_agent")
+    assert crossed_ids == ["s-stale-cb"]
+
+    # Second retrieve: still < 0.6, but stored is now persisted < 0.6 → no re-fire
+    store.get_for_agent("research_agent")
+    assert len(crossed_ids) == 1
+
+
+def test_stale_crossing_callback_not_fired_for_healthy_skill(store):
+    crossed_ids = []
+    store.on_stale_crossing = crossed_ids.append
+
+    store.create(_skill(id="s-healthy"))  # just created, health = 1.0
+    store.get_for_agent("research_agent")
+    assert crossed_ids == []
+
+
+def test_stale_crossing_no_callback_no_error(store):
+    """SkillStore with default on_stale_crossing=None must not raise even on a crossing."""
+    stale = _skill(id="s-nocb")
+    stale.created_at = stale.created_at - timedelta(days=65)
+    store.create(stale)
+    store.get_for_agent("research_agent")  # must not raise

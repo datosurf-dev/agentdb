@@ -420,7 +420,11 @@ class AgentDB:
 
         # Skills store - use separate DB or same
         skills_db_path = db_path.parent / "skills.sqlite" if db_path != Path(":memory:") else db_path
-        self.skills = SkillStore(db_path=skills_db_path)
+
+        def _on_skill_stale(skill_id: str) -> None:
+            self.gateway.dispatch("skill_stale", skill_id=skill_id)
+
+        self.skills = SkillStore(db_path=skills_db_path, on_stale_crossing=_on_skill_stale)
         self.skills_api = SkillsAPI(self.skills)
 
         # Initialize outcomes table
