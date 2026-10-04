@@ -38,8 +38,11 @@ class FunctionEmbeddingProvider:
     @property
     def dimensions(self) -> int:
         if self._dimensions is None:
-            probe = self._fn("probe")
-            self._dimensions = len(probe)
+            try:
+                probe = self._fn("probe")
+                self._dimensions = len(probe)
+            except Exception:
+                self._dimensions = 0
         return self._dimensions
 
     def embed(self, text: str) -> list[float]:

@@ -725,6 +725,18 @@ class AgentDB:
                 )
 
         self._store.write(record)
+
+        # Store embedding (non-blocking — failures never propagate to caller)
+        if self._embedding_provider is not None and self._embedding_store is not None:
+            try:
+                from ..embeddings.text import _embed_text_for_record
+                vec = self._embedding_provider.embed(_embed_text_for_record(record))
+                self._embedding_store.put(
+                    "memories", record.id, vec, working_dirs=record.working_dirs
+                )
+            except Exception:
+                pass
+
         self.audit_log.append(
             EVENT_MEMORY_WRITE,
             {
