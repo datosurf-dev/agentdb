@@ -737,6 +737,25 @@ class AgentDB:
             except Exception:
                 pass
 
+            # Semantic conflict detection (requires embedding to be stored first)
+            try:
+                threshold = float(
+                    self._raw_embeddings_cfg.get("semantic_conflict_threshold", 0.92)
+                )
+                recent = [r for r in self._store.list_all()
+                          if r.agent_id == agent_id and r.id != record.id and not r.archived]
+                recent.sort(key=lambda r: r.created_at, reverse=True)
+                sem_conflicts = ConflictDetector.check_semantic_batch(
+                    new_record=record,
+                    candidates=recent,
+                    embedding_store=self._embedding_store,
+                    threshold=threshold,
+                )
+                for sc in sem_conflicts:
+                    self._store.store_conflict(sc)
+            except Exception:
+                pass
+
         self.audit_log.append(
             EVENT_MEMORY_WRITE,
             {
@@ -790,6 +809,26 @@ class AgentDB:
         resolved_limit = limit if limit is not None else agent_config["retrieval"]["retrieve_limit"]
         resolved_budget_tokens = budget_tokens if budget_tokens is not None else agent_config["injection"]["context_token_limit"]
 
+        # Query gate — skip embedding work for generic/short queries
+        _stop_phrases = frozenset(
+            self._raw_embeddings_cfg.get("generic_query_stop_phrases", [
+                "ok", "go ahead", "sounds good", "yes", "no", "sure",
+                "proceed", "continue", "let's review", "sounds great",
+            ])
+        )
+        _min_tokens = int(self._raw_embeddings_cfg.get("min_query_tokens", 3))
+        _query_passes_gate = (
+            self._embedding_provider is not None
+            and len(query.split()) >= _min_tokens
+            and query.strip().lower() not in _stop_phrases
+        )
+        query_embedding: Optional[list[float]] = None
+        if _query_passes_gate:
+            try:
+                query_embedding = self._embedding_provider.embed(query)
+            except Exception:
+                query_embedding = None
+
         candidates = self._store.search(
             query, limit=max(resolved_limit, 50), agent_id=agent_id if isolate_by_agent else None,
         )
@@ -804,7 +843,52 @@ class AgentDB:
                 if _EPISODIC_PREFIX not in r.key or f"/{session_id}/" in r.key
             ]
 
-        ranked_all = self._ranker.rank(query, candidates, agent_id=agent_id, session_working_dirs=working_dirs)
+        # Embedding hydration + session topic filter
+        if _query_passes_gate and self._embedding_store is not None:
+            from ..embeddings.provider import _cosine
+            from ..embeddings.text import _embed_text_for_record
+
+            record_ids = [r.id for r in candidates]
+            stored_embeddings = self._embedding_store.get_batch("memories", record_ids)
+
+            # Lazy regen: embed records that have no stored vector
+            missing = [r for r in candidates if r.id not in stored_embeddings]
+            if missing:
+                try:
+                    vecs = self._embedding_provider.embed_batch(
+                        [_embed_text_for_record(r) for r in missing]
+                    )
+                    for rec, vec in zip(missing, vecs):
+                        self._embedding_store.put(
+                            "memories", rec.id, vec, working_dirs=rec.working_dirs
+                        )
+                        stored_embeddings[rec.id] = vec
+                except Exception:
+                    pass
+
+            # Session topic filter
+            if session_id:
+                session_topic = self._embedding_store.get_session_topic(session_id)
+                if session_topic is not None:
+                    _threshold = float(
+                        self._raw_embeddings_cfg.get("session_topic_threshold", 0.35)
+                    )
+                    candidates = [
+                        r for r in candidates
+                        if r.id not in stored_embeddings  # no embedding → always pass
+                        or _cosine(stored_embeddings[r.id], session_topic) >= _threshold
+                    ]
+
+            # Attach embeddings as transient field before ranking
+            for r in candidates:
+                if r.id in stored_embeddings:
+                    r.embedding = stored_embeddings[r.id]
+
+        ranked_all = self._ranker.rank(
+            query, candidates, agent_id=agent_id,
+            query_embedding=query_embedding,
+            session_working_dirs=working_dirs,
+        )
 
         # Drop records that don't meet the minimum relevance threshold.
         min_score = agent_config["retrieval"]["min_composite_score"]
