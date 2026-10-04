@@ -6,13 +6,13 @@ These instructions are repository-level and apply to all agent work in this repo
 
 ## Canonical Context Sources
 
-1. Global instructions: `/Users/jm/Documents/github/agentdb/AGENTS.md`
-2. Superpowers plan (active/open work): `/Users/jm/Documents/github/agentdb/docs/superpowers/plans/2026-06-06-agentdb-revised.md`
-3. Completed work tracker: `/Users/jm/Documents/github/agentdb/docs/superpowers/plans/completed-tasks.md`
-4. Architecture & design principles: `/Users/jm/Documents/github/agentdb/docs/context/architecture-principles.md`
-5. Capabilities by type: `/Users/jm/Documents/github/agentdb/docs/context/capabilities.md`
-6. Database schema and memory assets: `/Users/jm/Documents/github/agentdb/docs/context/database-schema.md`
-7. Algorithm review skill (when touching ranking/reinforcement surfaces): `/Users/jm/Documents/github/agentdb/.claude/skills/agentdb-algorithm-review/SKILL.md`
+1. Global instructions: `AGENTS.md`
+2. Superpowers plan (active/open work): `docs/superpowers/plans/2026-06-06-agentdb-revised.md`
+3. Completed work tracker: `docs/superpowers/plans/completed-tasks.md`
+4. Architecture & design principles: `docs/context/architecture-principles.md`
+5. Capabilities by type: `docs/context/capabilities.md`
+6. Database schema and memory assets: `docs/context/database-schema.md`
+7. Algorithm review skill (when touching ranking/reinforcement surfaces): `.claude/skills/agentdb-algorithm-review/SKILL.md`
 
 If guidance conflicts, follow this file first, then the superpowers plan.
 
@@ -20,7 +20,7 @@ If guidance conflicts, follow this file first, then the superpowers plan.
 
 When changes touch algorithm-related surfaces (for example retrieval ranking, lifecycle reinforcement, retrieval/outcome flows in client, or corpus stats), run the repository skill at:
 
-- `/Users/jm/Documents/github/agentdb/.claude/skills/agentdb-algorithm-review/SKILL.md`
+- `.claude/skills/agentdb-algorithm-review/SKILL.md`
 
 ## Architecture Intent (Always-On)
 

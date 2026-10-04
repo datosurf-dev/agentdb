@@ -1,6 +1,6 @@
 # AgentDB Database Schema & Memory Assets
 
-This document describes what is actually persisted by AgentDB today — every table, its columns, and every on-disk memory asset outside the SQL tables — and how they interact. It reflects the code as of 2026-07-17 (see `docs/superpowers/plans/2026-06-06-agentdb-revised.md` → Current Status for what's built vs planned). Where a field or store is aspirational rather than implemented, that's called out explicitly.
+This document describes what is actually persisted by AgentDB today — every table, its columns, and every on-disk memory asset outside the SQL tables — and how they interact. It reflects the code as of 2026-10-04 (see `docs/superpowers/plans/2026-06-06-agentdb-revised.md` → Current Status for what's built vs planned). Where a field or store is aspirational rather than implemented, that's called out explicitly.
 
 ## Storage topology
 

@@ -153,7 +153,7 @@ These are the developer-facing surfaces you can use immediately in the current i
   - `lifecycle` — `run_sweep()`, `reinforce(record_id)`, `record_outcome(...)`
   - `gateway` — `subscribe(trigger, handler)`, `dispatch(trigger, ...)`, `conflict_queue()`, `propose(...)`, `approve(...)`, `reject(...)`, `list_proposals(...)`
   - `config` — returns the fully resolved config dict (mode defaults + yaml overrides)
-  - `skills_api` — `create_skill`, `update_skill_version`, `list_skills_for_agent`, `list_stale_skills_for_agent`, `list_skill_warnings_for_agent`
+  - `skills_api` — `create_skill`, `update_skill_version`, `get_skill`, `archive_skill`, `list_stale_skills_for_agent`, `list_skill_warnings_for_agent`
   - optional initialization: `tracking_directories`, `tracking_root`, `tracking_max_files_per_directory`, `infer_fn`, `memory_dir`
 - `AgentDBBackend` (`from agentdb.backend import AgentDBBackend`)
   - `read`, `write`, `delete`, `list`, `grep`, `glob`
