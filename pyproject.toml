@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "agentdb"
-version = "0.2.0"
+version = "0.1.0"
 description = "Governed memory layer for AI agents"
 readme = "README.md"
 license = {text = "AGPL-3.0"}
@@ -38,6 +38,7 @@ local-embed = ["sentence-transformers>=2.7,<4.0"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+pythonpath = ["."]
 python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
