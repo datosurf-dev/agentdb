@@ -163,28 +163,16 @@ class SkillStore:
         skill = _row_to_skill(rows[0])
         return skill
 
-    def _count_active_versions(self, skill_id: str) -> int:
-        with self._connect() as conn:
-            row = conn.execute(
-                "SELECT COUNT(*) FROM skills WHERE id = ? AND archived = 0",
-                (skill_id,),
-            ).fetchone()
-        return row[0] if row else 0
-
     def update(self, skill_id: str, content: str, new_version: str) -> Skill:
         """
         Create a new version of the skill with parent_skill_id=skill_id.
         Raises SkillConflict if more than one active version already exists.
+        The count check and INSERT run in the same transaction to avoid a
+        TOCTOU window between the guard and the write.
         """
         original = self.get(skill_id)
         if original is None:
             raise SkillStoreError(f"Skill '{skill_id}' not found")
-
-        if self._count_active_versions(skill_id) > 1:
-            raise SkillConflict(
-                f"Skill '{skill_id}' has unresolved active versions — "
-                f"archive or reconcile existing versions before updating"
-            )
 
         now = _utcnow()
         new_skill = Skill(
@@ -203,6 +191,15 @@ class SkillStore:
             parent_skill_id=skill_id,
         )
         with self._connect() as conn:
+            count = conn.execute(
+                "SELECT COUNT(*) FROM skills WHERE id = ? AND archived = 0",
+                (skill_id,),
+            ).fetchone()[0]
+            if count > 1:
+                raise SkillConflict(
+                    f"Skill '{skill_id}' has unresolved active versions — "
+                    f"archive or reconcile existing versions before updating"
+                )
             conn.execute(
                 """
                 INSERT INTO skills
@@ -338,6 +335,9 @@ class SkillStore:
             for word in words:
                 if word in name_lower or word in content_lower:
                     seen_ids.add(skill.id)
+                    new_health, reasons = _compute_health(skill)
+                    skill.health_score = new_health
+                    skill.health_score_reasons = reasons
                     results.append(skill)
                     break
         return results

@@ -112,6 +112,16 @@ def test_search_agent_id_filter(store):
     assert results[0].id == "s-a"
 
 
+def test_search_returns_computed_health_score_not_stored_value(store):
+    """search() must return the live health_score, not the stale stored value."""
+    stale = _skill(id="s-stale-search", name="old-skill", content="legacy content")
+    stale.created_at = stale.created_at - timedelta(days=65)
+    store.create(stale)
+    results = store.search("legacy")
+    assert len(results) == 1
+    assert results[0].health_score < 0.6  # stored value is 1.0; computed is < 0.6
+
+
 # --- SkillConflict ---
 
 def test_update_raises_skill_conflict_when_unresolved_versions_exist(store):
