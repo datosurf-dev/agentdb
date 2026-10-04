@@ -78,12 +78,12 @@ class EmbeddingStore:
 
     def _validate_or_reset(self) -> None:
         with self._connect() as conn:
-            row = conn.execute(
-                "SELECT value FROM metadata WHERE key = 'model_name'"
-            ).fetchone()
-            stored = row["value"] if row else None
+            rows = conn.execute(
+                "SELECT key, value FROM metadata WHERE key IN ('model_name', 'dimensions')"
+            ).fetchall()
+            meta = {r["key"]: r["value"] for r in rows}
 
-            if stored is None:
+            if not meta:
                 conn.execute(
                     "INSERT OR REPLACE INTO metadata (key, value) VALUES ('model_name', ?)",
                     (self._model_name,),
@@ -94,12 +94,24 @@ class EmbeddingStore:
                 )
                 return
 
-            if stored != self._model_name:
+            stored_name = meta.get("model_name")
+            stored_dims = int(meta.get("dimensions", "0"))
+            name_changed = stored_name != self._model_name
+            # Only treat dimensions as changed when both sides are known (non-zero)
+            dims_changed = (
+                self._dimensions != 0
+                and stored_dims != 0
+                and stored_dims != self._dimensions
+            )
+
+            if name_changed or dims_changed:
                 logger.warning(
-                    "agentdb: embedding model changed from '%s' to '%s' — "
+                    "agentdb: embedding config changed (model '%s'→'%s', dims %d→%d) — "
                     "wiping all stored embeddings; they will regenerate lazily.",
-                    stored,
+                    stored_name,
                     self._model_name,
+                    stored_dims,
+                    self._dimensions,
                 )
                 conn.execute("DELETE FROM embeddings")
                 conn.execute("DELETE FROM session_topics")

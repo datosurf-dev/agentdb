@@ -115,6 +115,18 @@ def test_same_model_reinit_preserves_embeddings(tmp_path):
     assert store2.get("memories", "r1") is not None
 
 
+def test_dimension_change_same_model_name_wipes_embeddings(tmp_path):
+    # Swapping FunctionEmbeddingProvider from 4-dim to 8-dim — both named "custom" —
+    # must wipe stored embeddings to prevent silently corrupt cosine math
+    db_path = tmp_path / "embeddings.db"
+    store1 = EmbeddingStore(db_path=db_path, model_name="custom", dimensions=4)
+    store1.put("memories", "r1", _vec(0, size=4), working_dirs=[])
+    assert store1.get("memories", "r1") is not None
+
+    store2 = EmbeddingStore(db_path=db_path, model_name="custom", dimensions=8)
+    assert store2.get("memories", "r1") is None  # wipe triggered on dim mismatch
+
+
 def test_upsert_overwrites_existing(tmp_path):
     store = _make_store(tmp_path)
     store.put("memories", "r1", _vec(0), working_dirs=[])
