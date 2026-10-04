@@ -47,16 +47,16 @@ class AgentDBBackend:
         self.db.delete(key, agent_id=self._agent_id, trust_zone=self._trust_zone)
 
     def list(self, prefix: str) -> list[str]:
-        """List all keys that start with prefix."""
-        all_records = self.db._store.list_all()
-        return [r.key for r in all_records if r.key.startswith(prefix)]
+        """List all keys that start with prefix, scoped to this agent."""
+        records = self.db._store.list_by_agent(self._agent_id)
+        return [r.key for r in records if r.key.startswith(prefix)]
 
     def grep(self, pattern: str, prefix: str = "") -> list[str]:
-        """Return keys whose values contain the given string pattern."""
-        all_records = self.db._store.list_all()
+        """Return keys whose values contain the given string pattern, scoped to this agent."""
+        records = self.db._store.list_by_agent(self._agent_id)
         results: list[str] = []
         pattern_lower = pattern.lower()
-        for record in all_records:
+        for record in records:
             if prefix and not record.key.startswith(prefix):
                 continue
             import json
@@ -70,6 +70,6 @@ class AgentDBBackend:
         return results
 
     def glob(self, pattern: str) -> list[str]:
-        """Return keys matching an fnmatch glob pattern."""
-        all_records = self.db._store.list_all()
-        return [r.key for r in all_records if fnmatch.fnmatch(r.key, pattern)]
+        """Return keys matching an fnmatch glob pattern, scoped to this agent."""
+        records = self.db._store.list_by_agent(self._agent_id)
+        return [r.key for r in records if fnmatch.fnmatch(r.key, pattern)]

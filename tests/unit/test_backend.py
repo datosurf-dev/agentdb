@@ -190,6 +190,46 @@ def test_glob_no_match_returns_empty(backend):
     assert backend.glob("memory/working/nonexistent_*") == []
 
 
+# --- per-agent scoping ---
+
+def test_list_scoped_to_agent(tmp_path):
+    from agentdb import AgentDB
+    from agentdb.backend import AgentDBBackend
+    db = AgentDB(path=tmp_path / "test.db")
+    agent_a = AgentDBBackend(agent_id="agent_a", trust_zone="agent_inferred", db=db)
+    agent_b = AgentDBBackend(agent_id="agent_b", trust_zone="agent_inferred", db=db)
+    agent_a.write("memory/working/a-key", "value-a")
+    agent_b.write("memory/working/b-key", "value-b")
+    assert agent_a.list("memory/working/") == ["memory/working/a-key"]
+    assert agent_b.list("memory/working/") == ["memory/working/b-key"]
+
+
+def test_grep_scoped_to_agent(tmp_path):
+    from agentdb import AgentDB
+    from agentdb.backend import AgentDBBackend
+    db = AgentDB(path=tmp_path / "test.db")
+    agent_a = AgentDBBackend(agent_id="agent_a", trust_zone="agent_inferred", db=db)
+    agent_b = AgentDBBackend(agent_id="agent_b", trust_zone="agent_inferred", db=db)
+    agent_a.write("memory/working/task", "shared pattern text")
+    agent_b.write("memory/working/task2", "shared pattern text")
+    result = agent_a.grep("pattern")
+    assert result == ["memory/working/task"]
+    assert len(result) == 1  # must not see agent_b's record
+
+
+def test_glob_scoped_to_agent(tmp_path):
+    from agentdb import AgentDB
+    from agentdb.backend import AgentDBBackend
+    db = AgentDB(path=tmp_path / "test.db")
+    agent_a = AgentDBBackend(agent_id="agent_a", trust_zone="agent_inferred", db=db)
+    agent_b = AgentDBBackend(agent_id="agent_b", trust_zone="agent_inferred", db=db)
+    agent_a.write("memory/working/x", "a-value")
+    agent_b.write("memory/working/y", "b-value")
+    assert agent_a.glob("memory/working/*") == ["memory/working/x"]
+    assert agent_b.glob("memory/working/*") == ["memory/working/y"]
+    assert len(agent_a.glob("memory/working/*")) == 1
+
+
 # --- unconfigured_agents ---
 
 from agentdb.governance.permission_router import PermissionRouter
