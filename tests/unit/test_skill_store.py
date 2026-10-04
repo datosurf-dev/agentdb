@@ -3,7 +3,7 @@ from datetime import timedelta
 import pytest
 
 from agentdb.core.models import Skill
-from agentdb.skills.skill_store import SkillStore, SkillStoreError
+from agentdb.skills.skill_store import SkillConflict, SkillStore, SkillStoreError
 
 
 def _skill(**kwargs) -> Skill:
@@ -70,3 +70,62 @@ def test_health_score_high_when_recently_retrieved_despite_old_creation(store):
     result = store.get_for_agent("research_agent")
     assert len(result) == 1
     assert result[0].health_score >= 0.9
+
+
+# --- search ---
+
+def test_search_by_name(store):
+    store.create(_skill(id="s-search", name="python-style", content="use type hints"))
+    results = store.search("python")
+    assert len(results) == 1
+    assert results[0].id == "s-search"
+
+
+def test_search_by_content(store):
+    store.create(_skill(id="s-content", name="writing-style", content="be concise and clear"))
+    results = store.search("concise")
+    assert len(results) == 1
+    assert results[0].id == "s-content"
+
+
+def test_search_case_insensitive(store):
+    store.create(_skill(id="s-case", name="Linting-rules", content="Run flake8 always"))
+    results = store.search("FLAKE8")
+    assert len(results) == 1
+
+
+def test_search_no_match_returns_empty(store):
+    store.create(_skill(id="s-nomatch", name="git-style", content="squash commits"))
+    assert store.search("nonexistent_keyword_xyz") == []
+
+
+def test_search_empty_query_returns_empty(store):
+    store.create(_skill(id="s-empty", name="some-skill", content="some content"))
+    assert store.search("") == []
+
+
+def test_search_agent_id_filter(store):
+    store.create(_skill(id="s-a", scope=["agent_a"], name="code-style", content="use black formatter"))
+    store.create(_skill(id="s-b", scope=["agent_b"], name="code-style-b", content="use black formatter"))
+    results = store.search("black", agent_id="agent_a")
+    assert len(results) == 1
+    assert results[0].id == "s-a"
+
+
+# --- SkillConflict ---
+
+def test_update_raises_skill_conflict_when_unresolved_versions_exist(store):
+    store.create(_skill(id="s-conflict", version="1.0.0"))
+    store.update("s-conflict", content="new content v2", new_version="2.0.0")
+    # Second update while v2 is active (v1 not archived) raises SkillConflict
+    with pytest.raises(SkillConflict):
+        store.update("s-conflict", content="new content v3", new_version="3.0.0")
+
+
+def test_update_allowed_after_archiving_previous_version(store):
+    store.create(_skill(id="s-ok", version="1.0.0"))
+    store.update("s-ok", content="v2 content", new_version="2.0.0")
+    store.archive("s-ok", "2.0.0")
+    # Only v1 active — update allowed
+    updated = store.update("s-ok", content="v3 content", new_version="3.0.0")
+    assert updated.version == "3.0.0"

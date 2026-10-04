@@ -14,6 +14,14 @@ class SkillStoreError(Exception):
     pass
 
 
+class SkillConflict(SkillStoreError):
+    """Raised when update() is called while multiple active versions exist.
+
+    Resolve or archive the existing active versions before adding a new one.
+    """
+    pass
+
+
 _CREATE_SKILLS_TABLE = """
 CREATE TABLE IF NOT EXISTS skills (
     id TEXT NOT NULL,
@@ -150,13 +158,28 @@ class SkillStore:
         skill = _row_to_skill(rows[0])
         return skill
 
+    def _count_active_versions(self, skill_id: str) -> int:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) FROM skills WHERE id = ? AND archived = 0",
+                (skill_id,),
+            ).fetchone()
+        return row[0] if row else 0
+
     def update(self, skill_id: str, content: str, new_version: str) -> Skill:
         """
         Create a new version of the skill with parent_skill_id=skill_id.
+        Raises SkillConflict if more than one active version already exists.
         """
         original = self.get(skill_id)
         if original is None:
             raise SkillStoreError(f"Skill '{skill_id}' not found")
+
+        if self._count_active_versions(skill_id) > 1:
+            raise SkillConflict(
+                f"Skill '{skill_id}' has unresolved active versions — "
+                f"archive or reconcile existing versions before updating"
+            )
 
         now = _utcnow()
         new_skill = Skill(
@@ -266,3 +289,35 @@ class SkillStore:
             if age_days > days:
                 stale.append(skill)
         return stale
+
+    def search(self, query: str, agent_id: Optional[str] = None) -> list[Skill]:
+        """Case-insensitive keyword search across skill name and content.
+
+        If agent_id is given, only returns skills where agent_id is in scope.
+        Returns [] for an empty query.
+        """
+        words = [w.lower() for w in query.split() if w]
+        if not words:
+            return []
+
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM skills WHERE archived = 0 ORDER BY created_at DESC"
+            ).fetchall()
+
+        seen_ids: set[str] = set()
+        results: list[Skill] = []
+        for row in rows:
+            skill = _row_to_skill(row)
+            if skill.id in seen_ids:
+                continue
+            if agent_id is not None and agent_id not in skill.scope:
+                continue
+            name_lower = skill.name.lower()
+            content_lower = skill.content.lower()
+            for word in words:
+                if word in name_lower or word in content_lower:
+                    seen_ids.add(skill.id)
+                    results.append(skill)
+                    break
+        return results
