@@ -33,6 +33,7 @@ Repository = "https://github.com/datosurf-dev/agentdb"
 [project.optional-dependencies]
 dev = ["pytest>=8.0", "pytest-asyncio>=0.23"]
 mcp = ["mcp>=1.0,<2.0"]
+local-embed = ["sentence-transformers>=2.7,<4.0"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
@@ -40,6 +41,9 @@ testpaths = ["tests"]
 python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
+markers = [
+    "slow: requires sentence-transformers model download (skip with -m 'not slow')",
+]
 
 [project.scripts]
 agentdb-mcp = "agentdb.interface.mcp_server:main"
