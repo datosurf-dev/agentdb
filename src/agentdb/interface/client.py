@@ -156,8 +156,27 @@ class AuditLog:
 # ---------------------------------------------------------------------------
 
 class SkillsAPI:
-    def __init__(self, skill_store: SkillStore) -> None:
+    def __init__(
+        self,
+        skill_store: SkillStore,
+        embedding_provider=None,
+        embedding_store=None,
+    ) -> None:
         self._store = skill_store
+        self._embedding_provider = embedding_provider
+        self._embedding_store = embedding_store
+
+    def _maybe_embed_skill(self, skill: Skill) -> None:
+        if self._embedding_provider is None or self._embedding_store is None:
+            return
+        try:
+            from ..embeddings.text import _embed_text_for_skill
+            vec = self._embedding_provider.embed(_embed_text_for_skill(skill))
+            self._embedding_store.put(
+                "skills", f"{skill.id}:{skill.version}", vec, working_dirs=[]
+            )
+        except Exception:
+            pass
 
     def create_skill(
         self,
@@ -173,16 +192,25 @@ class SkillsAPI:
             authored_by="human",
             scope=scope,
         )
-        return self._store.create(skill)
+        created = self._store.create(skill)
+        self._maybe_embed_skill(created)
+        return created
 
     def update_skill_version(self, skill_id: str, content: str, new_version: str) -> Skill:
-        return self._store.update(skill_id, content, new_version)
+        updated = self._store.update(skill_id, content, new_version)
+        self._maybe_embed_skill(updated)
+        return updated
 
     def get_skill(self, skill_id: str) -> Optional[Skill]:
         return self._store.get(skill_id)
 
     def archive_skill(self, skill_id: str, version: str) -> None:
         self._store.archive(skill_id, version)
+        if self._embedding_store is not None:
+            try:
+                self._embedding_store.delete("skills", f"{skill_id}:{version}")
+            except Exception:
+                pass
 
     def list_stale_skills_for_agent(self, agent_id: str) -> list[Skill]:
         return self._store.list_stale(agent_id)
@@ -345,6 +373,8 @@ class AgentDB:
         db_path: Optional[Any] = None,
         summarizer: Optional[Callable] = None,
         infer_fn: Optional[Callable] = None,
+        embed_fn: Optional[Callable] = None,
+        local_embed: bool = False,
     ) -> None:
         # db_path is an alias for path (used by adapter tests)
         if db_path is not None and path is None:
@@ -425,7 +455,6 @@ class AgentDB:
             self.gateway.dispatch("skill_stale", skill_id=skill_id)
 
         self.skills = SkillStore(db_path=skills_db_path, on_stale_crossing=_on_skill_stale)
-        self.skills_api = SkillsAPI(self.skills)
 
         # Initialize outcomes table
         self._init_outcomes_table()
@@ -461,32 +490,92 @@ class AgentDB:
         # Session tracking: session_id -> list of record ids retrieved
         self._session_record_ids: dict[str, list[str]] = {}
 
-        # Ranker with weights from resolved config
+        # Embedding layer (optional) — must be initialized before ranker
+        self._raw_embeddings_cfg: dict = (self.memory_config or {}).get("embeddings", {})
+        self._embedding_provider = None
+        self._embedding_store = None
+        if embed_fn is not None:
+            from ..embeddings import FunctionEmbeddingProvider, EmbeddingStore
+            self._embedding_provider = FunctionEmbeddingProvider(embed_fn)
+        elif local_embed:
+            from ..embeddings import LocalEmbeddingProvider, EmbeddingStore
+            self._embedding_provider = LocalEmbeddingProvider()
+        if self._embedding_provider is not None and str(self._path) != ":memory:":
+            from ..embeddings import EmbeddingStore
+            embed_db_path = self._path.parent / "embeddings.db"
+            self._embedding_store = EmbeddingStore(
+                db_path=embed_db_path,
+                model_name=self._embedding_provider.model_name,
+                dimensions=self._embedding_provider.dimensions,
+            )
+
+        # Skills API — created after embedding init so it receives embedding deps
+        self.skills_api = SkillsAPI(
+            self.skills,
+            embedding_provider=self._embedding_provider,
+            embedding_store=self._embedding_store,
+        )
+
+        # Ranker with weights from resolved config; semantic weight activated when provider present
+        self._ranker = self._build_ranker()
+
+        # Gateway surface (initialized after all dependencies are ready)
+        self._gateway: Optional[Gateway] = None
+
+        # Register session topic handler when embedding is active
+        if self._embedding_provider is not None:
+            self.gateway.subscribe("conversation_started", self._handle_conversation_started_embedding)
+
+        # Lifecycle manager — initialized after _session_record_ids is created
+        lc = self._resolved_config["lifecycle"]
+        self._lifecycle = LifecycleManager(
+            store=self._store,
+            system=self._system,
+            session_record_ids=self._session_record_ids,
+            embedding_store=self._embedding_store,
+            skill_store=self.skills,
+            confidence_decay_rate=lc["confidence_decay_rate"],
+            archival_threshold=lc["archival_threshold"],
+            staleness_days=lc["staleness_days"],
+            reinforce_rate=lc["reinforce_rate"],
+        )
+
+    def _build_ranker(self) -> "MultiSignalRanker":
         rw = self._resolved_config["retrieval"]["ranker_weights"]
         lc = self._resolved_config["lifecycle"]
-        self._ranker = MultiSignalRanker(
+        staleness = lc["staleness_days"]
+        if self._embedding_provider is not None:
+            w = float(self._raw_embeddings_cfg.get("semantic_ranker_weight", 0.20))
+            scale = 1.0 - w
+            return MultiSignalRanker(
+                weight_provenance=rw["provenance"] * scale,
+                weight_recency=rw["recency"] * scale,
+                weight_confidence=rw["confidence"] * scale,
+                weight_causal=rw["causal"] * scale,
+                weight_semantic=w,
+                weight_workspace=rw.get("workspace", 0.0) * scale,
+                staleness_days=staleness,
+            )
+        return MultiSignalRanker(
             weight_provenance=rw["provenance"],
             weight_recency=rw["recency"],
             weight_confidence=rw["confidence"],
             weight_causal=rw["causal"],
             weight_semantic=rw["semantic"],
             weight_workspace=rw.get("workspace", 0.0),
-            staleness_days=lc["staleness_days"],
+            staleness_days=staleness,
         )
 
-        # Gateway surface (initialized after all dependencies are ready)
-        self._gateway: Optional[Gateway] = None
-
-        # Lifecycle manager — initialized after _session_record_ids is created
-        self._lifecycle = LifecycleManager(
-            store=self._store,
-            system=self._system,
-            session_record_ids=self._session_record_ids,
-            confidence_decay_rate=lc["confidence_decay_rate"],
-            archival_threshold=lc["archival_threshold"],
-            staleness_days=lc["staleness_days"],
-            reinforce_rate=lc["reinforce_rate"],
-        )
+    def _handle_conversation_started_embedding(self, **kwargs) -> None:
+        session_id = kwargs.get("session_id")
+        opening_message = kwargs.get("opening_message", "")
+        if not session_id or not opening_message:
+            return
+        try:
+            vec = self._embedding_provider.embed(opening_message)
+            self._embedding_store.put_session_topic(session_id, vec)
+        except Exception:
+            pass
 
     @property
     def _reconciliation_handlers(self) -> dict[str, list[Callable]]:  # type: ignore[override]

@@ -293,6 +293,14 @@ class SkillStore:
                 (skill_id, version),
             )
 
+    def list_all_active_ids(self) -> list[str]:
+        """Return composite IDs 'id:version' for all non-archived skills."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT id, version FROM skills WHERE archived = 0"
+            ).fetchall()
+        return [f"{row['id']}:{row['version']}" for row in rows]
+
     def list_stale(self, agent_id: str, days: int = 30) -> list[Skill]:
         """Returns non-archived skills for agent_id that are older than `days`."""
         skills = self.get_for_agent(agent_id)
