@@ -188,3 +188,34 @@ def test_glob_matches_fnmatch_patterns(backend):
 
 def test_glob_no_match_returns_empty(backend):
     assert backend.glob("memory/working/nonexistent_*") == []
+
+
+# --- unconfigured_agents ---
+
+from agentdb.governance.permission_router import PermissionRouter
+
+_PERMS = Path(__file__).parent.parent / "fixtures" / "permissions.test.yaml"
+# permissions.test.yaml defines: research_agent, coder_agent, langgraph_agent
+
+
+def test_unconfigured_agents_returns_missing():
+    router = PermissionRouter(_PERMS)
+    result = router.unconfigured_agents(["research_agent", "new_bot", "another_bot"])
+    assert result == ["new_bot", "another_bot"]
+
+
+def test_unconfigured_agents_all_known():
+    router = PermissionRouter(_PERMS)
+    result = router.unconfigured_agents(["research_agent", "coder_agent"])
+    assert result == []
+
+
+def test_unconfigured_agents_empty_input():
+    router = PermissionRouter(_PERMS)
+    assert router.unconfigured_agents([]) == []
+
+
+def test_unconfigured_agents_all_unknown():
+    router = PermissionRouter(_PERMS)
+    result = router.unconfigured_agents(["bot_a", "bot_b"])
+    assert result == ["bot_a", "bot_b"]
