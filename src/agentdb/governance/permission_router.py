@@ -106,6 +106,14 @@ class PermissionRouter:
                 f"and default_policy is 'deny'"
             )
 
+    def unconfigured_agents(self, agent_ids: list[str]) -> list[str]:
+        """Return the subset of agent_ids that have no entry in this config.
+
+        Useful for pre-flight checks at startup: call with all known bot
+        identities and warn/fail if any are returned.
+        """
+        return [a for a in agent_ids if a not in self._agents]
+
     def check_read(self, key: str, agent_id: str) -> None:
         """
         Raises PermissionDenied if the agent is not allowed to read the key.

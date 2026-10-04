@@ -30,6 +30,8 @@ class LifecycleManager:
         store: MemoryStore,
         system: SystemStats,
         session_record_ids: dict | None = None,
+        embedding_store=None,
+        skill_store=None,
         confidence_decay_rate: float | None = None,
         archival_threshold: float | None = None,
         staleness_days: int | None = None,
@@ -40,6 +42,8 @@ class LifecycleManager:
         self._session_record_ids: dict[str, list[str]] = (
             session_record_ids if session_record_ids is not None else {}
         )
+        self._embedding_store = embedding_store
+        self._skill_store = skill_store
         cls = type(self)
         self.CONFIDENCE_DECAY_RATE = confidence_decay_rate if confidence_decay_rate is not None else cls.CONFIDENCE_DECAY_RATE
         self.ARCHIVAL_THRESHOLD = archival_threshold if archival_threshold is not None else cls.ARCHIVAL_THRESHOLD
@@ -125,6 +129,15 @@ class LifecycleManager:
             if days_since >= self.STALENESS_DAYS:
                 self._store.archive_record(record.id)
                 archived_ids.add(record.id)
+
+        # Embedding orphan cleanup
+        if self._embedding_store is not None:
+            active_memory_ids = [r.id for r in self._store.list_all()]
+            self._embedding_store.prune_orphans("memories", active_memory_ids)
+
+            if self._skill_store is not None:
+                active_skill_ids = self._skill_store.list_all_active_ids()
+                self._embedding_store.prune_orphans("skills", active_skill_ids)
 
         return {"decayed": decayed, "archived": len(archived_ids)}
 

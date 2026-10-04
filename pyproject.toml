@@ -3,7 +3,7 @@ requires = ["setuptools>=45", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "agentdb"
+name = "agentdatabase"
 version = "0.1.0"
 description = "Governed memory layer for AI agents"
 readme = "README.md"
@@ -11,6 +11,7 @@ license = {text = "AGPL-3.0"}
 authors = [{name = "DatoSurf", email = "team@datosurf.com"}]
 keywords = ["ai", "agents", "memory", "llm", "rag", "context"]
 classifiers = [
+    "Development Status :: 3 - Alpha",
     "License :: OSI Approved :: GNU Affero General Public License v3",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.11",
@@ -24,16 +25,26 @@ dependencies = [
     "pyyaml>=6.0",
 ]
 
+[project.urls]
+Homepage = "https://github.com/datosurf-dev/agentdb"
+Repository = "https://github.com/datosurf-dev/agentdb"
+"Bug Tracker" = "https://github.com/datosurf-dev/agentdb/issues"
+
 [project.optional-dependencies]
 dev = ["pytest>=8.0", "pytest-asyncio>=0.23"]
 mcp = ["mcp>=1.0,<2.0"]
+local-embed = ["sentence-transformers>=2.7,<4.0"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+pythonpath = ["."]
 python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
+markers = [
+    "slow: requires sentence-transformers model download (skip with -m 'not slow')",
+]
 
 [project.scripts]
 agentdb-mcp = "agentdb.interface.mcp_server:main"

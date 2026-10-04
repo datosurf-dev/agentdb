@@ -61,3 +61,43 @@ class ConflictDetector:
             )
 
         return None
+
+    @staticmethod
+    def check_semantic_batch(
+        new_record: "MemoryRecord",
+        candidates: list,
+        embedding_store,
+        threshold: float = 0.92,
+    ) -> list:
+        """
+        Returns ConflictRecords for any candidate with cosine(new, candidate) >= threshold.
+        Caps at 50 candidates. Skips if embedding_store is None or new_record has no embedding.
+        """
+        if embedding_store is None:
+            return []
+
+        new_vec = embedding_store.get("memories", new_record.id)
+        if new_vec is None:
+            return []
+
+        from ..embeddings.provider import _cosine
+
+        capped = [c for c in candidates if c.id != new_record.id][:50]
+        if not capped:
+            return []
+
+        candidate_ids = [c.id for c in capped]
+        stored = embedding_store.get_batch("memories", candidate_ids)
+
+        conflicts = []
+        for candidate in capped:
+            c_vec = stored.get(candidate.id)
+            if c_vec is None:
+                continue
+            if _cosine(new_vec, c_vec) >= threshold:
+                conflicts.append(ConflictRecord(
+                    record_a_id=candidate.id,
+                    record_b_id=new_record.id,
+                    conflict_type="semantic",
+                ))
+        return conflicts
