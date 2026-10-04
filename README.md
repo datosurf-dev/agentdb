@@ -16,7 +16,7 @@ The full architecture pitch and the numbered design principles live in one canon
 - Plan (active/open work): `/agentdb/docs/superpowers/plans/2026-06-06-agentdb-revised.md`
 - Completed work tracker: `/agentdb/docs/superpowers/plans/completed-tasks.md`
 
-## Current Repository Status (As Of 2026-07-17)
+## Current Repository Status (As Of 2026-10-04)
 
 Core governed memory loop is fully operational: real conflict detection, budgeted retrieval, lifecycle management, centralized config + profiles, MCP server (stdio/Claude Desktop), and two adapters (Claude SDK + Hermes) are all shipped and test-covered. Phase 3 (embeddings/semantic search) is deliberately deferred until the loop proves its value in production. Provider ingestors (Phase 6) and additional framework adapters (Phase 4 Task 15) remain pending.
 
@@ -69,8 +69,7 @@ Core governed memory loop is fully operational: real conflict detection, budgete
 
 Validation status:
 - Editable install and package-style imports are validated via `pip install -e '.[dev]'`.
-- `python -m pytest -q tests/unit tests/integration/test_claude_agent_sdk_adapter.py` → 168 passed.
-- Plain `python -m pytest -q` (no path filter) currently **fails collection** with 6 `ModuleNotFoundError`s, one per adapter that doesn't exist yet (`autogen`, `crewai`, `deepagents`, `google_adk`, `langgraph`, `openai_agents`). This isn't a regression to fix — it's expected until those adapters are built (or their test files are skip-marked).
+- `python -m pytest -q` → 277 passed.
 
 The rest of this README describes architecture intent and phased roadmap behavior.
 
@@ -329,7 +328,6 @@ A health score below 0.6 surfaces a staleness warning in every retrieval result.
 **Planned, not yet implemented:**
 - Unresolved conflicts linked to the skill (no conflict linkage exists on skills yet)
 - A newer version that hasn't been promoted
-- A `search()` method and `SkillConflict` exception
 
 **Current limitation (Phase 2):** Entity drift detection is keyword-based — a skill that uses a synonym for a deprecated entity will not be flagged. Semantic entity matching is Phase 5 scope. This limitation is documented in LIMITATIONS.md.
 

@@ -1,4 +1,5 @@
 .superpowers/sdd/
+docs/superpowers/plans/
 # Python bytecode and cache directories
 __pycache__/
 *.py[cod]
