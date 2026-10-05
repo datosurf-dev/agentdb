@@ -399,3 +399,48 @@ class SkillStore:
                     results.append(skill)
                     break
         return results
+
+    # ------------------------------------------------------------------
+    # Lock primitives (optimistic, advisory)
+    # ------------------------------------------------------------------
+
+    def has_version(self, skill_id: str, version: str) -> bool:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM skills WHERE id = ? AND version = ?",
+                (skill_id, version),
+            ).fetchone()
+        return row is not None
+
+    def acquire_lock(self, skill_id: str, duration_seconds: int = 3600) -> bool:
+        now = _utcnow()
+        locked_until = (now + timedelta(seconds=duration_seconds)).isoformat()
+        with self._connect() as conn:
+            conn.execute(
+                "DELETE FROM skill_locks WHERE skill_id = ? AND locked_until <= ?",
+                (skill_id, now.isoformat()),
+            )
+            try:
+                conn.execute(
+                    "INSERT INTO skill_locks (skill_id, locked_until) VALUES (?, ?)",
+                    (skill_id, locked_until),
+                )
+                return True
+            except sqlite3.IntegrityError:
+                return False
+
+    def release_lock(self, skill_id: str) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                "DELETE FROM skill_locks WHERE skill_id = ?",
+                (skill_id,),
+            )
+
+    def is_locked(self, skill_id: str) -> bool:
+        now = _utcnow()
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM skill_locks WHERE skill_id = ? AND locked_until > ?",
+                (skill_id, now.isoformat()),
+            ).fetchone()
+        return row is not None
