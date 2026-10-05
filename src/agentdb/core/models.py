@@ -88,3 +88,6 @@ class Skill:
     updated_at: datetime = field(default_factory=_utcnow)
     last_retrieved: Optional[datetime] = None
     parent_skill_id: Optional[str] = None
+    origin: str = "human"
+    validation_score: Optional[float] = None
+    metadata: dict = field(default_factory=dict)

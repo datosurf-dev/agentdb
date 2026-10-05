@@ -41,12 +41,29 @@ CREATE TABLE IF NOT EXISTS skills (
 )
 """
 
+_CREATE_SKILL_LOCKS_TABLE = """
+CREATE TABLE IF NOT EXISTS skill_locks (
+    skill_id TEXT PRIMARY KEY,
+    locked_until TEXT NOT NULL
+)
+"""
+
+_MIGRATION_STMTS = [
+    "ALTER TABLE skills ADD COLUMN origin TEXT NOT NULL DEFAULT 'human'",
+    "ALTER TABLE skills ADD COLUMN validation_score REAL",
+    "ALTER TABLE skills ADD COLUMN metadata TEXT",
+]
+
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
 def _row_to_skill(row: sqlite3.Row) -> Skill:
+    try:
+        metadata = json.loads(row["metadata"] or "{}")
+    except (json.JSONDecodeError, TypeError):
+        metadata = {}
     return Skill(
         id=row["id"],
         name=row["name"],
@@ -61,25 +78,33 @@ def _row_to_skill(row: sqlite3.Row) -> Skill:
         updated_at=datetime.fromisoformat(row["updated_at"]),
         last_retrieved=datetime.fromisoformat(row["last_retrieved"]) if row["last_retrieved"] else None,
         parent_skill_id=row["parent_skill_id"],
+        origin=row["origin"] or "human",
+        validation_score=row["validation_score"],
+        metadata=metadata,
     )
 
 
+_ALPHA = 0.4
+
+
 def _compute_health(skill: Skill) -> tuple[float, list[str]]:
-    """Compute health score based on staleness since last retrieval (or
-    creation, for a skill that has never been retrieved)."""
+    """Compute health score based on staleness and optional validation score."""
     now = _utcnow()
     reference = skill.last_retrieved or skill.created_at
     if reference.tzinfo is None:
         reference = reference.replace(tzinfo=timezone.utc)
     age_days = (now - reference).days
-    health_score = 1.0
+    usage_score = 1.0
     reasons: list[str] = []
     if age_days > 30:
-        # Decay formula: steeper than linear to ensure > 45 days gives health < 0.6
-        # max(0.1, 1.0 - (age_days - 30) * 0.03)
-        health_score = max(0.1, 1.0 - (age_days - 30) * 0.03)
+        usage_score = max(0.1, 1.0 - (age_days - 30) * 0.03)
         reasons.append("staleness")
-    return health_score, reasons
+    if skill.validation_score is not None:
+        health = _ALPHA * skill.validation_score + (1 - _ALPHA) * usage_score
+        reasons.append("validation_blended")
+    else:
+        health = usage_score
+    return health, reasons
 
 
 class SkillStore:
@@ -93,6 +118,12 @@ class SkillStore:
         self.on_stale_crossing = on_stale_crossing
         with self._connect() as conn:
             conn.execute(_CREATE_SKILLS_TABLE)
+            conn.execute(_CREATE_SKILL_LOCKS_TABLE)
+            for stmt in _MIGRATION_STMTS:
+                try:
+                    conn.execute(stmt)
+                except sqlite3.OperationalError:
+                    pass  # column already exists
 
     @contextmanager
     def _connect(self):
@@ -119,8 +150,9 @@ class SkillStore:
                 INSERT INTO skills
                     (id, name, content, authored_by, scope, version, archived,
                      health_score, health_score_reasons, created_at, updated_at,
-                     last_retrieved, parent_skill_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     last_retrieved, parent_skill_id,
+                     origin, validation_score, metadata)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     skill.id,
@@ -136,6 +168,9 @@ class SkillStore:
                     skill.updated_at.isoformat(),
                     skill.last_retrieved.isoformat() if skill.last_retrieved else None,
                     skill.parent_skill_id,
+                    skill.origin,
+                    skill.validation_score,
+                    json.dumps(skill.metadata),
                 ),
             )
         return skill
@@ -163,7 +198,15 @@ class SkillStore:
         skill = _row_to_skill(rows[0])
         return skill
 
-    def update(self, skill_id: str, content: str, new_version: str) -> Skill:
+    def update(
+        self,
+        skill_id: str,
+        content: str,
+        new_version: str,
+        origin: str = "human",
+        validation_score: Optional[float] = None,
+        metadata: Optional[dict] = None,
+    ) -> Skill:
         """
         Create a new version of the skill with parent_skill_id=skill_id.
         Raises SkillConflict if more than one active version already exists.
@@ -189,6 +232,9 @@ class SkillStore:
             updated_at=now,
             last_retrieved=None,
             parent_skill_id=skill_id,
+            origin=origin,
+            validation_score=validation_score,
+            metadata=metadata or {},
         )
         with self._connect() as conn:
             count = conn.execute(
@@ -205,8 +251,9 @@ class SkillStore:
                 INSERT INTO skills
                     (id, name, content, authored_by, scope, version, archived,
                      health_score, health_score_reasons, created_at, updated_at,
-                     last_retrieved, parent_skill_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     last_retrieved, parent_skill_id,
+                     origin, validation_score, metadata)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     new_skill.id,
@@ -222,6 +269,9 @@ class SkillStore:
                     new_skill.updated_at.isoformat(),
                     None,
                     new_skill.parent_skill_id,
+                    new_skill.origin,
+                    new_skill.validation_score,
+                    json.dumps(new_skill.metadata),
                 ),
             )
         return new_skill

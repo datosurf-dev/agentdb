@@ -184,6 +184,9 @@ class SkillsAPI:
         name: str,
         content: str,
         scope: list[str],
+        origin: str = "human",
+        validation_score: Optional[float] = None,
+        metadata: Optional[dict] = None,
     ) -> Skill:
         skill = Skill(
             id=skill_id,
@@ -191,13 +194,29 @@ class SkillsAPI:
             content=content,
             authored_by="human",
             scope=scope,
+            origin=origin,
+            validation_score=validation_score,
+            metadata=metadata or {},
         )
         created = self._store.create(skill)
         self._maybe_embed_skill(created)
         return created
 
-    def update_skill_version(self, skill_id: str, content: str, new_version: str) -> Skill:
-        updated = self._store.update(skill_id, content, new_version)
+    def update_skill_version(
+        self,
+        skill_id: str,
+        content: str,
+        new_version: str,
+        origin: str = "human",
+        validation_score: Optional[float] = None,
+        metadata: Optional[dict] = None,
+    ) -> Skill:
+        updated = self._store.update(
+            skill_id, content, new_version,
+            origin=origin,
+            validation_score=validation_score,
+            metadata=metadata,
+        )
         self._maybe_embed_skill(updated)
         return updated
 
