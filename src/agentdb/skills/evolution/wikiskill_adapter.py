@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Optional
 
+from ..skill_store import SkillLockConflict
+
 if TYPE_CHECKING:
     from ...interface.client import AgentDB
     from ...core.models import Skill
@@ -67,6 +69,10 @@ class WikiSkillAdapter:
 
         if action == "patch":
             skill_name = proposal["skill_name"]
+            if self._db.skills.is_locked(skill_name):
+                raise SkillLockConflict(
+                    f"Skill '{skill_name}' is held by an advisory lock; concurrent modification prevented."
+                )
             skill = self._db.skills_api.update_skill_version(
                 skill_id=skill_name,
                 content=proposal["new_content"],

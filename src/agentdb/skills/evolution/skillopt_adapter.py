@@ -4,6 +4,8 @@ import json
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional, Union
 
+from ..skill_store import SkillLockConflict
+
 if TYPE_CHECKING:
     from ...interface.client import AgentDB
     from ...core.models import Skill
@@ -114,7 +116,9 @@ class SkillOptAdapter:
         """
         out_root = Path(out_root)
         if not self._db.skills.acquire_lock(skill_id):
-            return None
+            raise SkillLockConflict(
+                f"Skill '{skill_id}' is held by an advisory lock; concurrent run_and_push prevented."
+            )
 
         skill = self._db.skills_api.get_skill(skill_id)
         init_content = skill.content if skill is not None else ""

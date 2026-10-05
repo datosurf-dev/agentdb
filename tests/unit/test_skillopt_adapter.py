@@ -2,6 +2,7 @@ import json
 import pytest
 from agentdb import AgentDB
 from agentdb.skills.evolution.skillopt_adapter import SkillOptAdapter
+from agentdb.skills.skill_store import SkillLockConflict
 
 
 def _adapter(tmp_path):
@@ -118,3 +119,13 @@ def test_run_and_push_releases_lock_even_on_subprocess_error(tmp_path):
         adapter.run_and_push("my-skill", config={}, out_root=out_root)
 
     assert not db.skills.is_locked("my-skill")
+
+
+def test_run_and_push_raises_on_lock_contention(tmp_path):
+    # Final fix #2: callers must be able to distinguish lock-held from gate-rejected
+    adapter, db = _adapter(tmp_path)
+    db.skills_api.create_skill("my-skill", "My Skill", "original.", scope=["a1"])
+    db.skills.acquire_lock("my-skill", duration_seconds=3600)
+
+    with pytest.raises(SkillLockConflict):
+        adapter.run_and_push("my-skill", config={}, out_root=tmp_path / "run")

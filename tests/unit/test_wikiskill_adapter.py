@@ -1,6 +1,7 @@
 import pytest
 from agentdb import AgentDB
 from agentdb.skills.evolution.wikiskill_adapter import WikiSkillAdapter
+from agentdb.skills.skill_store import SkillLockConflict
 
 
 def _adapter(tmp_path, agent_id="a1"):
@@ -136,3 +137,19 @@ def test_restore_archives_skills_created_during_iteration(tmp_path):
     })
     adapter.restore(snap)
     assert adapter.list_skills() == []
+
+
+def test_apply_proposal_raises_on_locked_skill(tmp_path):
+    # Final fix #1: apply_proposal must check is_locked before patching
+    adapter, db = _adapter(tmp_path)
+    db.skills_api.create_skill("debug", "Debugging", "v1 content.", scope=["a1"])
+    db.skills.acquire_lock("debug", duration_seconds=3600)
+
+    with pytest.raises(SkillLockConflict):
+        adapter.apply_proposal({
+            "action": "patch",
+            "skill_name": "debug",
+            "new_content": "candidate.",
+            "new_version": "1.1.0",
+            "validation_score": None,
+        })

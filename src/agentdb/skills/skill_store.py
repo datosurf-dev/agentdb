@@ -22,6 +22,11 @@ class SkillConflict(SkillStoreError):
     pass
 
 
+class SkillLockConflict(SkillStoreError):
+    """Raised when a write is attempted on a skill held by an advisory lock."""
+    pass
+
+
 _CREATE_SKILLS_TABLE = """
 CREATE TABLE IF NOT EXISTS skills (
     id TEXT NOT NULL,
