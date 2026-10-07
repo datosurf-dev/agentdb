@@ -1,8 +1,8 @@
 # AgentDB
 
-**A governed memory layer that keeps agent memory actionable.**
+**An arbitration layer between agent inference and human intent.**
 
-AgentDB is designed to improve agent behavior without becoming another layer of operational overhead. It governs what memory is trusted, keeps relevant memory assets in sync, and injects the right context or instructions when an agent is about to act. Every write is validated before it lands. Every read returns a governed context package. The boundary is enforced at the memory layer — not by convention, not by prompt instructions, not by hoping agents behave.
+AgentDB governs what agents remember, what they're allowed to write, and when their inferences conflict with what humans have explicitly decided. It enforces a trust hierarchy at write time, provenance-weights recall at read time, and tracks versioned human instructions (skills) that agents cannot silently overwrite. Every write is validated before it lands. Every read returns a governed context package. The boundary is enforced at the memory layer — not by convention, not by prompt instructions, not by hoping agents behave.
 
 > Every other memory product stores context. AgentDB governs it.
 
@@ -49,8 +49,8 @@ Core governed memory loop is fully operational: real conflict detection, budgete
 
 | Feature area | State | Notes |
 |---|---|---|
-| Algorithm + skills blend for action quality | Implemented (initial) | Retrieval ranks memory; governed skills add maintained guidance during retrieval results. |
-| Skills store + health warnings | Implemented | Versioned skills, staleness-based health scoring, warnings on retrieve. |
+| Algorithm + skills complement | Implemented (initial) | Retrieval ranks memory records by provenance, recency, confidence, and causal signals. Skills are tracked database objects for conflict detection and staleness signalling — they are NOT injected into agent context. |
+| Skills store + staleness signalling | Implemented | Versioned skills, staleness-based health scoring anchored on `updated_at` (content age). Stale-crossing fires `on_stale_crossing` callback; check warnings via `db.skills_api.list_skill_warnings_for_agent()`. |
 | System stats surface | Implemented (initial) | Includes retrieval/outcome/conflict-rate aggregates. |
 | Entity-aware retrieval core (`entities`, `retrieve_by_entities`) | Implemented (initial) | Additive entity tagging and keyword-based entity retrieval are available in core. |
 | Provider ingestors (Anthropic/OpenAI/Google sync) | Planned (Phase 3) | Architecture intent documented; module surface pending. Deliberately deferred — validating core loop with Claude SDK + Hermes in production first. |
@@ -315,15 +315,17 @@ db.skills_api.create_skill(
 # authored_by is always "human" — SkillsAPI.create_skill() sets it, there's no way to pass agent-authored skills in.
 
 # 45 days later — schema changed, skill not updated:
-result = db.retrieve(query="revenue breakdown", agent_id="analytics_agent")
-result.skill_warnings
+warnings = db.skills_api.list_skill_warnings_for_agent("analytics_agent")
 # → ["Skill 'analytics-schema-v1' is stale (health_score=0.42)"]
+
+# Skills are not injected into retrieve() — they are governance objects.
+# Use the warning signal to trigger a skill review workflow.
 ```
 
-A health score below 0.6 surfaces a staleness warning in every retrieval result. The agent sees the warning before acting on the skill content.
+A health score below 0.6 triggers a staleness warning surfaced via `db.skills_api.list_skill_warnings_for_agent()` and dispatched via the `on_stale_crossing` callback (wired to `db.gateway` for async consumers). Skills are tracked database objects — they are not injected into agent context, and `RetrievalResult` carries no skill fields.
 
 **What degrades the health score today:**
-- Days since last retrieval (staleness decay, half-life 30 days) — the only implemented factor
+- Days since `updated_at` (when skill content last changed), half-life 30 days — the only implemented factor
 
 **Planned, not yet implemented:**
 - Unresolved conflicts linked to the skill (no conflict linkage exists on skills yet)
@@ -337,17 +339,17 @@ A health score below 0.6 surfaces a staleness warning in every retrieval result.
 
 The retrieval algorithm and the governed skills system are one foundation, not two unrelated features.
 
-- The algorithm answers: which memories or instructions are most relevant to the action the agent is about to take?
-- Skills answer: which durable guidance should the agent trust when that action happens?
+- The algorithm answers: which memory records are most relevant to the action the agent is about to take?
+- Skills answer: is the agent's current inference in conflict with what humans have explicitly decided — and is that guidance still current?
 
 In practice, AgentDB is strongest when these work together:
 
 1. memory records capture facts, context, prior outcomes, and relevant assets
 2. the ranking algorithm decides what matters now
-3. skills add governed, maintained instructions on top of those facts
-4. the runtime injects both as compact action-ready context
+3. skills provide the authoritative baseline for detecting when agent behavior drifts from human intent
+4. the runtime injects governed memory records as compact action-ready context; skills govern from outside the injection path
 
-That blend is the development foundation for AgentDB. The goal is not to accumulate more memory artifacts. The goal is to turn memory into better decisions, fewer conflicting instructions, and more accurate actions.
+That is the arbitration contract. The goal is not to accumulate more memory artifacts. The goal is to ensure that when an agent acts, its memory reflects what humans actually intend — and that conflicts and drift are surfaced before they cause harm.
 
 ---
 
@@ -662,7 +664,7 @@ Agents not listed are denied all writes (`default_policy: deny`). Wildcard match
 | Confidence decay | Agent-inferred memory, configurable rate (off by default) | Score reduced per sweep cycle | **Implemented** (off by default — ranking already applies recency decay at read time, making stored decay often redundant) |
 | Staleness archival | Not retrieved within `staleness_days` (default 90) | Archived, excluded from retrieval | **Implemented** |
 | Confidence threshold | Record confidence falls below `archival_threshold` (default 0.10) | Archived | **Implemented** |
-| Skill staleness | Skill health score below 0.6 | Warning surfaced in retrieval; skill not archived automatically | **Implemented** |
+| Skill staleness | Skill health score crosses below 0.6 (anchored on `updated_at`) | `on_stale_crossing` callback fires once; warning surfaced via `db.skills_api.list_skill_warnings_for_agent()`; skill not archived automatically | **Implemented** (`skill_stale` 12b gateway dispatch pending) |
 | Reinforcement | Positive outcome signal | Confidence boosted, decay clock reset | **Implemented** via `db.lifecycle.reinforce(record_id)` and `db.lifecycle.record_outcome(...)` |
 | Human revocation | Explicit SDK delete | Archived with audit-log entry; history preserved | **Implemented** via `AgentDB.delete()` |
 
