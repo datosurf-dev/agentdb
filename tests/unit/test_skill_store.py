@@ -54,7 +54,8 @@ def test_get_for_agent_filters_scope(store):
 
 def test_health_score_degrades_for_stale_skill(store):
     stale_skill = _skill()
-    stale_skill.created_at = stale_skill.created_at - timedelta(days=45)
+    # Staleness is anchored on updated_at (content age), not created_at or last_retrieved.
+    stale_skill.updated_at = stale_skill.updated_at - timedelta(days=45)
     store.create(stale_skill)
     result = store.get_for_agent("research_agent")
     assert len(result) == 1
@@ -62,10 +63,11 @@ def test_health_score_degrades_for_stale_skill(store):
     assert any("staleness" in reason for reason in result[0].health_score_reasons)
 
 
-def test_health_score_high_when_recently_retrieved_despite_old_creation(store):
+def test_health_score_high_when_content_recently_updated(store):
+    """Health is high when updated_at is recent, regardless of created_at age."""
     skill = _skill()
     skill.created_at = skill.created_at - timedelta(days=45)
-    skill.last_retrieved = skill.created_at + timedelta(days=44)
+    # updated_at stays at default (now) — content is current even if skill was created long ago
     store.create(skill)
     result = store.get_for_agent("research_agent")
     assert len(result) == 1
@@ -115,7 +117,7 @@ def test_search_agent_id_filter(store):
 def test_search_returns_computed_health_score_not_stored_value(store):
     """search() must return the live health_score, not the stale stored value."""
     stale = _skill(id="s-stale-search", name="old-skill", content="legacy content")
-    stale.created_at = stale.created_at - timedelta(days=65)
+    stale.updated_at = stale.updated_at - timedelta(days=65)
     store.create(stale)
     results = store.search("legacy")
     assert len(results) == 1
@@ -149,7 +151,7 @@ def test_stale_crossing_callback_fires_once(store):
     store.on_stale_crossing = crossed_ids.append
 
     stale_skill = _skill(id="s-stale-cb")
-    stale_skill.created_at = stale_skill.created_at - timedelta(days=65)
+    stale_skill.updated_at = stale_skill.updated_at - timedelta(days=65)
     store.create(stale_skill)
 
     # First retrieve: computed health < 0.6, stored was 1.0 → crossing detected

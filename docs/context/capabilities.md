@@ -25,13 +25,13 @@ Every capability tagged **Dual** below shares one shape: the detection logic (co
 | Conflict detection | Reconcile | **Dual — the clearest example** | Implemented (temporal + authority) | Wired into `write()` via `ConflictDetector`. Temporal conflicts auto-resolve by recency; authority conflicts flag the record and populate `override_instructions` on retrieve. `conflict_detected` dispatched via `db.gateway.dispatch`. Semantic conflict detection deferred to Phase 3 (embeddings). |
 | External-context conflict check | Reconcile | 12a only | Implemented | Returned synchronously to the calling `retrieve()`; no 12b consumer today |
 | Reconciliation triggers | Reconcile | `conversation_started` = 12a; `conflict_detected` = 12a→12b; `file_modified`/`cron` = 12b | Partial | `conversation_started` fires from both adapters at turn start. `conflict_detected` dispatched by `write()` via `db.gateway`. `file_modified`/`cron` remain unwired. |
-| Skill health/staleness | Reconcile | **Dual** | 12a implemented, 12b missing | Recomputed fresh at every retrieve (already 12a); crossing the 0.6 threshold should also dispatch a `skill_stale` trigger — today it only ever surfaces as a warning string to whichever agent happens to retrieve |
+| Skill health/staleness | Reconcile | **Dual** | 12a implemented, 12b missing | Health score anchored on `updated_at` (content age) — staleness reflects when skill content last changed, not when it was last retrieved. Crossing the 0.6 threshold dispatches `on_stale_crossing` (12a); a `skill_stale` 12b dispatch to the gateway still missing. Skills are NOT injected into agent context — staleness is purely a governance/reconciliation signal. |
 | Lifecycle Manager | Reconcile | 12b | Implemented (`db.lifecycle`) | `run_sweep()`: Step 0 expires TTL records; Step 1 optional confidence decay; Step 2 archives below threshold; Step 3 archives past staleness. `reinforce()` and `record_outcome()` also on `db.lifecycle`. `human_approved` immune to all. |
 | Notifier dispatcher (`db.gateway.subscribe`/`dispatch`) | Reconcile | **Is** the 12b mechanism | Implemented | The core capability behind every 12b row. Formerly `register_reconciliation_handler`/`dispatch_reconciliation_trigger` (pass-through aliases still work). Not MCP-specific, not durable — see Principle 7. |
 | MultiSignalRanker | Rank | 12a | Implemented | |
 | Entity-aware retrieval | Rank | 12a | Implemented | |
 | Provider ingestors | Rank | Ingest feeds 12a for free; a sync-caused conflict could dispatch 12b | Missing (Phase 6) | |
-| `prepare_turn` / `pre_tool_use` | Inject | 12a | Implemented | |
+| `prepare_turn` / `pre_tool_use` | Inject | 12a | Implemented | Injects governed **memory records** only. Skills are not injected — they are tracked database objects for conflict detection, not context augmentation. |
 | MCP server | Inject | `memory_write`/`memory_retrieve` = transport over 12a; `conflict_queue` = transport over 12b | Implemented (stdio, Task 14) | `interface/mcp_server.py`, 4 tools, `agentdb-mcp` console script. HTTP+SSE deferred. |
 | Skill draft reconciliation pipeline (Task 13) | Reconcile | **Dual** — propose/metric-triggers = 12b; approve/reject = write-time governance | Missing (Phase 3) | Depends on Task 12 (semantic conflict detection) → Task 11 (embeddings). `SkillStore.update()` governance fix can ship independently. |
 
@@ -39,7 +39,8 @@ Every capability tagged **Dual** below shares one shape: the detection logic (co
 
 The core loop is operational. Remaining gaps in 12b coverage:
 
-1. **Skill staleness** dispatching a `skill_stale` trigger the first time a skill crosses the 0.6 threshold — needs a "did this just cross" check, not "is this below," to avoid firing on every retrieve. Any consumer then registers via `db.gateway.subscribe("skill_stale", handler)`.
-2. **Phase 3** (embeddings) unlocks semantic conflict detection and Task 13's skill draft reconciliation pipeline — both correctly gated behind embeddings being active.
+1. **Skill staleness dispatch** — `on_stale_crossing` fires in `get_for_agent()` when health first crosses 0.6 (12a), but no `db.gateway.dispatch("skill_stale", ...)` call exists there yet. Adding it would give any registered consumer (Slack notifier, human review queue) a signal without polling.
+2. **Skill–memory conflict signal** — when a write lands with agent-inferred content that conflicts with a skill's domain, agentdb should dispatch `skill_review_needed`. Phase 1 (key/entity overlap) can approximate this; full semantic comparison requires Phase 3 embeddings.
+3. **Phase 3** (embeddings) unlocks semantic conflict detection and the skill draft reconciliation pipeline — both correctly gated behind embeddings being active.
 
-Neither requires a new event bus — the dispatcher (`db.gateway`) already exists and is wired.
+None of these require a new event bus — the dispatcher (`db.gateway`) already exists and is wired.

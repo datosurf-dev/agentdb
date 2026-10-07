@@ -45,14 +45,6 @@ def test_purpose_returns_empty_string_for_missing(tmp_path):
     assert adapter.purpose("nonexistent") == ""
 
 
-def test_active_skills_context_contains_name_and_content(tmp_path):
-    adapter, db = _adapter(tmp_path)
-    db.skills_api.create_skill("debug", "Debugging", "How to debug.", scope=["a1"])
-    ctx = adapter.active_skills_context()
-    assert "debug" in ctx
-    assert "How to debug." in ctx
-
-
 def test_snapshot_captures_content_and_version(tmp_path):
     adapter, db = _adapter(tmp_path)
     db.skills_api.create_skill("debug", "Debugging", "How to debug.", scope=["a1"])

@@ -34,11 +34,6 @@ class WikiSkillAdapter:
         skill = self._db.skills_api.get_skill(name)
         return skill.name if skill is not None else ""
 
-    def active_skills_context(self) -> str:
-        skills = self._db.skills.get_for_agent(self._agent_id)
-        parts = [f"## {s.id}\n{s.content}" for s in skills]
-        return "\n\n".join(parts)
-
     def snapshot(self) -> dict[str, dict]:
         """Capture {skill_id: {content, version}} for the current active state."""
         skills = self._db.skills.get_for_agent(self._agent_id)

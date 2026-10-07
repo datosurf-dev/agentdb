@@ -53,8 +53,6 @@ class RetrievalResult:
     records: list
     conflicts: list
     override_instructions: list
-    skills: list
-    skill_warnings: list
     token_estimate: int = 0
     truncated: bool = False
 
@@ -998,16 +996,6 @@ class AgentDB:
                     (session_id or "", 1, int(had_conflict)),
                 )
 
-        # Retrieve matching skills for this agent
-        all_skills = self.skills.get_for_agent(agent_id)
-        skill_warnings: list[str] = []
-        for skill in all_skills:
-            self.skills.mark_retrieved(skill.id)
-            if skill.health_score < 0.6 or "staleness" in skill.health_score_reasons:
-                skill_warnings.append(
-                    f"Skill '{skill.id}' is stale (health_score={skill.health_score:.2f})"
-                )
-
         # Fetch conflicts for returned records
         conflicts = self._store.get_conflicts_for_records([r.id for r in records])
 
@@ -1024,8 +1012,6 @@ class AgentDB:
             records=records,
             conflicts=conflicts,
             override_instructions=override_instructions,
-            skills=all_skills,
-            skill_warnings=skill_warnings,
             token_estimate=token_total,
             truncated=truncated,
         )
@@ -1064,15 +1050,6 @@ class AgentDB:
             },
         )
 
-        all_skills = self.skills.get_for_agent(agent_id)
-        skill_warnings: list[str] = []
-        for skill in all_skills:
-            self.skills.mark_retrieved(skill.id)
-            if skill.health_score < 0.6 or "staleness" in skill.health_score_reasons:
-                skill_warnings.append(
-                    f"Skill '{skill.id}' is stale (health_score={skill.health_score:.2f})"
-                )
-
         # Fetch conflicts for returned records
         conflicts = self._store.get_conflicts_for_records([r.id for r in records])
 
@@ -1088,8 +1065,6 @@ class AgentDB:
             records=records,
             conflicts=conflicts,
             override_instructions=override_instructions,
-            skills=all_skills,
-            skill_warnings=skill_warnings,
         )
 
     def record_outcome(

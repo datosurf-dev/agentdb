@@ -93,9 +93,13 @@ _ALPHA = 0.4
 
 
 def _compute_health(skill: Skill) -> tuple[float, list[str]]:
-    """Compute health score based on staleness and optional validation score."""
+    """Compute health score based on content staleness and optional validation score.
+
+    Staleness is measured from updated_at (when content last changed), not from
+    last_retrieved — retrieval frequency is not a signal of content freshness.
+    """
     now = _utcnow()
-    reference = skill.last_retrieved or skill.created_at
+    reference = skill.updated_at
     if reference.tzinfo is None:
         reference = reference.replace(tzinfo=timezone.utc)
     age_days = (now - reference).days

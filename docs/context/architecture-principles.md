@@ -4,9 +4,9 @@ This is the single canonical source for AgentDB's architecture pitch and numbere
 
 ## What AgentDB is
 
-A governed memory layer that keeps agent memory actionable. It governs what memory is trusted, keeps relevant memory assets in sync, and injects the right context or instructions when an agent is about to act. Every write is validated before it lands. Every read returns a governed context package. The boundary is enforced at the memory layer — not by convention, not by prompt instructions, not by hoping agents behave.
+A governed memory layer that arbitrates between what agents infer and what humans intend. It enforces a trust hierarchy at write time, provenance-weights recall at read time, and tracks versioned human instructions (skills) that agents cannot silently overwrite. Every write is validated before it lands. Every read returns a governed context package. The boundary is enforced at the memory layer — not by convention, not by prompt instructions, not by hoping agents behave.
 
-AgentDB complements existing runtime memory instead of replacing it by default; its job is to make memory more trustworthy, more relevant, and more actionable. The core product loop is: track relevant memory assets, reconcile them proactively, rank what matters, and inject compact context or instructions before or during action.
+AgentDB complements existing runtime memory instead of replacing it by default. The core product loop is: **Track** relevant memory assets → **Reconcile** conflicts proactively → **Rank** what matters → **Inject** compact memory context before action. Skills are governed database objects used for conflict detection and staleness signalling — they are tracked and versioned, but not injected into agent context.
 
 ## Design Principles
 
@@ -22,7 +22,7 @@ These principles define the implementation constraints for all AgentDB work.
 
 4. **Algorithm as foundation, not feature.** The multi-signal ranking algorithm (provenance weight + causal WAL signal) is the technical moat. It is not marketed as a differentiator — it is what makes the database worth using.
 
-4a. **Algorithm + skills blend.** The ranking algorithm and governed skills are a single development foundation: memory records capture facts and prior outcomes, the algorithm ranks what matters now, and skills add maintained instructions the runtime can inject with that context.
+4a. **Algorithm + skills complement.** The ranking algorithm and governed skills are a single development foundation: memory records capture facts and prior outcomes, the algorithm ranks what matters now, and skills are the authoritative baseline for detecting when agent behavior drifts from human intent. Skills are NOT injected into agent context — their value is in conflict detection and staleness signalling, not prompt augmentation.
 
 5. **Three providers at launch.** Anthropic, OpenAI, Google (Vertex AI Agent Engine MemoryBankService). All three ship in Phase 3.
 
