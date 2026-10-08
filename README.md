@@ -16,9 +16,9 @@ The full architecture pitch and the numbered design principles live in one canon
 - Plan (active/open work): `/agentdb/docs/superpowers/plans/2026-06-06-agentdb-revised.md`
 - Completed work tracker: `/agentdb/docs/superpowers/plans/completed-tasks.md`
 
-## Current Repository Status (As Of 2026-10-04)
+## Current Repository Status (As Of 2026-10-08)
 
-Core governed memory loop is fully operational: real conflict detection, budgeted retrieval, lifecycle management, centralized config + profiles, MCP server (stdio/Claude Desktop), and two adapters (Claude SDK + Hermes) are all shipped and test-covered. Phase 3 (embeddings/semantic search) is deliberately deferred until the loop proves its value in production. Provider ingestors (Phase 6) and additional framework adapters (Phase 4 Task 15) remain pending.
+Core governed memory loop is fully operational: real conflict detection, budgeted retrieval, lifecycle management, centralized config + profiles, MCP server (stdio/Claude Desktop), and two adapters (Claude SDK + Hermes) are all shipped and test-covered. Session metadata + cross-repo isolation, skill–memory conflict signalling, and memory consolidation shipped 2026-10-08. Phase 3 (embeddings/semantic search) is deliberately deferred until the loop proves its value in production. Provider ingestors (Phase 6) and additional framework adapters (Phase 4 Task 15) remain pending.
 
 ### Feature State Matrix
 
@@ -42,7 +42,9 @@ Core governed memory loop is fully operational: real conflict detection, budgete
 | Permission routing boundaries | Implemented | Write-time enforcement via `PermissionRouter`. |
 | Write-time conflict detection (temporal + authority) | Implemented | `ConflictDetector` wired into `write()` — temporal conflicts auto-resolve in favour of recency; authority conflicts (agent vs. human-approved) auto-resolve in favour of human, flagged on retrieve. Semantic conflict detection is Phase 4 (requires embeddings). |
 | External-context conflict detection | Implemented | `external_context` param on `retrieve()` checks overlap between caller-supplied context and stored records; flags `external_conflict_detected` + `external_conflict_rate` stat. `override_instructions` still dead code — detection works, explicit overrides are not generated. |
-| Reconciliation trigger orchestration + `db.gateway` | Implemented | `db.gateway.subscribe`/`dispatch` is the unified surface. `conflict_detected` dispatched by `write()`. `conversation_started` dispatched by both adapters at turn start. Conflict queue (`db.gateway.conflict_queue()`), proposal workflow (`propose`/`approve`/`reject`/`list_proposals`) all live here. |
+| Reconciliation trigger orchestration + `db.gateway` | Implemented | `db.gateway.subscribe`/`dispatch` is the unified surface. `conflict_detected` dispatched by `write()`. `conversation_started` dispatched by both adapters at turn start; also seeds `SessionProfile` (always active) and auto-triggers consolidation at 7 days + 10 sessions. Conflict queue (`db.gateway.conflict_queue()`), proposal workflow (`propose`/`approve`/`reject`/`list_proposals`) all live here. |
+| Session metadata + cross-repo isolation (`SessionProfile`) | Implemented | `SessionProfile` seeds at `conversation_started` (always active, no embeddings). `_classify_request_type()` sets `request_types` (rule-based, no LLM); `repos` is the last path segment of `working_dirs`. `retrieve()` filters candidates to repos the session has touched; records with no `working_dirs` always pass. `write()` expands the profile mid-session — pivoting to a new repo during a session opens that repo's memories automatically. |
+| Skill–memory conflict signal (`skill_review_needed`) | Implemented | Dispatched from `write()` when a record's key/entity/repo-segment words overlap a scoped skill by keyword. Fires at most once per skill per write. Keyword check runs first; semantic check runs only when embeddings are active and keyword didn't fire. LLM-synthesized canonicals from `consolidate(llm_fn=...)` are also re-checked synchronously. |
 | Embedding-backed semantic retrieval/conflicts | Planned (Phase 4) | Current retrieval is keyword/provenance/confidence/recency based; embeddings are only justified if they improve action quality. |
 
 #### Rank
@@ -55,6 +57,7 @@ Core governed memory loop is fully operational: real conflict detection, budgete
 | Entity-aware retrieval core (`entities`, `retrieve_by_entities`) | Implemented (initial) | Additive entity tagging and keyword-based entity retrieval are available in core. |
 | Provider ingestors (Anthropic/OpenAI/Google sync) | Planned (Phase 3) | Architecture intent documented; module surface pending. Deliberately deferred — validating core loop with Claude SDK + Hermes in production first. |
 | Lifecycle manager (`db.lifecycle`) | Implemented | `run_sweep()`: Step 0 archives expired records (`expiry_time ≤ now`); Step 1 optional confidence decay (off by default); Step 2 archives below `ARCHIVAL_THRESHOLD`; Step 3 archives past `STALENESS_DAYS`. `reinforce()` and `record_outcome()` also on `db.lifecycle`. `human_approved` records immune to all sweep operations. |
+| Memory consolidation (`db.consolidate()`) | Implemented | `_lc_cluster()` groups near-duplicate records by key-word overlap. Canonical (highest confidence) survives, marked `consolidated=True` with `source_record_ids` tracing all originals. Lower-confidence copies archived. Auto-triggers at `conversation_started` when ≥7 days AND ≥10 sessions have elapsed since the last run per agent (`consolidation_state` table). `retrieve()` accepts `include_consolidated=False` to exclude consolidated records from injection. Optional `llm_fn=` synthesizes the canonical value; the LLM result is re-checked for skill conflict. `untracked_skill_candidate` dispatched when a cluster's topic has no governing skill. |
 | `infer` flag + `expiry_time` on `write()` | Implemented | `infer=True` routes the raw value through a caller-supplied `infer_fn` before storage (raises `ValueError` if no `infer_fn` set). `expiry_time: datetime` sets a hard TTL; sweep archives once it passes. Both apply to `agent_inferred` only; `human_approved` records are immune. |
 | Centralized config + profiles (`db.config`) | Implemented | `memory.yaml` drives all tunable defaults via mode-based profiles. Built-in profiles: `budget_optimized` (retrieve_limit=5, 2k chars, staleness=90d), `full_storage` (20, 12k, 90d), `research` (50, 24k, 180d, recency-first). User-defined profiles via `profiles:` block with optional `extends:`. `db.config` exposes the fully resolved dict. |
 
@@ -69,7 +72,7 @@ Core governed memory loop is fully operational: real conflict detection, budgete
 
 Validation status:
 - Editable install and package-style imports are validated via `pip install -e '.[dev]'`.
-- `python -m pytest -q` → 277 passed.
+- `python -m pytest -q` → 390 passed.
 
 The rest of this README describes architecture intent and phased roadmap behavior.
 
@@ -143,15 +146,16 @@ Integration manuals:
 These are the developer-facing surfaces you can use immediately in the current implementation:
 
 - `AgentDB` client (`from agentdb import AgentDB`)
-  - `write(key, value, origin, agent_id, infer=False, expiry_time=None, ...)`
+  - `write(key, value, origin, agent_id, session_id=..., working_dirs=..., entities=..., confidence=..., infer=False, expiry_time=None)` — `session_id` + `working_dirs` expand `SessionProfile` and trigger `skill_review_needed` on overlap
   - `read(key, agent_id)`
-  - `retrieve(query, agent_id, limit=..., budget_tokens=..., external_context=..., session_id=...)`
+  - `retrieve(query, agent_id, limit=..., budget_tokens=..., external_context=..., session_id=..., working_dirs=..., include_consolidated=True)` — `include_consolidated=False` excludes consolidated canonical records from injection
   - `retrieve_by_entities(entities, agent_id, session_id=...)`
+  - `consolidate(agent_id, since_hours=24, min_cluster_size=2, skill_candidate_threshold=5, llm_fn=None)` — cluster near-duplicates, archive lower-confidence copies, mark canonical `consolidated=True` with `source_record_ids`; re-checks skill conflict for LLM-synthesized canonicals
   - `record_outcome(session_id, agent_id, outcome_type, outcome_value)` — backward-compat alias for `db.lifecycle.record_outcome()`
   - `system.agentdb_stats()`
   - `audit_log.replay(from_sequence=0)`
   - `lifecycle` — `run_sweep()`, `reinforce(record_id)`, `record_outcome(...)`
-  - `gateway` — `subscribe(trigger, handler)`, `dispatch(trigger, ...)`, `conflict_queue()`, `propose(...)`, `approve(...)`, `reject(...)`, `list_proposals(...)`
+  - `gateway` — `subscribe(trigger, handler)`, `dispatch(trigger, ...)`, `conflict_queue()`, `propose(...)`, `approve(...)`, `reject(...)`, `list_proposals(...)`; `conversation_started` accepts `session_id`, `agent_id`, `opening_message`, `working_dirs`
   - `config` — returns the fully resolved config dict (mode defaults + yaml overrides)
   - `skills_api` — `create_skill`, `update_skill_version`, `get_skill`, `archive_skill`, `list_stale_skills_for_agent`, `list_skill_warnings_for_agent`
   - optional initialization: `tracking_directories`, `tracking_root`, `tracking_max_files_per_directory`, `infer_fn`, `memory_dir`
@@ -327,6 +331,9 @@ A health score below 0.6 triggers a staleness warning surfaced via `db.skills_ap
 **What degrades the health score today:**
 - Days since `updated_at` (when skill content last changed), half-life 30 days — the only implemented factor
 
+**Conflict signal (`skill_review_needed`) — implemented:**
+- `write()` dispatches `skill_review_needed` whenever a new record's key, entity list, or repo segment overlaps keyword-level with a scoped skill. This is a 12b signal — it tells a subscriber that agent-inferred content may be drifting from what the skill declares. Keyword check runs first; semantic check (Phase 4) runs only when embeddings are active and keyword didn't fire.
+
 **Planned, not yet implemented:**
 - Unresolved conflicts linked to the skill (no conflict linkage exists on skills yet)
 - A newer version that hasn't been promoted
@@ -399,16 +406,19 @@ Every record in AgentDB carries a full biography — not just a value:
 Implemented today:
 
 ```
-key              → addressable path          e.g. "memory/working/pref_format"
-value            → the memory content
-origin           → human_approved | agent_inferred | provider_ingested
-trust_level      → sealed | human | agent | provider   (derived from origin; "sealed" is unused so far)
-confidence       → float 0–1, decays over time unless reinforced
-entities         → list of canonical identifiers (file paths, model names) for action-driven retrieval
-last_retrieved   → drives the ranker's recency signal
-conflict_id      → populated by ConflictDetector at write time when a temporal or authority conflict is detected
-expiry_time      → optional hard TTL (datetime); lifecycle sweep archives once it passes (agent_inferred only)
-inferred         → bool; true when the value was derived by infer_fn rather than stored verbatim
+key                  → addressable path          e.g. "memory/working/pref_format"
+value                → the memory content
+origin               → human_approved | agent_inferred | provider_ingested
+trust_level          → sealed | human | agent | provider   (derived from origin; "sealed" is unused so far)
+confidence           → float 0–1, decays over time unless reinforced
+entities             → list of canonical identifiers (file paths, model names) for action-driven retrieval
+last_retrieved       → drives the ranker's recency signal
+conflict_id          → populated by ConflictDetector at write time when a temporal or authority conflict is detected
+expiry_time          → optional hard TTL (datetime); lifecycle sweep archives once it passes (agent_inferred only)
+inferred             → bool; true when the value was derived by infer_fn rather than stored verbatim
+working_dirs         → list of absolute paths; used by repo filter to scope retrieve() to the current session's repos
+consolidated         → bool; True when this record is the surviving canonical of a consolidation cluster. retrieve() can exclude these via include_consolidated=False.
+source_record_ids    → list of record IDs merged into this canonical during consolidation. Empty on normal records.
 ```
 
 Planned, not yet on the record: `tier`, `expiry_policy`, `audit_sequence`, `embedding_version`, `user_id`, `session_id`. See `docs/context/database-schema.md` for the full column-by-column reference.
@@ -667,6 +677,7 @@ Agents not listed are denied all writes (`default_policy: deny`). Wildcard match
 | Skill staleness | Skill health score crosses below 0.6 (anchored on `updated_at`) | `on_stale_crossing` callback fires once; warning surfaced via `db.skills_api.list_skill_warnings_for_agent()`; skill not archived automatically | **Implemented** (`skill_stale` 12b gateway dispatch pending) |
 | Reinforcement | Positive outcome signal | Confidence boosted, decay clock reset | **Implemented** via `db.lifecycle.reinforce(record_id)` and `db.lifecycle.record_outcome(...)` |
 | Human revocation | Explicit SDK delete | Archived with audit-log entry; history preserved | **Implemented** via `AgentDB.delete()` |
+| Memory consolidation | 7 days AND 10+ sessions since last run (auto), or explicit `db.consolidate()` | Near-duplicate records clustered by key-word overlap; lower-confidence copies archived; canonical marked `consolidated=True` with `source_record_ids` provenance; `untracked_skill_candidate` dispatched when no skill governs the domain | **Implemented** — `human_approved` records immune; idempotent (second pass on same agent archives nothing) |
 
 **`human_approved` records are immune to all sweep operations** — no decay, no staleness archival, no TTL expiry, regardless of field values.
 
