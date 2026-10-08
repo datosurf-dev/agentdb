@@ -88,9 +88,9 @@ def test_dispatch_reconciliation_trigger_runs_registered_handler(tmp_path):
             }
         )
 
-    db.register_reconciliation_handler("conversation_started", handler)
+    db.register_reconciliation_handler("custom_event", handler)
     count = db.dispatch_reconciliation_trigger(
-        "conversation_started",
+        "custom_event",
         agent_id="research_agent",
         session_id="sess-trigger",
         user_query="hello",

@@ -13,7 +13,7 @@ from typing import Any, Callable, Optional
 
 import yaml
 
-from ..core.models import ConflictRecord, MemoryRecord, Skill
+from ..core.models import ConflictRecord, MemoryRecord, SessionProfile, Skill
 from ..core.profiles import BUILTIN_PROFILES
 from ..core.store import MemoryStore
 from ..core.system import SystemStats
@@ -97,6 +97,55 @@ def _utcnow() -> datetime:
 def _estimate_tokens(record: MemoryRecord) -> int:
     value_str = json.dumps(record.value) if isinstance(record.value, (dict, list)) else str(record.value)
     return max(1, len(value_str) // 4)
+
+
+# ---------------------------------------------------------------------------
+# Session metadata helpers
+# ---------------------------------------------------------------------------
+
+_REQUEST_TYPE_RULES: list = [
+    ({"review", "feedback", "diff", "pr", "pull request"}, "code_review"),
+    ({"implement", "build", "create", "feat", "feature", "add"}, "code_generation"),
+    ({"debug", "fix", "error", "bug", "broken", "failing", "traceback"}, "debugging"),
+    ({"doc", "readme", "explain", "document", "overview"}, "documentation"),
+    ({"research", "brainstorm", "explore", "investigate", "survey"}, "research"),
+    ({"plan", "design", "architect", "strategy", "roadmap"}, "planning"),
+]
+
+
+def _extract_repo(working_dirs) -> "Optional[str]":
+    if not working_dirs:
+        return None
+    last = (working_dirs[-1] or "").rstrip("/")
+    segment = last.split("/")[-1] if "/" in last else last
+    return segment or None
+
+
+def _classify_request_type(text: str) -> str:
+    text_lower = text.lower()
+    for keywords, request_type in _REQUEST_TYPE_RULES:
+        if any(kw in text_lower for kw in keywords):
+            return request_type
+    return "general"
+
+
+# ---------------------------------------------------------------------------
+# Skill conflict helpers
+# ---------------------------------------------------------------------------
+
+_SKILL_CONFLICT_STOP_WORDS = frozenset({
+    "with", "from", "this", "that", "have", "been", "will",
+    "your", "into", "they", "them", "then", "when", "what",
+})
+_SKILL_CONFLICT_MIN_WORD_LEN = 4
+
+
+def _skill_words(text: str) -> set:
+    cleaned = str(text).replace("-", " ").replace("_", " ").lower()
+    return {
+        w for w in cleaned.split()
+        if len(w) >= _SKILL_CONFLICT_MIN_WORD_LEN and w not in _SKILL_CONFLICT_STOP_WORDS
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -506,6 +555,8 @@ class AgentDB:
 
         # Session tracking: session_id -> list of record ids retrieved
         self._session_record_ids: dict[str, list[str]] = {}
+        # Session profiles: session_id -> SessionProfile (metadata + repo filter)
+        self._session_profiles: dict[str, SessionProfile] = {}
 
         # Embedding layer (optional) — must be initialized before ranker
         self._raw_embeddings_cfg: dict = (self.memory_config or {}).get("embeddings", {})
@@ -542,6 +593,8 @@ class AgentDB:
         # Register session topic handler when embedding is active
         if self._embedding_provider is not None:
             self.gateway.subscribe("conversation_started", self._handle_conversation_started_embedding)
+        # Metadata handler always active (repo filter + auto-trigger — no embeddings required)
+        self.gateway.subscribe("conversation_started", self._handle_conversation_started_metadata)
 
         # Lifecycle manager — initialized after _session_record_ids is created
         lc = self._resolved_config["lifecycle"]
@@ -593,6 +646,90 @@ class AgentDB:
             self._embedding_store.put_session_topic(session_id, vec)
         except Exception:
             pass
+
+    def _handle_conversation_started_metadata(self, **kwargs) -> None:
+        session_id = kwargs.get("session_id")
+        if not session_id:
+            return
+        agent_id = kwargs.get("agent_id")
+        opening_message = kwargs.get("opening_message", "")
+        working_dirs = kwargs.get("working_dirs") or []
+        repo = _extract_repo(working_dirs)
+        rt = _classify_request_type(opening_message) if opening_message else "general"
+        profile = SessionProfile(session_id=session_id, agent_id=agent_id)
+        if repo:
+            profile.repos.add(repo)
+        profile.request_types.add(rt)
+        self._session_profiles[session_id] = profile
+        # Auto-consolidation: increment session count; trigger if threshold reached
+        if agent_id:
+            try:
+                self.lifecycle._increment_session_count(agent_id)
+                if self.lifecycle._should_auto_consolidate(agent_id):
+                    self.consolidate(agent_id, since_hours=0)
+            except Exception:
+                pass
+
+    def _check_skill_conflict(self, record: MemoryRecord) -> None:
+        if not record.agent_id:
+            return
+        scoped_skills = self.skills.get_for_agent(record.agent_id)
+        if not scoped_skills:
+            return
+
+        record_words = _skill_words(record.key)
+        for entity in (record.entities or []):
+            record_words.update(_skill_words(entity))
+        repo = _extract_repo(record.working_dirs)
+        if repo:
+            record_words.update(_skill_words(repo))
+
+        for skill in scoped_skills:
+            skill_ws = _skill_words(f"{skill.id} {skill.name}")
+            dispatched = False
+
+            if skill_ws & record_words:
+                try:
+                    self.gateway.dispatch(
+                        "skill_review_needed",
+                        skill_id=skill.id,
+                        record_id=record.id,
+                        record_key=record.key,
+                        agent_id=record.agent_id,
+                        reason="keyword_overlap",
+                    )
+                except Exception:
+                    pass
+                dispatched = True
+
+            if (
+                not dispatched
+                and self._embedding_provider is not None
+                and self._embedding_store is not None
+            ):
+                try:
+                    from ..embeddings.provider import _cosine
+                    record_vec = self._embedding_store.get("memories", record.id)
+                    skill_vec = self._embedding_store.get(
+                        "skills", f"{skill.id}:{skill.version}"
+                    )
+                    if record_vec is not None and skill_vec is not None:
+                        threshold = float(
+                            self._raw_embeddings_cfg.get("skill_conflict_threshold", 0.70)
+                        )
+                        sim = _cosine(record_vec, skill_vec)
+                        if sim >= threshold:
+                            self.gateway.dispatch(
+                                "skill_review_needed",
+                                skill_id=skill.id,
+                                record_id=record.id,
+                                record_key=record.key,
+                                agent_id=record.agent_id,
+                                reason="semantic_overlap",
+                                similarity=sim,
+                            )
+                except Exception:
+                    pass
 
     @property
     def _reconciliation_handlers(self) -> dict[str, list[Callable]]:  # type: ignore[override]
@@ -743,6 +880,21 @@ class AgentDB:
 
         self._store.write(record)
 
+        # Expand session profile with this write's repo and request type
+        if session_id and session_id in self._session_profiles:
+            _repo = _extract_repo(record.working_dirs)
+            _rt = _classify_request_type(f"{key} {record.value!s}")
+            _profile = self._session_profiles[session_id]
+            if _repo:
+                _profile.repos.add(_repo)
+            _profile.request_types.add(_rt)
+
+        # Skill conflict signal (non-blocking)
+        try:
+            self._check_skill_conflict(record)
+        except Exception:
+            pass
+
         # Store embedding (non-blocking — failures never propagate to caller)
         if self._embedding_provider is not None and self._embedding_store is not None:
             try:
@@ -811,6 +963,30 @@ class AgentDB:
             {"key": key, "agent_id": agent_id},
         )
 
+    def consolidate(self, agent_id: str, llm_fn=None, **kwargs) -> "ConsolidationResult":
+        """Cluster near-duplicate records, archive lower-confidence copies, mark the
+        surviving canonical as consolidated=True with source_record_ids provenance.
+        Dispatches untracked_skill_candidate when a cluster exceeds threshold and no
+        scoped skill governs the domain. If llm_fn is provided, synthesizes the
+        canonical value and re-checks skill conflicts on LLM-produced canonicals."""
+        from ..governance.lifecycle_manager import ConsolidationResult
+        result = self.lifecycle.consolidate(
+            agent_id, gateway=self.gateway, llm_fn=llm_fn, **kwargs
+        )
+        try:
+            self.lifecycle._reset_consolidation_state(agent_id)
+        except Exception:
+            pass
+        if llm_fn is not None:
+            for record_id in result.synthesized_record_ids:
+                try:
+                    canonical = self._store.get_by_id(record_id)
+                    if canonical:
+                        self._check_skill_conflict(canonical)
+                except Exception:
+                    pass
+        return result
+
     def retrieve(
         self,
         query: str,
@@ -820,6 +996,7 @@ class AgentDB:
         external_context: Optional[list[dict]] = None,
         budget_tokens: Optional[int] = None,
         working_dirs: Optional[list[str]] = None,
+        include_consolidated: bool = True,
     ) -> RetrievalResult:
         agent_config = self.config_for(agent_id)
         isolate_by_agent = agent_config["isolate_by_agent"]
@@ -859,6 +1036,20 @@ class AgentDB:
                 r for r in candidates
                 if _EPISODIC_PREFIX not in r.key or f"/{session_id}/" in r.key
             ]
+
+        # Repo filter: only records from repos this session has touched (or with no repo)
+        if session_id and session_id in self._session_profiles:
+            _profile = self._session_profiles[session_id]
+            if _profile.repos:
+                candidates = [
+                    r for r in candidates
+                    if not r.working_dirs
+                    or _extract_repo(r.working_dirs) in _profile.repos
+                ]
+
+        # Consolidated filter
+        if not include_consolidated:
+            candidates = [r for r in candidates if not r.consolidated]
 
         # Embedding hydration + session topic filter
         if _query_passes_gate and self._embedding_store is not None:

@@ -61,6 +61,8 @@ class MemoryRecord:
     inferred: bool = False
     working_dirs: list = field(default_factory=list)
     embedding: Optional[list[float]] = field(default=None, repr=False)
+    consolidated: bool = False
+    source_record_ids: list = field(default_factory=list)
 
 
 @dataclass
@@ -91,3 +93,11 @@ class Skill:
     origin: str = "human"
     validation_score: Optional[float] = None
     metadata: dict = field(default_factory=dict)
+
+
+@dataclass
+class SessionProfile:
+    session_id: str
+    agent_id: Optional[str] = None
+    repos: set = field(default_factory=set)
+    request_types: set = field(default_factory=set)

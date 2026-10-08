@@ -36,8 +36,8 @@ def test_subscribe_and_dispatch_fires_handler(tmp_path):
     db = _make_db(tmp_path)
     gw = db.gateway
     calls = []
-    gw.subscribe("conversation_started", lambda **kw: calls.append(kw))
-    count = gw.dispatch("conversation_started", session_id="s1", agent_id="a1")
+    gw.subscribe("custom_event", lambda **kw: calls.append(kw))
+    count = gw.dispatch("custom_event", session_id="s1", agent_id="a1")
     assert count == 1
     assert calls == [{"session_id": "s1", "agent_id": "a1"}]
 
