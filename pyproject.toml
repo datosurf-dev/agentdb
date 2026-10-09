@@ -37,6 +37,7 @@ local-embed = ["sentence-transformers>=2.7,<4.0"]
 wikiskill = ["wikiskill>=0.1.0"]
 skillopt = ["skillopt>=0.1.0"]
 evolution = ["wikiskill>=0.1.0", "skillopt>=0.1.0"]
+notifications = ["slack-sdk>=3.0"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
