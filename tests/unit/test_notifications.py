@@ -281,3 +281,136 @@ class TestNotificationDispatcher:
         ch.send.assert_called_once()
         subject, _ = ch.send.call_args[0]
         assert "revenue-model" in subject
+
+
+# ---------------------------------------------------------------------------
+# YAML-driven wiring via memory.yaml notifications: block
+# ---------------------------------------------------------------------------
+
+def _write_memory_yaml(memory_dir: "Path", content: str) -> None:
+    config_dir = memory_dir / "config"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "memory.yaml").write_text(content)
+
+
+class TestYamlNotifications:
+    def test_no_notifications_block_is_silent(self, tmp_path):
+        memory_dir = tmp_path / "mem"
+        _write_memory_yaml(memory_dir, "profile:\n  name: budget_optimized\n")
+        db = AgentDB(memory_dir=memory_dir)
+        # Should not raise and no notification handlers added beyond defaults
+        assert "skill_stale" not in db.gateway._handlers
+
+    def test_email_channel_wired_from_yaml(self, tmp_path):
+        memory_dir = tmp_path / "mem"
+        _write_memory_yaml(memory_dir, """\
+profile:
+  name: budget_optimized
+notifications:
+  channels:
+    - type: email
+      to: ops@example.com
+      smtp_host: relay.local
+      smtp_port: 2525
+""")
+        mock_server = MagicMock()
+        with patch("smtplib.SMTP") as mock_smtp_cls:
+            mock_smtp_cls.return_value.__enter__ = lambda s: mock_server
+            mock_smtp_cls.return_value.__exit__ = MagicMock(return_value=False)
+            db = AgentDB(memory_dir=memory_dir)
+            db.gateway.dispatch("skill_stale", skill_id="orders-model")
+
+        mock_server.send_message.assert_called_once()
+        msg = mock_server.send_message.call_args[0][0]
+        assert "orders-model" in msg["Subject"]
+        assert msg["To"] == "ops@example.com"
+
+    def test_slack_channel_wired_from_yaml(self, tmp_path):
+        memory_dir = tmp_path / "mem"
+        _write_memory_yaml(memory_dir, """\
+profile:
+  name: budget_optimized
+notifications:
+  channels:
+    - type: slack
+      bot_token: xoxb-test
+      channel: "#alerts"
+""")
+        mock_client = MagicMock()
+        mock_webclient_cls = MagicMock(return_value=mock_client)
+        mock_slack_sdk = MagicMock()
+        mock_slack_sdk.WebClient = mock_webclient_cls
+
+        import sys
+        sys.modules["slack_sdk"] = mock_slack_sdk
+        import importlib
+        import agentdb.notifications.channels as ch_mod
+        importlib.reload(ch_mod)
+
+        db = AgentDB(memory_dir=memory_dir)
+        db.gateway.dispatch("skill_stale", skill_id="orders-model")
+
+        mock_client.chat_postMessage.assert_called_once()
+        assert mock_client.chat_postMessage.call_args[1]["channel"] == "#alerts"
+
+    def test_events_subset_from_yaml(self, tmp_path):
+        memory_dir = tmp_path / "mem"
+        _write_memory_yaml(memory_dir, """\
+profile:
+  name: budget_optimized
+notifications:
+  events:
+    - skill_stale
+  channels:
+    - type: email
+      to: ops@example.com
+""")
+        mock_server = MagicMock()
+        with patch("smtplib.SMTP") as mock_smtp_cls:
+            mock_smtp_cls.return_value.__enter__ = lambda s: mock_server
+            mock_smtp_cls.return_value.__exit__ = MagicMock(return_value=False)
+            db = AgentDB(memory_dir=memory_dir)
+
+        assert "skill_stale" in db.gateway._handlers
+        assert "conflict_detected" not in db.gateway._handlers
+
+    def test_missing_email_to_raises(self, tmp_path):
+        from agentdb.interface.client import ConfigurationError
+        memory_dir = tmp_path / "mem"
+        _write_memory_yaml(memory_dir, """\
+profile:
+  name: budget_optimized
+notifications:
+  channels:
+    - type: email
+""")
+        with pytest.raises(ConfigurationError, match="'to' is required"):
+            AgentDB(memory_dir=memory_dir)
+
+    def test_missing_slack_token_raises(self, tmp_path):
+        from agentdb.interface.client import ConfigurationError
+        memory_dir = tmp_path / "mem"
+        _write_memory_yaml(memory_dir, """\
+profile:
+  name: budget_optimized
+notifications:
+  channels:
+    - type: slack
+      channel: "#alerts"
+""")
+        with pytest.raises(ConfigurationError, match="bot_token"):
+            AgentDB(memory_dir=memory_dir)
+
+    def test_unknown_channel_type_raises(self, tmp_path):
+        from agentdb.interface.client import ConfigurationError
+        memory_dir = tmp_path / "mem"
+        _write_memory_yaml(memory_dir, """\
+profile:
+  name: budget_optimized
+notifications:
+  channels:
+    - type: pager
+      number: "555-1234"
+""")
+        with pytest.raises(ConfigurationError, match="unknown type"):
+            AgentDB(memory_dir=memory_dir)

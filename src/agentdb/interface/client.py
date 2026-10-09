@@ -420,6 +420,23 @@ reconciliation:
 database:
   mode: embedded
   path: database/agentdb.sqlite
+
+# Uncomment to enable governance notifications.
+# notifications:
+#   # events: omit to receive all four, or list a subset:
+#   #   skill_stale | skill_review_needed | untracked_skill_candidate | conflict_detected
+#   channels:
+#     - type: email
+#       to: ops@example.com
+#       # smtp_host: localhost     # default: localhost
+#       # smtp_port: 25            # default: 25
+#       # from_address: agentdb@localhost
+#       # smtp_user: user
+#       # smtp_password: secret
+#       # use_tls: false
+#     - type: slack
+#       bot_token: "xoxb-..."     # requires: pip install agentdatabase[notifications]
+#       channel: "#ops-alerts"    # channel name, ID, or user ID
 """
 
 
@@ -609,6 +626,53 @@ class AgentDB:
             staleness_days=lc["staleness_days"],
             reinforce_rate=lc["reinforce_rate"],
         )
+
+        # Notifications — wired last so all gateway subscribers are already registered
+        self._setup_notifications()
+
+    def _setup_notifications(self) -> None:
+        """Build and attach NotificationDispatcher from memory.yaml notifications: block."""
+        cfg = (self.memory_config or {}).get("notifications")
+        if not cfg:
+            return
+
+        from ..notifications import EmailChannel, SlackChannel, NotificationDispatcher
+
+        channels = []
+        for ch_cfg in cfg.get("channels", []):
+            ch_type = ch_cfg.get("type")
+            if ch_type == "email":
+                to = ch_cfg.get("to")
+                if not to:
+                    raise ConfigurationError("notifications.channels[email]: 'to' is required")
+                channels.append(EmailChannel(
+                    to_address=to,
+                    from_address=ch_cfg.get("from_address", "agentdb@localhost"),
+                    smtp_host=ch_cfg.get("smtp_host", "localhost"),
+                    smtp_port=int(ch_cfg.get("smtp_port", 25)),
+                    smtp_user=ch_cfg.get("smtp_user"),
+                    smtp_password=ch_cfg.get("smtp_password"),
+                    use_tls=bool(ch_cfg.get("use_tls", False)),
+                ))
+            elif ch_type == "slack":
+                token = ch_cfg.get("bot_token")
+                channel = ch_cfg.get("channel")
+                if not token or not channel:
+                    raise ConfigurationError(
+                        "notifications.channels[slack]: 'bot_token' and 'channel' are required"
+                    )
+                channels.append(SlackChannel(bot_token=token, channel=channel))
+            else:
+                raise ConfigurationError(
+                    f"notifications.channels: unknown type {ch_type!r} (supported: email, slack)"
+                )
+
+        if not channels:
+            return
+
+        events = cfg.get("events")  # None → dispatcher uses its default list
+        dispatcher = NotificationDispatcher(self.gateway, channels=channels, events=events)
+        dispatcher.attach()
 
     def _build_ranker(self) -> "MultiSignalRanker":
         rw = self._resolved_config["retrieval"]["ranker_weights"]
