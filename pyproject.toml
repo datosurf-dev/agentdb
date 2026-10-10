@@ -38,6 +38,7 @@ wikiskill = ["wikiskill>=0.1.0"]
 skillopt = ["skillopt>=0.1.0"]
 evolution = ["wikiskill>=0.1.0", "skillopt>=0.1.0"]
 notifications = ["slack-sdk>=3.0"]
+providers = ["anthropic>=0.20"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
