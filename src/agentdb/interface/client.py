@@ -953,12 +953,6 @@ class AgentDB:
                 _profile.repos.add(_repo)
             _profile.request_types.add(_rt)
 
-        # Skill conflict signal (non-blocking)
-        try:
-            self._check_skill_conflict(record)
-        except Exception:
-            pass
-
         # Store embedding (non-blocking — failures never propagate to caller)
         if self._embedding_provider is not None and self._embedding_store is not None:
             try:
@@ -988,6 +982,12 @@ class AgentDB:
                     self._store.store_conflict(sc)
             except Exception:
                 pass
+
+        # Skill conflict signal — after embedding is stored so semantic path can run
+        try:
+            self._check_skill_conflict(record)
+        except Exception:
+            pass
 
         self.audit_log.append(
             EVENT_MEMORY_WRITE,

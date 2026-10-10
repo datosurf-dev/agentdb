@@ -47,8 +47,13 @@ class SystemStats:
             ).fetchone()
             retrieval_total = retrieval_total_row[0] if retrieval_total_row[0] is not None else 0
 
-            # Conflict pending count - from audit log
-            conflict_pending = 0  # We don't track ConflictRecord table; use 0
+            # Conflict pending count — unresolved rows in the conflicts table
+            try:
+                conflict_pending = conn.execute(
+                    "SELECT COUNT(*) FROM conflicts WHERE resolved = 0"
+                ).fetchone()[0]
+            except Exception:
+                conflict_pending = 0
 
             # Outcome positive rate
             outcome_rate = None

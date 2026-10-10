@@ -89,3 +89,24 @@ def test_external_conflict_rate_reflects_conflict_events(tmp_path):
 
     stats = db.system.agentdb_stats()
     assert stats["external_conflict_rate"] == 0.5
+
+
+def test_conflict_pending_count_reflects_real_conflicts(tmp_path):
+    db = AgentDB(path=tmp_path / "test.db")
+
+    # First write — no conflict yet
+    db.write("memory/orders/schema", "Orders table has id, amount, date",
+             origin="human_approved", agent_id="a1", confidence=0.9)
+    assert db.system.agentdb_stats()["conflict_pending_count"] == 0
+
+    # Agent tries to overwrite a human_approved record → authority conflict
+    db.write("memory/orders/schema", "Orders table was rebuilt",
+             origin="agent_inferred", agent_id="a1", confidence=0.6)
+    assert db.system.agentdb_stats()["conflict_pending_count"] == 1
+
+    # Second key: same origin written twice → temporal conflict
+    db.write("memory/revenue/schema", "Revenue table v1",
+             origin="agent_inferred", agent_id="a1", confidence=0.7)
+    db.write("memory/revenue/schema", "Revenue table v2 updated",
+             origin="agent_inferred", agent_id="a1", confidence=0.7)
+    assert db.system.agentdb_stats()["conflict_pending_count"] == 2
