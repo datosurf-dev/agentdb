@@ -16,9 +16,9 @@ The full architecture pitch and the numbered design principles live in one canon
 - Plan (active/open work): `/agentdb/docs/superpowers/plans/2026-06-06-agentdb-revised.md`
 - Completed work tracker: `/agentdb/docs/superpowers/plans/completed-tasks.md`
 
-## Current Repository Status (As Of 2026-10-08)
+## Current Repository Status (As Of 2026-10-10)
 
-Core governed memory loop is fully operational: real conflict detection, budgeted retrieval, lifecycle management, centralized config + profiles, MCP server (stdio/Claude Desktop), and two adapters (Claude SDK + Hermes) are all shipped and test-covered. Session metadata + cross-repo isolation, skill–memory conflict signalling, and memory consolidation shipped 2026-10-08. Phase 3 (embeddings/semantic search) is deliberately deferred until the loop proves its value in production. Provider ingestors (Phase 6) and additional framework adapters (Phase 4 Task 15) remain pending.
+Core governed memory loop is fully operational: real conflict detection, budgeted retrieval, lifecycle management, centralized config + profiles, MCP server (stdio/Claude Desktop), and two adapters (Claude SDK + Hermes) are all shipped and test-covered. Session metadata + cross-repo isolation, skill–memory conflict signalling (keyword + semantic), memory consolidation, Phase 4 embeddings/semantic search, and email/Slack notifications shipped 2026-10-10. Provider ingestors (Phase 6) and skill draft reconciliation pipeline (Task 13) remain pending.
 
 ### Feature State Matrix
 
@@ -40,19 +40,20 @@ Core governed memory loop is fully operational: real conflict detection, budgete
 | Feature area | State | Notes |
 |---|---|---|
 | Permission routing boundaries | Implemented | Write-time enforcement via `PermissionRouter`. |
-| Write-time conflict detection (temporal + authority) | Implemented | `ConflictDetector` wired into `write()` — temporal conflicts auto-resolve in favour of recency; authority conflicts (agent vs. human-approved) auto-resolve in favour of human, flagged on retrieve. Semantic conflict detection is Phase 4 (requires embeddings). |
+| Write-time conflict detection (temporal + authority) | Implemented | `ConflictDetector` wired into `write()` — temporal conflicts auto-resolve in favour of recency; authority conflicts (agent vs. human-approved) auto-resolve in favour of human, flagged on retrieve. `agentdb_stats()` `conflict_pending_count` reflects unresolved conflicts live. |
 | External-context conflict detection | Implemented | `external_context` param on `retrieve()` checks overlap between caller-supplied context and stored records; flags `external_conflict_detected` + `external_conflict_rate` stat. `override_instructions` still dead code — detection works, explicit overrides are not generated. |
 | Reconciliation trigger orchestration + `db.gateway` | Implemented | `db.gateway.subscribe`/`dispatch` is the unified surface. `conflict_detected` dispatched by `write()`. `conversation_started` dispatched by both adapters at turn start; also seeds `SessionProfile` (always active) and auto-triggers consolidation at 7 days + 10 sessions. Conflict queue (`db.gateway.conflict_queue()`), proposal workflow (`propose`/`approve`/`reject`/`list_proposals`) all live here. |
 | Session metadata + cross-repo isolation (`SessionProfile`) | Implemented | `SessionProfile` seeds at `conversation_started` (always active, no embeddings). `_classify_request_type()` sets `request_types` (rule-based, no LLM); `repos` is the last path segment of `working_dirs`. `retrieve()` filters candidates to repos the session has touched; records with no `working_dirs` always pass. `write()` expands the profile mid-session — pivoting to a new repo during a session opens that repo's memories automatically. |
-| Skill–memory conflict signal (`skill_review_needed`) | Implemented | Dispatched from `write()` when a record's key/entity/repo-segment words overlap a scoped skill by keyword. Fires at most once per skill per write. Keyword check runs first; semantic check runs only when embeddings are active and keyword didn't fire. LLM-synthesized canonicals from `consolidate(llm_fn=...)` are also re-checked synchronously. |
-| Embedding-backed semantic retrieval/conflicts | Planned (Phase 4) | Current retrieval is keyword/provenance/confidence/recency based; embeddings are only justified if they improve action quality. |
+| Skill–memory conflict signal (`skill_review_needed`) | Implemented (keyword + semantic) | Dispatched from `write()` on key/entity/repo-segment keyword overlap with a scoped skill. Fires at most once per skill per write. Semantic path fires when embeddings active and keyword didn't match — embedding is stored before conflict check runs. LLM-synthesized canonicals from `consolidate(llm_fn=...)` are also re-checked synchronously. |
+| Embedding-backed semantic retrieval/conflicts | Implemented | `embed_fn=` hook in `AgentDB.__init__`; `EmbeddingStore` (SQLite-Vec) + `EmbeddingProvider` wired. Semantic retrieval and semantic skill–memory conflict detection both operational when embeddings active. |
+| Notification channels (email + Slack) | Implemented | `src/agentdb/notifications/`: `EmailChannel` (stdlib smtplib, no extra deps), `SlackChannel` (`slack-sdk` optional extra). `NotificationDispatcher` subscribes to gateway events and routes formatted messages; channel failures isolated. Configure via `memory.yaml` `notifications:` block. |
 
 #### Rank
 
 | Feature area | State | Notes |
 |---|---|---|
 | Algorithm + skills complement | Implemented (initial) | Retrieval ranks memory records by provenance, recency, confidence, and causal signals. Skills are tracked database objects for conflict detection and staleness signalling — they are NOT injected into agent context. |
-| Skills store + staleness signalling | Implemented | Versioned skills, staleness-based health scoring anchored on `updated_at` (content age). Stale-crossing fires `on_stale_crossing` callback; check warnings via `db.skills_api.list_skill_warnings_for_agent()`. |
+| Skills store + staleness signalling | Implemented | Versioned skills, staleness-based health scoring anchored on `updated_at` (content age). Stale-crossing fires `on_stale_crossing` callback, which dispatches `skill_stale` to gateway for async consumers (email, Slack, review queues). Check warnings via `db.skills_api.list_skill_warnings_for_agent()`. |
 | System stats surface | Implemented (initial) | Includes retrieval/outcome/conflict-rate aggregates. |
 | Entity-aware retrieval core (`entities`, `retrieve_by_entities`) | Implemented (initial) | Additive entity tagging and keyword-based entity retrieval are available in core. |
 | Provider ingestors (Anthropic/OpenAI/Google sync) | Planned (Phase 3) | Architecture intent documented; module surface pending. Deliberately deferred — validating core loop with Claude SDK + Hermes in production first. |
@@ -72,7 +73,7 @@ Core governed memory loop is fully operational: real conflict detection, budgete
 
 Validation status:
 - Editable install and package-style imports are validated via `pip install -e '.[dev]'`.
-- `python -m pytest -q` → 390 passed.
+- `python -m pytest -q` → 465 passed.
 
 The rest of this README describes architecture intent and phased roadmap behavior.
 
@@ -465,7 +466,7 @@ result.override_instructions  # human-approved wins messages for authority confl
 
 External-context detection (caller-supplied context vs. stored records) is a separate, narrower check available via `external_context=` on `retrieve()` — it flags `external_conflict_detected` audit events but does not interact with the stored `conflicts` table.
 
-**Known limitation:** semantic conflict detection (same-authority, situationally contradictory) requires Phase 4 embeddings. Until then, only temporal and authority conflicts are detected.
+**Note:** Structural conflicts (temporal + authority) are always detected. Semantic conflict detection (same-authority, situationally contradictory) requires `embed_fn=` to be set in `AgentDB(...)` — when embeddings are active, cosine similarity checks run automatically in the conflict pipeline.
 
 ---
 
