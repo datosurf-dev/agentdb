@@ -70,12 +70,16 @@ class Gateway:
         agent_id: str,
         entities: Optional[list[str]] = None,
         session_id: Optional[str] = None,
+        domain_words: Optional[list] = None,
     ) -> str:
         """
         Draft a skill proposal.
 
         Writes the draft as an agent_inferred memory record under
         ``proposal/<proposal_id>`` and returns the proposal_id.
+
+        domain_words: optional list of meaningful topic words used by
+        auto_propose_from_cluster() for deduplication against existing proposals.
         """
         proposal_id = str(uuid.uuid4())
         self._db.write(
@@ -87,6 +91,7 @@ class Gateway:
                 "scope": scope,
                 "agent_id": agent_id,
                 "status": "pending",
+                "domain_words": list(domain_words) if domain_words else [],
             },
             origin="agent_inferred",
             agent_id=agent_id,
@@ -182,6 +187,75 @@ class Gateway:
             for e in entries
             if e.event_type == event_type
         ]
+
+    # ------------------------------------------------------------------
+    # Auto-proposal from consolidation
+    # ------------------------------------------------------------------
+
+    # Generic key-structure words that appear in all clusters — excluded from domain dedup
+    _KEY_STRUCTURE_WORDS: "frozenset[str]" = frozenset({
+        "memory", "record", "note", "item", "working", "temp", "data",
+        "task", "info", "misc", "draft", "test", "type", "list",
+    })
+
+    def auto_propose_from_cluster(
+        self,
+        dominant_words: list,
+        sample_keys: list,
+        agent_id: str,
+    ) -> "str | None":
+        """
+        Propose a skill draft from an ungoverned consolidation cluster.
+
+        Filters generic key-structure words (memory, record, note…) before
+        deduplicating. Dedup uses the stored domain_words on each existing proposal
+        rather than scanning free-text content (avoids false matches on boilerplate).
+
+        Returns the new proposal_id, or None if a matching proposal already exists.
+        """
+        if not dominant_words:
+            return None
+
+        # Strip generic structural words; only keep domain-meaningful ones
+        candidate_words = {
+            w.lower() for w in dominant_words
+            if len(w) >= 4 and w.lower() not in self._KEY_STRUCTURE_WORDS
+        }
+        if not candidate_words:
+            return None
+
+        # Dedup: skip if any existing pending proposal already covers this domain
+        for p in self.list_proposals(status="pending"):
+            existing_domain = {
+                w.lower() for w in p.get("domain_words", [])
+                if len(w) >= 4 and w.lower() not in self._KEY_STRUCTURE_WORDS
+            }
+            if existing_domain and (candidate_words & existing_domain):
+                return None
+
+        # Use the longest domain word as the proposal name
+        candidate_name = max(candidate_words, key=len).replace("-", " ").title()
+        sample_keys_str = ", ".join(sample_keys[:3]) if sample_keys else "unknown"
+        content = (
+            f"Auto-proposed from ungoverned memory cluster. "
+            f"Key patterns: {sample_keys_str}. "
+            "Review and update content before approving."
+        )
+
+        proposal_id = self.propose(
+            name=candidate_name,
+            content=content,
+            scope=[agent_id],
+            agent_id=agent_id,
+            domain_words=list(candidate_words),
+        )
+        self.dispatch(
+            "skill_draft_proposed",
+            proposal_id=proposal_id,
+            name=candidate_name,
+            agent_id=agent_id,
+        )
+        return proposal_id
 
 
 from .adapter import GatewayAdapter  # noqa: E402 — keep at bottom to avoid circular import

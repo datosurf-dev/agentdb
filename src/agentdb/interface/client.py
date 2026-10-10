@@ -612,6 +612,8 @@ class AgentDB:
             self.gateway.subscribe("conversation_started", self._handle_conversation_started_embedding)
         # Metadata handler always active (repo filter + auto-trigger — no embeddings required)
         self.gateway.subscribe("conversation_started", self._handle_conversation_started_metadata)
+        # Auto-propose skill drafts from ungoverned consolidation clusters
+        self.gateway.subscribe("untracked_skill_candidate", self._on_untracked_skill_candidate)
 
         # Lifecycle manager — initialized after _session_record_ids is created
         lc = self._resolved_config["lifecycle"]
@@ -733,6 +735,18 @@ class AgentDB:
                     self.consolidate(agent_id, since_hours=0)
             except Exception:
                 pass
+
+    def _on_untracked_skill_candidate(
+        self, agent_id: str, dominant_words: list, sample_keys: list, **kwargs
+    ) -> None:
+        try:
+            self.gateway.auto_propose_from_cluster(
+                dominant_words=dominant_words,
+                sample_keys=sample_keys,
+                agent_id=agent_id,
+            )
+        except Exception:
+            pass
 
     def _check_skill_conflict(self, record: MemoryRecord) -> None:
         if not record.agent_id:
