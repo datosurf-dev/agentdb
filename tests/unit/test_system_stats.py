@@ -19,6 +19,8 @@ def test_system_stats_contract_keys_and_defaults(tmp_path):
         "outcome_positive_rate",
         "retrieval_count_total",
         "external_conflict_rate",
+        "total_skills",
+        "stale_skill_count",
     }
     assert stats["total_memories"] == 0
     assert stats["avg_confidence"] == 0.0
@@ -27,6 +29,8 @@ def test_system_stats_contract_keys_and_defaults(tmp_path):
     assert stats["retrieval_count_total"] == 0
     assert stats["outcome_positive_rate"] is None
     assert stats["external_conflict_rate"] is None
+    assert stats["total_skills"] == 0
+    assert stats["stale_skill_count"] == 0
 
 
 def test_outcome_positive_rate_requires_min_sample_size(tmp_path):
@@ -110,3 +114,29 @@ def test_conflict_pending_count_reflects_real_conflicts(tmp_path):
     db.write("memory/revenue/schema", "Revenue table v2 updated",
              origin="agent_inferred", agent_id="a1", confidence=0.7)
     assert db.system.agentdb_stats()["conflict_pending_count"] == 2
+
+
+def test_stats_includes_skill_counts(tmp_path):
+    db = AgentDB(path=tmp_path / "test.db")
+    stats = db.system.agentdb_stats()
+    assert "total_skills" in stats
+    assert "stale_skill_count" in stats
+    assert stats["total_skills"] == 0
+    assert stats["stale_skill_count"] == 0
+
+
+def test_stats_skill_counts_reflect_real_state(tmp_path):
+    db = AgentDB(path=tmp_path / "test.db")
+    db.skills_api.create_skill("s1", "Skill One", "content one", scope=["a1"])
+    db.skills_api.create_skill("s2", "Skill Two", "content two", scope=["a1"])
+    stats = db.system.agentdb_stats()
+    assert stats["total_skills"] == 2
+    assert stats["stale_skill_count"] == 0
+
+
+def test_stats_archived_skills_not_counted(tmp_path):
+    db = AgentDB(path=tmp_path / "test.db")
+    db.skills_api.create_skill("s1", "Skill One", "content", scope=["a1"])
+    db.skills_api.archive_skill("s1", "1.0.0")
+    stats = db.system.agentdb_stats()
+    assert stats["total_skills"] == 0

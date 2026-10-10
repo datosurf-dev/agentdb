@@ -529,7 +529,8 @@ class AgentDB:
         # Initialize stores using shared DB path
         self._store = MemoryStore(db_path)
         self.audit_log = AuditLog(db_path)
-        self._system = SystemStats(db_path)
+        skills_db_path_for_stats = db_path.parent / "skills.sqlite" if db_path != Path(":memory:") else db_path
+        self._system = SystemStats(db_path, skills_db_path=skills_db_path_for_stats)
 
         # Skills store - use separate DB or same
         skills_db_path = db_path.parent / "skills.sqlite" if db_path != Path(":memory:") else db_path
