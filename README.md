@@ -18,7 +18,7 @@ The full architecture pitch and the numbered design principles live in one canon
 
 ## Current Repository Status (As Of 2026-10-10)
 
-Core governed memory loop is fully operational. All major governance capabilities are implemented and test-covered: conflict detection (temporal + authority + semantic), budgeted retrieval, lifecycle management, memory consolidation, skill draft auto-proposal, context compaction, centralized config + profiles, email/Slack notifications, MCP server (stdio), Anthropic provider ingestor, and two framework adapters (Claude SDK + Hermes). Only HTTP+SSE MCP transport remains deferred.
+Core governed memory loop is fully operational. All major governance capabilities are implemented and test-covered: conflict detection (temporal + authority + semantic), budgeted retrieval, lifecycle management, memory consolidation, skill draft auto-proposal, context compaction, centralized config + profiles, email/Slack notifications, MCP server (stdio), Anthropic provider ingestor, two framework adapters (Claude SDK + Hermes), and YAML-configurable embeddings (`memory.yaml` `embeddings.enabled: true`). Only HTTP+SSE MCP transport remains deferred.
 
 ### Feature State Matrix
 
@@ -45,7 +45,7 @@ Core governed memory loop is fully operational. All major governance capabilitie
 | Reconciliation trigger orchestration + `db.gateway` | Implemented | `db.gateway.subscribe`/`dispatch` is the unified surface. `conflict_detected` dispatched by `write()`. `conversation_started` dispatched by both adapters at turn start; also seeds `SessionProfile` (always active) and auto-triggers consolidation at 7 days + 10 sessions. Conflict queue (`db.gateway.conflict_queue()`), proposal workflow (`propose`/`approve`/`reject`/`list_proposals`) all live here. |
 | Session metadata + cross-repo isolation (`SessionProfile`) | Implemented | `SessionProfile` seeds at `conversation_started` (always active, no embeddings). `_classify_request_type()` sets `request_types` (rule-based, no LLM); `repos` is the last path segment of `working_dirs`. `retrieve()` filters candidates to repos the session has touched; records with no `working_dirs` always pass. `write()` expands the profile mid-session — pivoting to a new repo during a session opens that repo's memories automatically. |
 | Skill–memory conflict signal (`skill_review_needed`) | Implemented (keyword + semantic) | Dispatched from `write()` on key/entity/repo-segment keyword overlap with a scoped skill. Fires at most once per skill per write. Semantic path fires when embeddings active and keyword didn't match — embedding is stored before conflict check runs. LLM-synthesized canonicals from `consolidate(llm_fn=...)` are also re-checked synchronously. |
-| Embedding-backed semantic retrieval/conflicts | Implemented | `embed_fn=` hook in `AgentDB.__init__`; `EmbeddingStore` (SQLite-Vec) + `EmbeddingProvider` wired. Semantic retrieval and semantic skill–memory conflict detection both operational when embeddings active. |
+| Embedding-backed semantic retrieval/conflicts | Implemented | Three activation paths — `embed_fn=` kwarg (any callable), `local_embed=True` flag, or `memory.yaml` `embeddings.enabled: true`. `EmbeddingStore` (SQLite-Vec) + `EmbeddingProvider` wired. Semantic retrieval and semantic skill–memory conflict detection both operational when embeddings active. Default model: `sentence-transformers/all-MiniLM-L6-v2` (requires `pip install 'agentdatabase[local-embed]'`). |
 | Notification channels (email + Slack) | Implemented | `src/agentdb/notifications/`: `EmailChannel` (stdlib smtplib, no extra deps), `SlackChannel` (`slack-sdk` optional extra). `NotificationDispatcher` subscribes to gateway events and routes formatted messages; channel failures isolated. Configure via `memory.yaml` `notifications:` block. |
 | Skill draft auto-proposal from consolidation | Implemented | `Gateway.auto_propose_from_cluster()` auto-fires when consolidation finds an ungoverned cluster. Deduplicates by stored `domain_words`; dispatches `skill_draft_proposed`. Approve via `db.gateway.approve(proposal_id)`. |
 | Context compaction | Implemented | `db.checkpoint(agent_id, session_id)` and `db.write_compaction_summary(agent_id, session_id, summary)` write human_approved records that survive all lifecycle sweeps and are retrievable in future sessions for the same agent. |
@@ -75,7 +75,7 @@ Core governed memory loop is fully operational. All major governance capabilitie
 
 Validation status:
 - Editable install and package-style imports are validated via `pip install -e '.[dev]'`.
-- `python -m pytest -q` → 489 passed.
+- `python -m pytest -q` → 500 collected.
 
 The rest of this README describes architecture intent and phased roadmap behavior.
 
@@ -138,6 +138,41 @@ Expected output:
 world
 ```
 
+### Configuring embeddings
+
+Embeddings are **disabled by default**. Three ways to activate:
+
+**1. YAML (recommended for persistent config)** — edit `memory.yaml` in your workspace:
+
+```yaml
+embeddings:
+  enabled: true
+  # model: sentence-transformers/all-MiniLM-L6-v2   # optional; this is the default
+```
+
+Requires: `pip install 'agentdatabase[local-embed]'`. When `enabled: true` and no `model:` is set, the default `all-MiniLM-L6-v2` model is used.
+
+**2. Constructor flag** — `local_embed=True` activates the default sentence-transformer:
+
+```python
+db = AgentDB(memory_dir="./memory", local_embed=True)
+```
+
+**3. Custom callable** — pass any function that returns a float vector:
+
+```python
+import openai
+
+def embed(text: str) -> list[float]:
+    return openai.embeddings.create(input=text, model="text-embedding-3-small").data[0].embedding
+
+db = AgentDB(memory_dir="./memory", embed_fn=embed)
+```
+
+**Precedence:** `embed_fn=` > `local_embed=True` > `memory.yaml` `enabled: true` > no embeddings.
+
+When active, embeddings enable: semantic retrieval scoring, semantic skill–memory conflict detection, and session topic tracking.
+
 Integration manuals:
 
 - Index: `docs/integrations/README.md`
@@ -161,7 +196,7 @@ These are the developer-facing surfaces you can use immediately in the current i
   - `gateway` — `subscribe(trigger, handler)`, `dispatch(trigger, ...)`, `conflict_queue()`, `propose(...)`, `approve(...)`, `reject(...)`, `list_proposals(...)`; `conversation_started` accepts `session_id`, `agent_id`, `opening_message`, `working_dirs`
   - `config` — returns the fully resolved config dict (mode defaults + yaml overrides)
   - `skills_api` — `create_skill`, `update_skill_version`, `get_skill`, `archive_skill`, `list_stale_skills_for_agent`, `list_skill_warnings_for_agent`
-  - optional initialization: `tracking_directories`, `tracking_root`, `tracking_max_files_per_directory`, `infer_fn`, `memory_dir`
+  - optional initialization: `tracking_directories`, `tracking_root`, `tracking_max_files_per_directory`, `infer_fn`, `memory_dir`, `embed_fn` (custom embedding callable), `local_embed` (bool — activates `LocalEmbeddingProvider` with default sentence-transformer model)
 - `AgentDBBackend` (`from agentdb.backend import AgentDBBackend`)
   - `read`, `write`, `delete`, `list`, `grep`, `glob`
 - Adapters currently implemented under `src/agentdb/adapters/`
@@ -343,7 +378,7 @@ A health score below 0.6 triggers a staleness warning surfaced via `db.skills_ap
 
 **Current limitation (Phase 2):** Entity drift detection is keyword-based — a skill that uses a synonym for a deprecated entity will not be flagged. Semantic entity matching is Phase 5 scope. This limitation is documented in LIMITATIONS.md.
 
-**Planned (Task 13, not started, blocked on Phase 4 embeddings):** a skill draft reconciliation pipeline — an agent can *propose* a new skill or an update to an existing one (written as an ordinary agent-inferred memory record, never touching `skills.sqlite` directly), which gets reconciled against other pending drafts, the target skill, and recently-changed files before a human explicitly approves or rejects it. Proposing is async (notifies a reviewer); only the approval step can ever create or modify a real skill. See the plan for the full design.
+**Skill draft reconciliation pipeline** — implemented. When consolidation surfaces a cluster with no governing skill, `Gateway.auto_propose_from_cluster()` auto-proposes a skill draft. Deduplicates against existing proposals via stored `domain_words`. Human approves via `db.gateway.approve(proposal_id)` or rejects via `db.gateway.reject(proposal_id)`. The approval step is the only path that can create or modify a real skill.
 
 ### Why the algorithm and skills belong together
 
@@ -452,7 +487,7 @@ Detection runs at write time, not read time — by the time an agent is mid-exec
 |---|---|---|
 | **Temporal** | **Implemented** | Auto-resolved in favour of recency. Logged. `conflict_id` stamped on both records. |
 | **Authority** | **Implemented** | Agent-inferred contradicts human-approved → auto-resolved in favour of human. `override_instructions` populated in `RetrievalResult`. `conflict_detected` dispatched via `db.gateway`. |
-| **Semantic** | Planned (Phase 4) | Requires embeddings — deferred. |
+| **Semantic** | **Implemented** | Active when embeddings are configured. `ConflictDetector` runs cosine similarity check when `embed_fn=`, `local_embed=True`, or `memory.yaml` `embeddings.enabled: true` is set. |
 
 `ConflictDetector` (`governance/conflict_detector.py`) is wired into `write()`. On conflict: both records get `conflict_id`, the conflict is stored, and `db.gateway.dispatch("conflict_detected", ...)` fires so any subscriber (Slack notifier, MCP consumer, etc.) is immediately notified.
 
@@ -468,7 +503,7 @@ result.override_instructions  # human-approved wins messages for authority confl
 
 External-context detection (caller-supplied context vs. stored records) is a separate, narrower check available via `external_context=` on `retrieve()` — it flags `external_conflict_detected` audit events but does not interact with the stored `conflicts` table.
 
-**Note:** Structural conflicts (temporal + authority) are always detected. Semantic conflict detection (same-authority, situationally contradictory) requires `embed_fn=` to be set in `AgentDB(...)` — when embeddings are active, cosine similarity checks run automatically in the conflict pipeline.
+**Note:** Structural conflicts (temporal + authority) are always detected. Semantic conflict detection requires embeddings to be active — configure via `embed_fn=` kwarg, `local_embed=True`, or `memory.yaml` `embeddings.enabled: true`.
 
 ---
 
@@ -495,7 +530,7 @@ Signal weights (all configurable, enforced to sum to 1.0 in `MultiSignalRanker`'
 | Semantic (cosine similarity) | 0.0 | No — Mem0 baseline |
 | Workspace (working-directory overlap) | 0.0 | **Yes** |
 
-**Target redistribution once Phase 4 activates embeddings** (not active yet):
+**Target redistribution when embeddings are configured** (`embed_fn=`, `local_embed=True`, or `memory.yaml` `embeddings.enabled: true`):
 
 | Signal | Weight |
 |---|---|
@@ -572,17 +607,24 @@ Action-driven retrieval uses the existing keyword ranker and works with Phase 2 
 AgentDB does not compete with provider-native memory. It governs it.
 
 ```python
-# Provider memory flows INTO AgentDB, not around it
-db.providers.anthropic.sync(memory_store_id="ms_abc123")  # NOT YET IMPLEMENTED
-db.providers.openai.sync(agent_id="assistant")             # NOT YET IMPLEMENTED
-db.providers.google.sync()  # Vertex AI MemoryBankService — NOT YET IMPLEMENTED
+# Anthropic provider — implemented
+from agentdb.providers.anthropic import AnthropicProvider
+import anthropic
+
+client = anthropic.Anthropic(api_key="...")
+provider = AnthropicProvider(db=db, client=client)
+ingested = provider.sync(agent_id="assistant", limit=50)  # returns count written
+
+# OpenAI + Google providers — not yet built
+db.providers.openai.sync(agent_id="assistant")   # NOT YET IMPLEMENTED
+db.providers.google.sync()                        # NOT YET IMPLEMENTED
 ```
 
-No `src/agentdb/providers/` directory exists yet (Phase 3, gated behind the core loop stabilizing — see the plan's Current Status). The interface above is the target shape.
+`src/agentdb/providers/anthropic.py` is implemented. Requires `pip install 'agentdatabase[providers]'`. `AnthropicProvider.sync()` ingests recent assistant message text as `provider_ingested` memories; never overwrites `human_approved`. OpenAI and Google providers are not yet built.
 
-All three providers write with `origin=provider_ingested`, `trust_level=provider`. No provider memory is ever promoted to `human_approved` — the boundary is enforced at ingestion.
+All providers write with `origin=provider_ingested`, `trust_level=provider`. No provider memory is ever promoted to `human_approved` — the boundary is enforced at ingestion.
 
-**Current limitation:** All three providers use polling. Push subscription is deferred until providers expose push APIs.
+**Current limitation:** All providers use polling. Push subscription is deferred until providers expose push APIs.
 
 ---
 
@@ -624,10 +666,12 @@ db.system.agentdb_stats()
 #   "total_memories": 1847,
 #   "avg_confidence": 0.74,
 #   "low_confidence_count": 12,        # confidence < 0.5
-#   "conflict_pending_count": 0,       # hardcoded 0 — conflict tracking doesn't exist yet (see Conflict detection above)
+#   "conflict_pending_count": 3,       # live count of unresolved conflicts
 #   "outcome_positive_rate": 0.87,     # None until at least 10 outcomes are recorded
 #   "retrieval_count_total": 4021,
 #   "external_conflict_rate": None,    # None until at least one external-context retrieve happens
+#   "total_skills": 5,                 # active skills in skills.sqlite
+#   "stale_skill_count": 1,            # skills with health_score < 0.6
 # }
 ```
 
@@ -803,16 +847,18 @@ db.record_outcome(
 
 3. **Memories that consistently precede positive outcomes** have their confidence boosted (up to +0.05 per outcome, capped at +0.1). Memories that precede failures are gently decayed (−0.02 per negative outcome). The agent gets better at knowing what to trust.
 
-4. **The corpus quality dashboard** answers "is this agent's memory getting better?" — actual current return shape (see "System tables" above for the full field list; `conflict_pending_count` is hardcoded `0` and `outcome_positive_rate` is `None` under 10 outcomes, since neither conflict tracking nor a small-sample guard-free rate would be trustworthy yet):
+4. **The corpus quality dashboard** answers "is this agent's memory getting better?" — actual current return shape (`outcome_positive_rate` is `None` under 10 outcomes):
 
 ```python
 db.system.agentdb_stats()
 # {
 #   "avg_confidence":         0.81,   # trending up = memory improving
 #   "low_confidence_count":   3,      # records at risk of archival
-#   "conflict_pending_count": 0,      # hardcoded — no conflict tracking yet
+#   "conflict_pending_count": 2,      # live count of unresolved conflicts
 #   "outcome_positive_rate":  0.87,   # 87% of tasks completed without correction (once >=10 outcomes recorded)
 #   "retrieval_count_total":  412,
+#   "total_skills":           4,
+#   "stale_skill_count":      0,
 # }
 ```
 
@@ -820,7 +866,7 @@ db.system.agentdb_stats()
 
 Provider-ingested memories can decay from negative outcomes but cannot be boosted — they are external data, not learned knowledge.
 
-**Context compaction handling is planned, not yet implemented.** No `checkpoint()` or `write_compaction_summary()` method exists in the codebase today. The intent: promote important working memory to episodic storage before compaction fires, and persist the framework's compressed summary as a durable episodic record, both logged to the audit trail with a compaction boundary marker, with a modest provenance boost for compaction summaries since they're derived from real conversation rather than pure inference.
+**Context compaction is implemented.** `db.checkpoint(agent_id, session_id)` and `db.write_compaction_summary(agent_id, session_id, summary)` write `human_approved` records (key: `memory/compaction/{type}/{session_id}`) that survive all lifecycle sweeps and are retrievable by any future session for the same agent. Framework adapters call these before context truncation to preserve cross-session continuity.
 
 ---
 

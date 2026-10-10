@@ -276,6 +276,44 @@ memory_backend = AgentDBBackend(
 
 If your runtime expects a framework-specific memory interface: only `adapters/claude_agent_sdk.py` exists today (see "A.1" above). `adapters/langgraph.py`, `autogen.py`, `crewai.py`, and `openai_agents.py` are **not implemented** — see the plan's Task 15. Until one exists for your framework, use the generic `AgentDBBackend` pattern shown above; it works with any runtime that supports pluggable key-value storage, adapter or not.
 
+## B.1) Enabling Semantic Search (Embeddings)
+
+Embeddings are **off by default**. When active, they unlock semantic retrieval scoring and semantic conflict detection. Three activation paths:
+
+### Via memory.yaml (recommended for persistent deployments)
+
+In your workspace's `config/memory.yaml`:
+
+```yaml
+embeddings:
+  enabled: true
+  # model: sentence-transformers/all-MiniLM-L6-v2   # optional; this is the default
+```
+
+Requires: `pip install 'agentdatabase[local-embed]'`
+
+### Via constructor flag
+
+```python
+db = AgentDB(memory_dir="./memory", local_embed=True)
+# requires: pip install 'agentdatabase[local-embed]'
+```
+
+### Via custom embed function (any embedding API)
+
+```python
+import openai
+
+def embed(text: str) -> list[float]:
+    return openai.embeddings.create(input=text, model="text-embedding-3-small").data[0].embedding
+
+db = AgentDB(memory_dir="./memory", embed_fn=embed)
+```
+
+Precedence when multiple paths are set: `embed_fn=` > `local_embed=True` > `memory.yaml enabled: true`.
+
+---
+
 ## C) Making Memory Effective (Both Local And Cloud)
 
 For strong behavior, use this loop:
