@@ -22,7 +22,7 @@ Every capability tagged **Dual** below shares one shape: the detection logic (co
 | `file_integrity.py` (SHA-256 hashing) | Track | Dual, unbuilt | Built, unused | Could power a 12a pre-edit staleness check ("this file changed since you last saw it") *and* a 12b periodic drift sweep — same primitive, neither wired in |
 | Conversation JSONL capture | Track | N/A (pure capture) | Implemented (initial) | Logging sink, not consumed by retrieval or any dispatcher |
 | Entity tagging (`entities` field) | Track | Feeds 12a (`retrieve_by_entities`) | Implemented | |
-| Conflict detection | Reconcile | **Dual — the clearest example** | Implemented (temporal + authority) | Wired into `write()` via `ConflictDetector`. Temporal conflicts auto-resolve by recency; authority conflicts flag the record and populate `override_instructions` on retrieve. `conflict_detected` dispatched via `db.gateway.dispatch`. Semantic conflict detection deferred to Phase 3 (embeddings). |
+| Conflict detection | Reconcile | **Dual — the clearest example** | Implemented (temporal + authority + semantic) | Wired into `write()` via `ConflictDetector`. Temporal conflicts auto-resolve by recency; authority conflicts flag the record and populate `override_instructions` on retrieve. `conflict_detected` dispatched via `db.gateway.dispatch`. Semantic conflict detection active when `embed_fn=` is set. `agentdb_stats()` `conflict_pending_count` reflects unresolved rows live. |
 | External-context conflict check | Reconcile | 12a only | Implemented | Returned synchronously to the calling `retrieve()`; no 12b consumer today |
 | Reconciliation triggers | Reconcile | `conversation_started` = 12a; `conflict_detected` = 12a→12b; `file_modified`/`cron` = 12b | Partial | `conversation_started` fires from both adapters at turn start; also always seeds `SessionProfile` and auto-triggers consolidation at 7 days + 10 sessions. `conflict_detected` dispatched by `write()` via `db.gateway`. `file_modified`/`cron` remain unwired. |
 | Session metadata + cross-repo isolation | Reconcile | 12a | Implemented | `SessionProfile` seeds at `conversation_started` (always active, no embeddings). Rule-based `_classify_request_type()` populates `request_types`; `repos` is the last path segment of `working_dirs`. `retrieve()` filters to repos the session has touched; records with no `working_dirs` always pass. `write()` expands `SessionProfile` mid-session for repo pivots. |
@@ -34,10 +34,12 @@ Every capability tagged **Dual** below shares one shape: the detection logic (co
 | Notification channels (`EmailChannel`, `SlackChannel`, `NotificationDispatcher`) | Reconcile | 12b consumer | Implemented | `src/agentdb/notifications/`. `NotificationDispatcher` subscribes to gateway events and routes formatted subject+body to registered channels. Channel failures are isolated (log + continue). Configurable via `memory.yaml` `notifications:` block (`type: email` requires `to`/`smtp_host`/`smtp_user`/`smtp_password`; `type: slack` requires `bot_token`/`channel`). Optional `events:` subset. Slack requires `slack-sdk` extra. |
 | MultiSignalRanker | Rank | 12a | Implemented | |
 | Entity-aware retrieval | Rank | 12a | Implemented | |
-| Provider ingestors | Rank | Ingest feeds 12a for free; a sync-caused conflict could dispatch 12b | Missing (Phase 6) | |
+| Skill draft auto-proposal from consolidation | Reconcile | 12b | Implemented | `Gateway.auto_propose_from_cluster()` called by `_on_untracked_skill_candidate` handler (subscribed in `AgentDB.__init__`). Derives a domain name from cluster dominant words (generic structural words filtered); deduplicates against existing proposals using stored `domain_words`. Dispatches `skill_draft_proposed` event. Human approves/rejects via `db.gateway.approve(proposal_id)` / `reject()`. |
+| Context compaction (`checkpoint`, `write_compaction_summary`) | Reconcile | 12b | Implemented | `AgentDB.checkpoint(agent_id, session_id)` and `write_compaction_summary(agent_id, session_id, summary)` write `human_approved` records (key: `memory/compaction/{type}/{session_id}`) that survive all lifecycle sweeps. Retrievable by any future session for the same agent. Framework adapters call these before context truncation to preserve cross-session continuity. |
+| Provider ingestors | Reconcile/Rank | Ingest writes feed 12a on retrieve; sync-caused conflicts dispatch 12b | Partially implemented | `src/agentdb/providers/anthropic.py`: `AnthropicProvider(db, client).sync(agent_id, limit=50)` ingests assistant message text as `provider_ingested` memories. Never overwrites `human_approved`. Optional extra: `pip install agentdb[providers]`. OpenAI + Google providers not yet built. |
+| System stats (`db.system.agentdb_stats()`) | Rank | N/A (read-only surface) | Implemented | Returns: `total_memories`, `avg_confidence`, `low_confidence_count`, `conflict_pending_count`, `retrieval_count_total`, `outcome_positive_rate`, `external_conflict_rate`, `total_skills`, `stale_skill_count`. Skills queried from separate `skills.sqlite` via `SystemStats(skills_db_path=...)`. |
 | `prepare_turn` / `pre_tool_use` | Inject | 12a | Implemented | Injects governed **memory records** only. Skills are not injected — they are tracked database objects for conflict detection, not context augmentation. |
 | MCP server | Inject | `memory_write`/`memory_retrieve` = transport over 12a; `conflict_queue` = transport over 12b | Implemented (stdio, Task 14) | `interface/mcp_server.py`, 4 tools, `agentdb-mcp` console script. HTTP+SSE deferred. |
-| Skill draft reconciliation pipeline (Task 13) | Reconcile | **Dual** — propose/metric-triggers = 12b; approve/reject = write-time governance | Missing (Phase 3) | Depends on Task 12 (semantic conflict detection) → Task 11 (embeddings). `SkillStore.update()` governance fix can ship independently. |
 
 ## What this means for near-term work
 
@@ -48,12 +50,16 @@ The core loop is operational. Completed items:
 - ~~**Memory consolidation**~~ — **Implemented 2026-10-08.** `db.consolidate()` with auto-trigger, `consolidated` flag, `source_record_ids`, `include_consolidated` on `retrieve()`, LLM synthesis with skill conflict re-check.
 - ~~**Phase 4 embeddings**~~ — **Implemented.** SQLite-Vec embedding store, `embed_fn=` hook in `AgentDB.__init__`, semantic retrieval, and semantic conflict detection all working.
 
-Remaining gaps (see `docs/superpowers/plans/2026-10-10-remaining-roadmap.md`):
+~~**Skill draft reconciliation pipeline**~~ — **Implemented 2026-10-10.** Auto-proposal from consolidation, semantic dedup by domain_words, `skill_draft_proposed` event, approve/reject workflow all wired.
 
-1. **Skill draft reconciliation pipeline (Task 13)** — `propose()/approve()/reject()` exists on gateway; missing: automated proposal triggers, semantic dedup of competing proposals, governance rules for ungoverned memory clusters.
-2. **Context compaction** — `checkpoint()` and `write_compaction_summary()` not yet implemented; agents lose cross-session continuity without it.
-3. **`agentdb_stats()` skill visibility** — conflict count and outcome rate implemented; skill counts (total, stale per domain) still missing from the stats surface.
-4. **Provider ingestors (Phase 6)** — `db.providers.anthropic.sync()` and equivalent for other providers not yet built.
-5. **HTTP+SSE MCP transport** — stdio transport complete (Task 14); HTTP+SSE deferred.
+~~**Context compaction**~~ — **Implemented 2026-10-10.** `checkpoint()` + `write_compaction_summary()` write human_approved records that survive sweeps and are retrievable cross-session.
+
+~~**`agentdb_stats()` skill visibility**~~ — **Implemented 2026-10-10.** `total_skills` + `stale_skill_count` added; skills DB queried via separate `SystemStats(skills_db_path=...)`.
+
+~~**Anthropic provider ingestor**~~ — **Implemented 2026-10-10.** `AnthropicProvider.sync()` ingests assistant messages as `provider_ingested`. OpenAI + Google remain pending.
+
+Remaining gap:
+
+1. **HTTP+SSE MCP transport** — stdio covers Claude Desktop; HTTP+SSE needed only for browser-based or remote agents. Deferred until a concrete integration is requested.
 
 None of these require a new event bus — the dispatcher (`db.gateway`) already exists and is wired.

@@ -18,7 +18,7 @@ The full architecture pitch and the numbered design principles live in one canon
 
 ## Current Repository Status (As Of 2026-10-10)
 
-Core governed memory loop is fully operational: real conflict detection, budgeted retrieval, lifecycle management, centralized config + profiles, MCP server (stdio/Claude Desktop), and two adapters (Claude SDK + Hermes) are all shipped and test-covered. Session metadata + cross-repo isolation, skill–memory conflict signalling (keyword + semantic), memory consolidation, Phase 4 embeddings/semantic search, and email/Slack notifications shipped 2026-10-10. Provider ingestors (Phase 6) and skill draft reconciliation pipeline (Task 13) remain pending.
+Core governed memory loop is fully operational. All major governance capabilities are implemented and test-covered: conflict detection (temporal + authority + semantic), budgeted retrieval, lifecycle management, memory consolidation, skill draft auto-proposal, context compaction, centralized config + profiles, email/Slack notifications, MCP server (stdio), Anthropic provider ingestor, and two framework adapters (Claude SDK + Hermes). Only HTTP+SSE MCP transport remains deferred.
 
 ### Feature State Matrix
 
@@ -47,6 +47,8 @@ Core governed memory loop is fully operational: real conflict detection, budgete
 | Skill–memory conflict signal (`skill_review_needed`) | Implemented (keyword + semantic) | Dispatched from `write()` on key/entity/repo-segment keyword overlap with a scoped skill. Fires at most once per skill per write. Semantic path fires when embeddings active and keyword didn't match — embedding is stored before conflict check runs. LLM-synthesized canonicals from `consolidate(llm_fn=...)` are also re-checked synchronously. |
 | Embedding-backed semantic retrieval/conflicts | Implemented | `embed_fn=` hook in `AgentDB.__init__`; `EmbeddingStore` (SQLite-Vec) + `EmbeddingProvider` wired. Semantic retrieval and semantic skill–memory conflict detection both operational when embeddings active. |
 | Notification channels (email + Slack) | Implemented | `src/agentdb/notifications/`: `EmailChannel` (stdlib smtplib, no extra deps), `SlackChannel` (`slack-sdk` optional extra). `NotificationDispatcher` subscribes to gateway events and routes formatted messages; channel failures isolated. Configure via `memory.yaml` `notifications:` block. |
+| Skill draft auto-proposal from consolidation | Implemented | `Gateway.auto_propose_from_cluster()` auto-fires when consolidation finds an ungoverned cluster. Deduplicates by stored `domain_words`; dispatches `skill_draft_proposed`. Approve via `db.gateway.approve(proposal_id)`. |
+| Context compaction | Implemented | `db.checkpoint(agent_id, session_id)` and `db.write_compaction_summary(agent_id, session_id, summary)` write human_approved records that survive all lifecycle sweeps and are retrievable in future sessions for the same agent. |
 
 #### Rank
 
@@ -54,9 +56,9 @@ Core governed memory loop is fully operational: real conflict detection, budgete
 |---|---|---|
 | Algorithm + skills complement | Implemented (initial) | Retrieval ranks memory records by provenance, recency, confidence, and causal signals. Skills are tracked database objects for conflict detection and staleness signalling — they are NOT injected into agent context. |
 | Skills store + staleness signalling | Implemented | Versioned skills, staleness-based health scoring anchored on `updated_at` (content age). Stale-crossing fires `on_stale_crossing` callback, which dispatches `skill_stale` to gateway for async consumers (email, Slack, review queues). Check warnings via `db.skills_api.list_skill_warnings_for_agent()`. |
-| System stats surface | Implemented (initial) | Includes retrieval/outcome/conflict-rate aggregates. |
+| System stats surface | Implemented | `db.system.agentdb_stats()` returns: `total_memories`, `avg_confidence`, `low_confidence_count`, `conflict_pending_count`, `retrieval_count_total`, `outcome_positive_rate`, `external_conflict_rate`, `total_skills`, `stale_skill_count`. |
 | Entity-aware retrieval core (`entities`, `retrieve_by_entities`) | Implemented (initial) | Additive entity tagging and keyword-based entity retrieval are available in core. |
-| Provider ingestors (Anthropic/OpenAI/Google sync) | Planned (Phase 3) | Architecture intent documented; module surface pending. Deliberately deferred — validating core loop with Claude SDK + Hermes in production first. |
+| Provider ingestors | Partially implemented | `src/agentdb/providers/anthropic.py`: `AnthropicProvider(db, client).sync(agent_id, limit=50)` ingests assistant message text as `provider_ingested` memories; never overwrites `human_approved`. Optional extra: `pip install agentdb[providers]`. OpenAI + Google providers not yet built. |
 | Lifecycle manager (`db.lifecycle`) | Implemented | `run_sweep()`: Step 0 archives expired records (`expiry_time ≤ now`); Step 1 optional confidence decay (off by default); Step 2 archives below `ARCHIVAL_THRESHOLD`; Step 3 archives past `STALENESS_DAYS`. `reinforce()` and `record_outcome()` also on `db.lifecycle`. `human_approved` records immune to all sweep operations. |
 | Memory consolidation (`db.consolidate()`) | Implemented | `_lc_cluster()` groups near-duplicate records by key-word overlap. Canonical (highest confidence) survives, marked `consolidated=True` with `source_record_ids` tracing all originals. Lower-confidence copies archived. Auto-triggers at `conversation_started` when ≥7 days AND ≥10 sessions have elapsed since the last run per agent (`consolidation_state` table). `retrieve()` accepts `include_consolidated=False` to exclude consolidated records from injection. Optional `llm_fn=` synthesizes the canonical value; the LLM result is re-checked for skill conflict. `untracked_skill_candidate` dispatched when a cluster's topic has no governing skill. |
 | `infer` flag + `expiry_time` on `write()` | Implemented | `infer=True` routes the raw value through a caller-supplied `infer_fn` before storage (raises `ValueError` if no `infer_fn` set). `expiry_time: datetime` sets a hard TTL; sweep archives once it passes. Both apply to `agent_inferred` only; `human_approved` records are immune. |
@@ -69,11 +71,11 @@ Core governed memory loop is fully operational: real conflict detection, budgete
 | Query-driven retrieval into turn context | Implemented (Claude SDK + Hermes) | Both adapters retrieve at turn start via `prepare_turn`. `budget_tokens` param now wired end-to-end; `RetrievalResult.token_estimate` and `truncated` are live. |
 | Action-driven retrieval (`entities`, `retrieve_by_entities`, `PreToolUse` hook) | Implemented (initial) | Core entity retrieval, adapter `pre_tool_use(...)`, and downstream hook-registration surface are implemented; automatic SDK attachment remains downstream integration work. |
 | MCP server surface | Implemented (stdio) | `interface/mcp_server.py`: 4 tools (`memory_write`, `memory_retrieve`, `conflict_queue`, `memory_stats`). `agentdb-mcp` console script. HTTP+SSE transport deferred. |
-| Hardening and production controls | Planned (Phase 6) | Roadmap-only at this snapshot. |
+| HTTP+SSE MCP transport | Deferred | stdio transport covers Claude Desktop. HTTP+SSE needed for browser-based/remote agents; deferred until a concrete integration is requested. |
 
 Validation status:
 - Editable install and package-style imports are validated via `pip install -e '.[dev]'`.
-- `python -m pytest -q` → 465 passed.
+- `python -m pytest -q` → 489 passed.
 
 The rest of this README describes architecture intent and phased roadmap behavior.
 
