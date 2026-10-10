@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import math
 import threading
-from typing import Callable, Protocol, runtime_checkable
+from typing import Callable, Optional, Protocol, runtime_checkable
 
 
 @runtime_checkable
@@ -53,20 +53,31 @@ class FunctionEmbeddingProvider:
 
 
 class LocalEmbeddingProvider:
-    _MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
-    _model = None
+    _DEFAULT_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
+    _MODEL_NAME = _DEFAULT_MODEL  # backward-compat alias
+    _models: "dict[str, object]" = {}
     _lock = threading.Lock()
+
+    def __init__(self, model_name: Optional[str] = None) -> None:
+        self._model_name = model_name or self._DEFAULT_MODEL
 
     @property
     def model_name(self) -> str:
-        return self._MODEL_NAME
+        return self._model_name
 
     @property
     def dimensions(self) -> int:
-        return 384
+        if self._model_name == self._DEFAULT_MODEL:
+            return 384
+        # Custom model: load and probe actual dimension
+        if self._model_name not in LocalEmbeddingProvider._models:
+            with LocalEmbeddingProvider._lock:
+                self._ensure_loaded()
+        model = LocalEmbeddingProvider._models[self._model_name]
+        return int(model.get_sentence_embedding_dimension())  # type: ignore[attr-defined]
 
-    def _load_model(self) -> None:
-        if LocalEmbeddingProvider._model is None:
+    def _ensure_loaded(self) -> None:
+        if self._model_name not in LocalEmbeddingProvider._models:
             try:
                 from sentence_transformers import SentenceTransformer  # type: ignore
             except ImportError as e:
@@ -78,12 +89,12 @@ class LocalEmbeddingProvider:
             logging.getLogger("agentdb").info(
                 "agentdb: loading local embedding model (first use)"
             )
-            LocalEmbeddingProvider._model = SentenceTransformer(self._MODEL_NAME)
+            LocalEmbeddingProvider._models[self._model_name] = SentenceTransformer(self._model_name)
 
     def embed(self, text: str) -> list[float]:
         with LocalEmbeddingProvider._lock:
-            self._load_model()
-            vecs = LocalEmbeddingProvider._model.encode(
+            self._ensure_loaded()
+            vecs = LocalEmbeddingProvider._models[self._model_name].encode(  # type: ignore[attr-defined]
                 [text], normalize_embeddings=True
             )
         return vecs[0].tolist()
@@ -92,8 +103,8 @@ class LocalEmbeddingProvider:
         if not texts:
             return []
         with LocalEmbeddingProvider._lock:
-            self._load_model()
-            vecs = LocalEmbeddingProvider._model.encode(
+            self._ensure_loaded()
+            vecs = LocalEmbeddingProvider._models[self._model_name].encode(  # type: ignore[attr-defined]
                 texts, normalize_embeddings=True
             )
         return [v.tolist() for v in vecs]

@@ -421,6 +421,12 @@ database:
   mode: embedded
   path: database/agentdb.sqlite
 
+# Uncomment to enable semantic retrieval and conflict detection.
+# Requires: pip install 'agentdatabase[local-embed]'
+# embeddings:
+#   enabled: false
+#   # model: sentence-transformers/all-MiniLM-L6-v2   # optional; this is the default
+
 # Uncomment to enable governance notifications.
 # notifications:
 #   # events: omit to receive all four, or list a subset:
@@ -586,6 +592,11 @@ class AgentDB:
         elif local_embed:
             from ..embeddings import LocalEmbeddingProvider, EmbeddingStore
             self._embedding_provider = LocalEmbeddingProvider()
+        elif self._raw_embeddings_cfg.get("enabled"):
+            from ..embeddings import LocalEmbeddingProvider, EmbeddingStore
+            self._embedding_provider = LocalEmbeddingProvider(
+                model_name=self._raw_embeddings_cfg.get("model")
+            )
         if self._embedding_provider is not None and str(self._path) != ":memory:":
             from ..embeddings import EmbeddingStore
             embed_db_path = self._path.parent / "embeddings.db"

@@ -75,14 +75,14 @@ def test_cosine_unnormalized_vectors():
 
 def test_local_provider_raises_runtime_error_when_package_missing():
     with patch.dict("sys.modules", {"sentence_transformers": None}):
-        original_model = LocalEmbeddingProvider._model
-        LocalEmbeddingProvider._model = None
+        original_models = dict(LocalEmbeddingProvider._models)
+        LocalEmbeddingProvider._models.clear()
         try:
             provider = LocalEmbeddingProvider()
             with pytest.raises(RuntimeError, match="local-embed"):
                 provider.embed("hello")
         finally:
-            LocalEmbeddingProvider._model = original_model
+            LocalEmbeddingProvider._models.update(original_models)
 
 
 def test_local_provider_model_name():
