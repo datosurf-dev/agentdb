@@ -336,6 +336,24 @@ class AgentDBMiddleware(GatewayAdapter):
         )
         return response_text
 
+    def _build_skills_block(self, session_id: str, user_query: str) -> str:
+        """Return a formatted markdown block of relevant skills, or '' if none qualify."""
+        if user_query.strip():
+            skills = self._db.skills.search(query=user_query, agent_id=self._agent_id)
+        else:
+            skills = self._db.skills.get_for_agent(self._agent_id)
+
+        skills = sorted(
+            (s for s in skills if s.health_score >= 0.5 and not s.archived),
+            key=lambda s: s.health_score,
+            reverse=True,
+        )[:5]
+
+        if not skills:
+            return ""
+
+        return "\n\n".join(f"### {s.name}\n{s.content}" for s in skills)
+
     async def prepare_turn_async(
         self,
         *,
@@ -346,7 +364,7 @@ class AgentDBMiddleware(GatewayAdapter):
         base_messages: Optional[list[dict[str, str]]] = None,
         working_dirs: Optional[list[str]] = None,
     ) -> tuple[list[dict[str, str]], "RetrievalResult"]:
-        return self.prepare_turn(
+        messages, retrieval = self.prepare_turn(
             user_query=user_query,
             session_id=session_id,
             system_prompt=system_prompt,
@@ -354,6 +372,21 @@ class AgentDBMiddleware(GatewayAdapter):
             base_messages=base_messages,
             working_dirs=working_dirs,
         )
+
+        new_blocks: list[dict[str, str]] = []
+
+        if self._capabilities.inject_skills:
+            block = self._build_skills_block(session_id, user_query)
+            if block:
+                new_blocks.append({"role": "system", "content": f"## Skills\n{block}"})
+
+        if new_blocks:
+            first_user = next(
+                (i for i, m in enumerate(messages) if m["role"] == "user"), len(messages)
+            )
+            messages[first_user:first_user] = new_blocks
+
+        return messages, retrieval
 
     async def finalize_turn_async(
         self,
