@@ -337,6 +337,29 @@ class AgentDBMiddleware(GatewayAdapter):
         )
         return response_text
 
+    def _build_work_context_block(self, session_id: str) -> str:
+        """Return a formatted markdown block of the last 5 turns from the work log, or '' if empty."""
+        log = self._session_work_log.get(session_id, [])
+        if not log:
+            return ""
+        lines: list[str] = []
+        for entry in log[-5:]:
+            parts: list[str] = [f"Turn {entry['turn_num']}:"]
+            if entry.get("files_read"):
+                parts.append(f"read {', '.join(entry['files_read'])}.")
+            if entry.get("files_written"):
+                parts.append(f"wrote {', '.join(entry['files_written'])}.")
+            if entry.get("key_fact"):
+                parts.append(entry["key_fact"])
+            lines.append(" ".join(parts))
+        return "\n".join(lines)
+
+    def _trim_to_budget(self, content: str, token_budget: int) -> str:
+        """Truncate content to token_budget tokens (approximated as len // 4)."""
+        if len(content) // 4 <= token_budget:
+            return content
+        return content[: token_budget * 4] + "…"
+
     def _build_skills_block(self, session_id: str, user_query: str) -> str:
         """Return a formatted markdown block of relevant skills, or '' if none qualify."""
         if user_query.strip():
@@ -452,15 +475,30 @@ class AgentDBMiddleware(GatewayAdapter):
 
         new_blocks: list[dict[str, str]] = []
 
+        skills_budget = int(self._capabilities.max_injection_tokens * 0.4)
+        workspace_budget = int(self._capabilities.max_injection_tokens * 0.3)
+        work_context_budget = int(self._capabilities.max_injection_tokens * 0.3)
+
         if self._capabilities.inject_skills:
             block = self._build_skills_block(session_id, user_query)
+            if block:
+                block = self._trim_to_budget(block, skills_budget)
             if block:
                 new_blocks.append({"role": "system", "content": f"## Skills\n{block}"})
 
         if self._capabilities.inject_workspace:
             ws = self._build_workspace_block(session_id, working_dirs or [])
             if ws:
+                ws = self._trim_to_budget(ws, workspace_budget)
+            if ws:
                 new_blocks.append({"role": "system", "content": f"## Workspace\n{ws}"})
+
+        if self._capabilities.inject_work_context:
+            wc = self._build_work_context_block(session_id)
+            if wc:
+                wc = self._trim_to_budget(wc, work_context_budget)
+            if wc:
+                new_blocks.append({"role": "system", "content": f"## Current work context\n{wc}"})
 
         if new_blocks:
             first_user = next(

@@ -112,3 +112,55 @@ async def test_workspace_not_injected_for_claude(db, tmp_path):
     )
     system_contents = "\n".join(m["content"] for m in messages if m["role"] == "system")
     assert "## Workspace" not in system_contents
+
+
+@pytest.mark.asyncio
+async def test_work_context_injected_for_local(db):
+    mw = AgentDBMiddleware(db=db, agent_id="a1", capabilities=LOCAL_CAPABILITIES)
+    mw.record_turn_context("s1", 1, ["models/foo.sql"], [], "compiled foo model")
+    mw.record_turn_context("s1", 2, [], ["models/bar.sql"], "wrote bar model")
+    messages, _ = await mw.prepare_turn_async(user_query="what next", session_id="s1")
+    system_contents = "\n".join(m["content"] for m in messages if m["role"] == "system")
+    assert "## Current work context" in system_contents
+    assert "foo.sql" in system_contents
+    assert "bar.sql" in system_contents
+
+
+@pytest.mark.asyncio
+async def test_budget_enforcement_trims_blocks(db):
+    from agentdb.adapters.capabilities import RunnerCapabilities
+    tiny_caps = RunnerCapabilities(inject_skills=True, inject_workspace=False,
+                                   inject_work_context=False, max_injection_tokens=10)
+    db.skills.create(Skill(
+        id="big-skill", name="big-skill",
+        content="x" * 500,
+        authored_by="human", scope=["a1"],
+    ))
+    mw = AgentDBMiddleware(db=db, agent_id="a1", capabilities=tiny_caps)
+    messages, _ = await mw.prepare_turn_async(user_query="big skill", session_id="s1")
+    # Block must be absent or truncated — content must not exceed budget
+    skills_content = next((m["content"] for m in messages
+                           if m["role"] == "system" and "## Skills" in m["content"]), "")
+    token_estimate = len(skills_content) // 4
+    assert token_estimate <= 10
+
+
+@pytest.mark.asyncio
+async def test_injection_order_skills_before_workspace_before_context(db, tmp_path):
+    mw = AgentDBMiddleware(db=db, agent_id="a1", capabilities=LOCAL_CAPABILITIES)
+    db.skills.create(Skill(
+        id="sk", name="sk",
+        content="do X",
+        authored_by="human", scope=["a1"],
+    ))
+    mw.record_turn_context("s1", 1, ["f.py"], [], "fact")
+    messages, _ = await mw.prepare_turn_async(
+        user_query="sk", session_id="s1", working_dirs=[str(tmp_path)]
+    )
+    sys_msgs = [m["content"] for m in messages if m["role"] == "system"]
+    idxs = {
+        "skills": next((i for i, c in enumerate(sys_msgs) if "## Skills" in c), -1),
+        "workspace": next((i for i, c in enumerate(sys_msgs) if "## Workspace" in c), -1),
+        "context": next((i for i, c in enumerate(sys_msgs) if "## Current work context" in c), -1),
+    }
+    assert idxs["skills"] < idxs["workspace"] < idxs["context"]
