@@ -362,21 +362,24 @@ class AgentDBMiddleware(GatewayAdapter):
 
     def _build_skills_block(self, session_id: str, user_query: str) -> str:
         """Return a formatted markdown block of relevant skills, or '' if none qualify."""
-        if user_query.strip():
-            skills = self._db.skills.search(query=user_query, agent_id=self._agent_id)
-        else:
-            skills = self._db.skills.get_for_agent(self._agent_id)
+        try:
+            if user_query.strip():
+                skills = self._db.skills.search(query=user_query, agent_id=self._agent_id)
+            else:
+                skills = self._db.skills.get_for_agent(self._agent_id)
 
-        skills = sorted(
-            (s for s in skills if s.health_score >= 0.5 and not s.archived),
-            key=lambda s: s.health_score,
-            reverse=True,
-        )[:5]
+            skills = sorted(
+                (s for s in skills if s.health_score >= 0.5 and not s.archived),
+                key=lambda s: s.health_score,
+                reverse=True,
+            )[:5]
 
-        if not skills:
+            if not skills:
+                return ""
+
+            return "\n\n".join(f"### {s.name}\n{s.content}" for s in skills)
+        except Exception:
             return ""
-
-        return "\n\n".join(f"### {s.name}\n{s.content}" for s in skills)
 
     _WORKSPACE_EXCLUDED_DIRS = {"__pycache__", "node_modules", "dist", ".venv", "venv", "env"}
 

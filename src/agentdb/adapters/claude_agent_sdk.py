@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any, Callable, Optional
 from .middleware import AgentDBMiddleware as AgentDBClaudeMiddleware  # noqa: F401
 from .middleware import AgentDBMiddleware  # noqa: F401
 from .middleware import _extract_text_from_model_response
+from .capabilities import CLAUDE_CAPABILITIES
 
 if TYPE_CHECKING:
     from ..interface.client import AgentDB, RetrievalResult
@@ -50,7 +51,7 @@ class AgentDBClaudeRuntime:
         system_prompt: Optional[str] = None,
         max_tokens: int = 1024,
     ) -> "AgentDBClaudeRuntime":
-        middleware = AgentDBMiddleware(db=db, agent_id=agent_id)
+        middleware = AgentDBMiddleware(db=db, agent_id=agent_id, capabilities=CLAUDE_CAPABILITIES)
 
         def _invoke(messages: list[dict[str, str]]) -> Any:
             system_blocks = [m["content"] for m in messages if m.get("role") == "system"]
@@ -94,7 +95,7 @@ class AgentDBClaudeRuntime:
             async-for client.receive_response() yielding messages with
             .content (list of blocks with .text) or .is_error/.result.
         """
-        middleware = AgentDBMiddleware(db=db, agent_id=agent_id)
+        middleware = AgentDBMiddleware(db=db, agent_id=agent_id, capabilities=CLAUDE_CAPABILITIES)
         instance = cls(
             middleware=middleware,
             invoke_model=lambda messages: "",
