@@ -18,7 +18,7 @@ class RunnerCapabilities:
 # Claude capabilities: no injection (Claude has native context management)
 CLAUDE_CAPABILITIES = RunnerCapabilities(
     can_call_tools_mid_turn=True,
-    can_write_mid_turn=False,
+    can_write_mid_turn=True,
     has_native_memory=False,
     inject_skills=False,
     inject_workspace=False,

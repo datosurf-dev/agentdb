@@ -647,6 +647,7 @@ class AgentDBMiddleware(GatewayAdapter):
                     elevated=False,
                 )
                 self._session_dir_state[session_id].append(new_record)
+                records_by_path[path] = new_record
 
     def _on_conflict(self, **payload) -> None:
         """
