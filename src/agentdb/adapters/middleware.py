@@ -71,6 +71,16 @@ def _extract_text_from_model_response(raw_response: Any) -> str:
     return str(raw_response)
 
 
+@dataclass
+class DirectoryRecord:
+    """Tracks file system directory access within a session."""
+    path: str
+    first_seen_turn: int
+    last_seen_turn: int
+    access_count: int
+    elevated: bool = False
+
+
 @dataclass(frozen=True)
 class ClaudeRuntimeConfig:
     model: str
@@ -98,6 +108,8 @@ class AgentDBMiddleware(GatewayAdapter):
         self._conversation_started_callback = conversation_started_callback
         self._resolved = resolved
         self._session_working_dirs: dict[str, list[str]] = {}
+        self._session_dir_state: dict[str, list[DirectoryRecord]] = {}
+        self._session_work_log: dict[str, list[dict]] = {}
         self._capabilities = capabilities
         self.gateway.subscribe("conflict_detected", self._on_conflict)
 
@@ -413,6 +425,72 @@ class AgentDBMiddleware(GatewayAdapter):
             outcome_value=outcome_value,
         )
         return response_text
+
+    def record_turn_context(
+        self,
+        session_id: str,
+        turn_num: int,
+        files_read: list[str],
+        files_written: list[str],
+        key_fact: str,
+    ) -> None:
+        """
+        Record turn context to the session work log.
+        Caps at 20 turns; drops oldest when exceeding limit.
+        """
+        if session_id not in self._session_work_log:
+            self._session_work_log[session_id] = []
+
+        entry = {
+            "turn_num": turn_num,
+            "files_read": files_read,
+            "files_written": files_written,
+            "key_fact": key_fact,
+        }
+        self._session_work_log[session_id].append(entry)
+
+        # Cap at 20 turns: drop index 0 if list exceeds 20
+        if len(self._session_work_log[session_id]) > 20:
+            self._session_work_log[session_id].pop(0)
+
+    def report_directories(
+        self,
+        session_id: str,
+        dirs: list[str],
+    ) -> None:
+        """
+        Report accessed directories for a session.
+        Upserts DirectoryRecord entries; caps total list at 200 per session.
+        """
+        if session_id not in self._session_dir_state:
+            self._session_dir_state[session_id] = []
+
+        # Build a dict for fast lookup
+        records_by_path = {r.path: r for r in self._session_dir_state[session_id]}
+
+        for path in dirs:
+            if path in records_by_path:
+                # Upsert: increment access_count and update last_seen_turn
+                records_by_path[path].access_count += 1
+                records_by_path[path].last_seen_turn = len(self._session_dir_state[session_id])
+            else:
+                # New entry: check cap before inserting
+                if len(self._session_dir_state[session_id]) >= 200:
+                    # Drop oldest (index 0)
+                    self._session_dir_state[session_id].pop(0)
+                    # Rebuild dict after dropping
+                    records_by_path = {r.path: r for r in self._session_dir_state[session_id]}
+
+                # Create new record
+                turn_proxy = len(self._session_dir_state[session_id])
+                new_record = DirectoryRecord(
+                    path=path,
+                    first_seen_turn=turn_proxy,
+                    last_seen_turn=turn_proxy,
+                    access_count=1,
+                    elevated=False,
+                )
+                self._session_dir_state[session_id].append(new_record)
 
     def _on_conflict(self, **payload) -> None:
         """
