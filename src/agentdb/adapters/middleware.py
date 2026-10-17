@@ -847,3 +847,78 @@ class AgentDBMiddleware(GatewayAdapter):
                 session_id=session_id,
             )
         }
+
+    def elevate_directory(
+        self,
+        session_id: str,
+        path: str,
+        origin: str = "human_approved",
+        confidence: float = 0.8,
+    ) -> "MemoryRecord":
+        """
+        Persist a directory path to AgentDB and mark it elevated in session state.
+        Returns the written MemoryRecord.
+        """
+        record = self._db.write(
+            key=f"workspace.dir.{path}",
+            value=path,
+            origin=origin,
+            agent_id=self._agent_id,
+            session_id=session_id,
+            confidence=confidence,
+        )
+
+        if session_id not in self._session_dir_state:
+            self._session_dir_state[session_id] = []
+
+        records_by_path = {r.path: r for r in self._session_dir_state[session_id]}
+        if path in records_by_path:
+            records_by_path[path].elevated = True
+        else:
+            new_record = DirectoryRecord(
+                path=path,
+                first_seen_turn=0,
+                last_seen_turn=0,
+                access_count=1,
+                elevated=True,
+            )
+            self._session_dir_state[session_id].append(new_record)
+
+        return record
+
+    def write_session_summary(self, session_id: str, jsonl_path: str) -> None:
+        """
+        Append a session summary JSON line to jsonl_path (creates file if missing).
+        """
+        summary = {
+            "type": "session_summary",
+            "session_id": session_id,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "agent_id": self._agent_id,
+            "agentdb_checkpoint_key": f"memory/compaction/checkpoint/{session_id}",
+            "working_dirs": self._session_working_dirs.get(session_id, []),
+            "temp_dirs": [r.path for r in self._session_dir_state.get(session_id, []) if not r.elevated],
+            "elevated_dirs": [r.path for r in self._session_dir_state.get(session_id, []) if r.elevated],
+            "turn_count": len(self._session_work_log.get(session_id, [])),
+            "last_work_context": self._build_work_context_block(session_id),
+        }
+        with open(jsonl_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(summary) + "\n")
+
+    async def end_session(
+        self,
+        session_id: str,
+        jsonl_path: str,
+        summary: Optional[dict] = None,
+        run_consolidation: bool = False,
+        llm_fn: Optional[Callable] = None,
+    ) -> None:
+        """
+        Finalize a session: checkpoint, optionally consolidate, write summary, clear state.
+        """
+        self._db.checkpoint(agent_id=self._agent_id, session_id=session_id)
+        if run_consolidation:
+            self._db.consolidate(agent_id=self._agent_id, llm_fn=llm_fn)
+        self.write_session_summary(session_id, jsonl_path)
+        self._session_dir_state.pop(session_id, None)
+        self._session_work_log.pop(session_id, None)
