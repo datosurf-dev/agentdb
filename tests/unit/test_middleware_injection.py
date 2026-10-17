@@ -1,3 +1,6 @@
+import os
+import tempfile
+
 import pytest
 from pathlib import Path
 from agentdb import AgentDB
@@ -74,3 +77,38 @@ async def test_session_start_injects_top_skills_by_health(db):
     messages, _ = await mw.prepare_turn_async(user_query="", session_id="s1")
     system_contents = "\n".join(m["content"] for m in messages if m["role"] == "system")
     assert "## Skills" in system_contents
+
+
+@pytest.mark.asyncio
+async def test_workspace_block_injected_for_local(db, tmp_path):
+    mw = AgentDBMiddleware(db=db, agent_id="a1", capabilities=LOCAL_CAPABILITIES)
+    messages, _ = await mw.prepare_turn_async(
+        user_query="show me the files",
+        session_id="s1",
+        working_dirs=[str(tmp_path)],
+    )
+    system_contents = "\n".join(m["content"] for m in messages if m["role"] == "system")
+    assert "## Workspace" in system_contents
+    assert str(tmp_path) in system_contents
+
+
+@pytest.mark.asyncio
+async def test_workspace_includes_temp_dirs(db, tmp_path):
+    mw = AgentDBMiddleware(db=db, agent_id="a1", capabilities=LOCAL_CAPABILITIES)
+    mw.report_directories("s1", ["/tmp/new-feature"])
+    messages, _ = await mw.prepare_turn_async(
+        user_query="what dirs", session_id="s1", working_dirs=[str(tmp_path)]
+    )
+    system_contents = "\n".join(m["content"] for m in messages if m["role"] == "system")
+    assert "new-feature" in system_contents
+    assert "this session" in system_contents
+
+
+@pytest.mark.asyncio
+async def test_workspace_not_injected_for_claude(db, tmp_path):
+    mw = AgentDBMiddleware(db=db, agent_id="a1", capabilities=CLAUDE_CAPABILITIES)
+    messages, _ = await mw.prepare_turn_async(
+        user_query="files", session_id="s1", working_dirs=[str(tmp_path)]
+    )
+    system_contents = "\n".join(m["content"] for m in messages if m["role"] == "system")
+    assert "## Workspace" not in system_contents

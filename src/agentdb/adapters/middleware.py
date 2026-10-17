@@ -19,6 +19,7 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Optional
 import json
 import os
+import subprocess
 
 from ..core.directory_tracking import collect_directory_snapshots
 from ..gateway.adapter import GatewayAdapter
@@ -354,6 +355,82 @@ class AgentDBMiddleware(GatewayAdapter):
 
         return "\n\n".join(f"### {s.name}\n{s.content}" for s in skills)
 
+    _WORKSPACE_EXCLUDED_DIRS = {"__pycache__", "node_modules", "dist", ".venv", "venv", "env"}
+
+    def _build_workspace_block(self, session_id: str, working_dirs: list[str]) -> str:
+        """
+        Build a workspace snapshot block for injection. Best-effort: swallows all exceptions.
+        Lists up to 2 levels deep, excludes hidden dirs and common noise dirs.
+        Appends git branch/status when available. Includes session temp dirs.
+        Returns '' if nothing collected.
+        """
+        sections: list[str] = []
+
+        try:
+            for raw_dir in working_dirs:
+                try:
+                    if not os.path.isdir(raw_dir):
+                        continue
+
+                    lines: list[str] = [raw_dir]
+
+                    # List up to 2 levels deep
+                    try:
+                        for entry in sorted(os.scandir(raw_dir), key=lambda e: e.name):
+                            if entry.name.startswith(".") or entry.name in self._WORKSPACE_EXCLUDED_DIRS:
+                                continue
+                            lines.append(f"  {entry.name}{'/' if entry.is_dir() else ''}")
+                            if entry.is_dir():
+                                try:
+                                    for sub in sorted(os.scandir(entry.path), key=lambda e: e.name):
+                                        if sub.name.startswith(".") or sub.name in self._WORKSPACE_EXCLUDED_DIRS:
+                                            continue
+                                        lines.append(f"    {sub.name}{'/' if sub.is_dir() else ''}")
+                                except OSError:
+                                    pass
+                    except OSError:
+                        pass
+
+                    # Git info
+                    try:
+                        branch_result = subprocess.run(
+                            ["git", "-C", raw_dir, "rev-parse", "--abbrev-ref", "HEAD"],
+                            capture_output=True, text=True, timeout=5,
+                        )
+                        if branch_result.returncode == 0:
+                            branch = branch_result.stdout.strip()
+                            lines.append(f"  [git branch: {branch}]")
+                            status_result = subprocess.run(
+                                ["git", "-C", raw_dir, "status", "--short"],
+                                capture_output=True, text=True, timeout=5,
+                            )
+                            if status_result.returncode == 0 and status_result.stdout.strip():
+                                for status_line in status_result.stdout.strip().splitlines():
+                                    lines.append(f"  {status_line}")
+                    except Exception:
+                        pass
+
+                    sections.append("\n".join(lines))
+                except Exception:
+                    pass
+
+            # Temp dirs from session state (non-elevated only)
+            try:
+                records = self._session_dir_state.get(session_id, [])
+                temp_lines: list[str] = []
+                for record in records:
+                    if not record.elevated:
+                        temp_lines.append(f"  {record.path} (this session)")
+                if temp_lines:
+                    sections.append("Session directories:\n" + "\n".join(temp_lines))
+            except Exception:
+                pass
+
+        except Exception:
+            pass
+
+        return "\n\n".join(sections)
+
     async def prepare_turn_async(
         self,
         *,
@@ -379,6 +456,11 @@ class AgentDBMiddleware(GatewayAdapter):
             block = self._build_skills_block(session_id, user_query)
             if block:
                 new_blocks.append({"role": "system", "content": f"## Skills\n{block}"})
+
+        if self._capabilities.inject_workspace:
+            ws = self._build_workspace_block(session_id, working_dirs or [])
+            if ws:
+                new_blocks.append({"role": "system", "content": f"## Workspace\n{ws}"})
 
         if new_blocks:
             first_user = next(
