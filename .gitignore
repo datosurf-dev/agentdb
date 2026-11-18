@@ -17,3 +17,6 @@ ENV/
 
 # macOS
 .DS_Store
+
+# Runtime workspace created by AgentDB() defaults / tests
+agentdb-workspace/
