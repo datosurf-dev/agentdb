@@ -2,19 +2,19 @@
 
 ## Scope
 
-These instructions are repository-level and apply to all agent work in this repo, including runs that do not invoke superpowers skills.
+These instructions are repository-level and apply to all agent work in this repo.
 
 ## Canonical Context Sources
 
-1. Global instructions: `AGENTS.md`
-2. Superpowers plan (active/open work): `docs/superpowers/plans/2026-06-06-agentdb-revised.md`
-3. Completed work tracker: `docs/superpowers/plans/completed-tasks.md`
-4. Architecture & design principles: `docs/context/architecture-principles.md`
-5. Capabilities by type: `docs/context/capabilities.md`
-6. Database schema and memory assets: `docs/context/database-schema.md`
+1. Repository instructions: `AGENTS.md`
+2. Architecture & design principles: `docs/context/architecture-principles.md`
+3. Capabilities by type: `docs/context/capabilities.md`
+4. Database schema and memory assets: `docs/context/database-schema.md` (verify details against source)
+5. Testing strategy: `docs/context/testing-strategy.md`
+6. Integration guides: `docs/integrations/README.md`
 7. Algorithm review skill (when touching ranking/reinforcement surfaces): `.claude/skills/agentdb-algorithm-review/SKILL.md`
 
-If guidance conflicts, follow this file first, then the superpowers plan.
+If documentation and implementation disagree, use the current source and tests as the authority.
 
 ## Algorithm Review Trigger
 
@@ -31,8 +31,10 @@ Full numbered design principles live in `docs/context/architecture-principles.md
 - Do not claim semantic retrieval/conflict behavior before embedding-backed implementation is active.
 - Keep conflict flags assembled before memory content in retrieval flows.
 - Keep provider-ingested origin semantics strict; do not silently promote trust levels.
+- Do not claim read authorization: the configured `PermissionRouter` currently checks writes and deletes, while `read()` and `retrieve()` do not enforce `can_read` rules.
+- Permission checks are only active when `permissions_path` is supplied to `AgentDB`.
 - Keep tests aligned with package-style imports and editable install workflow.
-- Prefer minimal, phase-consistent changes over speculative full-phase implementations.
+- Prefer minimal changes that match verified implementation over speculative features.
 - Never document a capability as active/implemented before tests and code verify it. This repo's docs have drifted into overclaiming before (adapters, system tables, conflict detection all got described as done when they weren't) — treat every "Implemented" claim you write as something you personally checked against source, not something you inferred from a doc.
 
 ## Reporting Expectations
@@ -40,7 +42,7 @@ Full numbered design principles live in `docs/context/architecture-principles.md
 When finishing a task in this repo, report:
 
 - Which feature group(s)/task(s) were touched.
-- Which phase requirement(s) were satisfied or deferred.
+- Which requested behavior was completed or deferred.
 - Any limitation or decision dependency encountered.
 - Test evidence validating the intended behavior.
 
@@ -49,9 +51,9 @@ When finishing a task in this repo, report:
 - Source layout is `src/`.
 - Imports should be package-style (for example: `from agentdb import AgentDB`).
 - Validate with editable install and venv-local pytest invocation:
-  - `pip install -e '.[dev]'`
+  - `pip install -e '.[dev,mcp]'`
   - `python -m pytest -q`
 
 ## Current Reality Check
 
-Repository implementation is partial; use tests and on-disk modules as truth before assuming planned components exist.
+Treat README feature descriptions as a summary, not a substitute for checking source and tests. Verify every capability claim against the current implementation before documenting it.

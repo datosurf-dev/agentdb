@@ -10,7 +10,7 @@ Run tests in a repo-local virtual environment:
 
 1. `python3 -m venv .venv`
 2. `source .venv/bin/activate`
-3. `python -m pip install -e '.[dev]'`
+3. `python -m pip install -e '.[dev,mcp]'`
 4. `python -m pytest -q`
 
 This keeps package imports and pytest plugin behavior (including `pytest-asyncio`) consistent with project expectations.

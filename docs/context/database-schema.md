@@ -1,6 +1,6 @@
 # AgentDB Database Schema & Memory Assets
 
-This document describes what is actually persisted by AgentDB today — every table, its columns, and every on-disk memory asset outside the SQL tables — and how they interact. It reflects the code as of 2026-10-04 (see `docs/superpowers/plans/2026-06-06-agentdb-revised.md` → Current Status for what's built vs planned). Where a field or store is aspirational rather than implemented, that's called out explicitly.
+This document describes AgentDB's persisted tables and on-disk memory assets. It may lag the implementation; verify schema and behavior against the current source. Fields or stores that are aspirational rather than implemented should be called out explicitly.
 
 ## Storage topology
 
@@ -201,13 +201,13 @@ Claude adapter finalize_turn(...)
     → optional record_outcome (via finalize_turn_async's outcome recording)
 ```
 
-Skills are retrieved alongside memories in the same `retrieve()` call, but they are a structurally separate governance zone: separate file, separate write-authorization rule (`authored_by="human"` only), separate health-score lifecycle that doesn't touch `confidence`/`record_outcome` at all.
+Skills are not returned by `retrieve()`; callers access them through the skills API or an adapter-specific injection path. They are stored separately and have a distinct health-score lifecycle that does not use memory confidence or outcome reinforcement.
 
 ---
 
 ## Known gaps this schema reveals
 
-These are already tracked in the plan's Current Status, but are easiest to see clearly from the schema itself:
+The following implementation gaps are visible from the schema and current source:
 
 - **Session→record linkage is in-memory only.** A process restart between `retrieve()` and `record_outcome()` silently loses the ability to attribute the outcome to specific records — the `outcomes.linked_retrieval_sequence` column exists precisely to fix this and is unused.
 - **`file_integrity.py` is dead code** from the product's perspective — built and tested, never called.
