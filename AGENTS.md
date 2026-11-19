@@ -10,9 +10,10 @@ These instructions are repository-level and apply to all agent work in this repo
 2. Architecture & design principles: `docs/context/architecture-principles.md`
 3. Capabilities by type: `docs/context/capabilities.md`
 4. Database schema and memory assets: `docs/context/database-schema.md` (verify details against source)
-5. Testing strategy: `docs/context/testing-strategy.md`
-6. Integration guides: `docs/integrations/README.md`
-7. Algorithm review skill (when touching ranking/reinforcement surfaces): `.claude/skills/agentdb-algorithm-review/SKILL.md`
+5. Mechanism reference (what runs when, and where it is declared): `docs/context/mechanisms.md`
+6. Testing strategy: `docs/context/testing-strategy.md`
+7. Integration guides: `docs/integrations/README.md`
+8. Algorithm review skill (when touching ranking/reinforcement surfaces): `.claude/skills/agentdb-algorithm-review/SKILL.md`
 
 If documentation and implementation disagree, use the current source and tests as the authority.
 
