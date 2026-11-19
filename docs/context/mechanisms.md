@@ -162,6 +162,7 @@ the harness supplies the values.
   `permissions_path` is supplied.
 - No background scheduler: `run_sweep()` and `consolidate()` must be triggered.
 - Conversation JSONL is write-only; there is no ingestion path from it back into
-  memory (see the planned `ingest_turns`).
+  memory. See [`ingest-turns-design.md`](ingest-turns-design.md) for the proposed
+  `ingest_turns()` door (accepts normalised turns, no parsing, no LLM).
 - Injection covers memory records, skills, workspace and current-session work
   context — **not** prior-session transcripts.
