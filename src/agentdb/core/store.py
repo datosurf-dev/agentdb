@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from .models import ConflictRecord, MemoryRecord
+from .sqlite_connection import connected
 
 
 # ---------------------------------------------------------------------------
@@ -89,17 +90,8 @@ class MemoryStore:
 
     @contextmanager
     def _connect(self):
-        conn = sqlite3.connect(str(self._db_path))
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL")
-        try:
+        with connected(self._db_path) as conn:
             yield conn
-            conn.commit()
-        except Exception:
-            conn.rollback()
-            raise
-        finally:
-            conn.close()
 
     def _reload(self) -> None:
         """Rebuild the in-memory cache from disk (drops rows deleted elsewhere)."""

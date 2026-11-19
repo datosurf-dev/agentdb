@@ -23,6 +23,7 @@ from ..governance.lifecycle_manager import LifecycleManager
 from ..governance.permission_router import PermissionDenied, PermissionRouter
 from ..retrieval.algorithm import MultiSignalRanker
 from ..skills.skill_store import SkillStore
+from ..core.sqlite_connection import connected
 
 
 # ---------------------------------------------------------------------------
@@ -161,17 +162,8 @@ class AuditLog:
 
     @contextmanager
     def _connect(self):
-        conn = sqlite3.connect(str(self._db_path))
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL")
-        try:
+        with connected(self._db_path) as conn:
             yield conn
-            conn.commit()
-        except Exception:
-            conn.rollback()
-            raise
-        finally:
-            conn.close()
 
     def append(self, event_type: str, payload: dict) -> int:
         now = _utcnow().isoformat()

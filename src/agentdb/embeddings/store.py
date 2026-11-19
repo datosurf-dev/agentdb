@@ -7,6 +7,7 @@ import struct
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
+from ..core.sqlite_connection import connected
 
 logger = logging.getLogger("agentdb")
 
@@ -64,17 +65,8 @@ class EmbeddingStore:
 
     @contextmanager
     def _connect(self):
-        conn = sqlite3.connect(str(self._db_path))
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL")
-        try:
+        with connected(self._db_path) as conn:
             yield conn
-            conn.commit()
-        except Exception:
-            conn.rollback()
-            raise
-        finally:
-            conn.close()
 
     def _validate_or_reset(self) -> None:
         with self._connect() as conn:
