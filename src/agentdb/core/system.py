@@ -4,6 +4,7 @@ import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Optional
+from .sqlite_connection import connect, connected
 
 
 class SystemStats:
@@ -13,23 +14,12 @@ class SystemStats:
 
     @contextmanager
     def _connect(self):
-        conn = sqlite3.connect(str(self._db_path))
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL")
-        try:
+        with connected(self._db_path) as conn:
             yield conn
-            conn.commit()
-        except Exception:
-            conn.rollback()
-            raise
-        finally:
-            conn.close()
 
     @contextmanager
     def _connect_path(self, path: Path):
-        conn = sqlite3.connect(str(path))
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL")
+        conn = connect(path)
         try:
             yield conn
         finally:

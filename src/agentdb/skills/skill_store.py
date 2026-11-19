@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 from ..core.models import Skill
+from ..core.sqlite_connection import connected
 
 
 class SkillStoreError(Exception):
@@ -136,17 +137,8 @@ class SkillStore:
 
     @contextmanager
     def _connect(self):
-        conn = sqlite3.connect(str(self._db_path))
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL")
-        try:
+        with connected(self._db_path) as conn:
             yield conn
-            conn.commit()
-        except Exception:
-            conn.rollback()
-            raise
-        finally:
-            conn.close()
 
     def create(self, skill: Skill) -> Skill:
         if skill.authored_by != "human":
