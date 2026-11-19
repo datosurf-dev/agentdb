@@ -935,6 +935,7 @@ class AgentDB:
             expiry_time=expiry_time,
             inferred=infer,
             working_dirs=[os.path.realpath(d) for d in (working_dirs or [])],
+            session_id=session_id,
         )
 
         # Conflict detection: check before persisting
@@ -1050,6 +1051,229 @@ class AgentDB:
             EVENT_MEMORY_DELETE,
             {"key": key, "agent_id": agent_id},
         )
+
+
+    # ------------------------------------------------------------------
+    # Conversation ingestion and session purge
+    # ------------------------------------------------------------------
+
+    def ingest_turns(
+        self,
+        *,
+        agent_id: str,
+        session_id: str,
+        turns: "Sequence[Any]",
+        source: str = "",
+    ) -> "IngestResult":
+        """Accept normalised conversation turns from a harness.
+
+        The caller owns its log format and converts it into
+        :class:`agentdb.ingest.ConversationTurn` objects; AgentDB validates,
+        deduplicates and stores them. Call it per turn, per batch or once for a
+        whole dump — repeated calls are safe.
+
+        Order is JSONL first, then memories, then the dedup ledger, so the
+        durable record of what was ingested exists before derived writes.
+
+        Turns are never stored as memories. Only the ``memories`` the caller
+        attached to a turn are, and ``role="tool"`` turns never contribute
+        memories (high token, low knowledge, common secret vector).
+        """
+        from ..ingest import (
+            IngestResult,
+            append_conversation_entries,
+            ensure_ingest_ledger,
+            record_hashes,
+            seen_hashes,
+            turn_hash,
+            validate_turns,
+        )
+
+        if self.memory_dir is None:
+            raise ValueError(
+                "ingest_turns requires a workspace: construct AgentDB(memory_dir=...) "
+                "so the conversation log has a location."
+            )
+
+        # 1. Validate the whole batch up front — nothing is written on failure.
+        validate_turns(turns)
+        if not turns:
+            return IngestResult(accepted=0, skipped=0)
+
+        ensure_ingest_ledger(self._store._db_path)
+
+        # 2. Deduplicate against the ledger.
+        hashes = [turn_hash(agent_id, session_id, turn) for turn in turns]
+        already = seen_hashes(self._store._db_path, agent_id, session_id, hashes)
+        accepted: list[tuple[Any, str]] = []
+        for turn, digest in zip(turns, hashes):
+            if digest not in already:
+                accepted.append((turn, digest))
+        skipped = len(turns) - len(accepted)
+        if not accepted:
+            return IngestResult(accepted=0, skipped=skipped)
+
+        # 3. Conversation log first (same file and shape as capture).
+        appended = append_conversation_entries(
+            self.memory_dir, agent_id, session_id, [turn for turn, _ in accepted]
+        )
+
+        # 4. Memories the caller extracted, through the normal write path.
+        record_ids: list[str] = []
+        for turn, _digest in accepted:
+            if turn.role == "tool" and turn.memories:
+                import warnings
+
+                warnings.warn(
+                    "ingest_turns: memories attached to a tool turn are ignored; "
+                    "attach them to the assistant turn that interpreted the result.",
+                    stacklevel=2,
+                )
+            if turn.role == "tool":
+                continue
+            for key, value in turn.memories:
+                record = self.write(
+                    key=key,
+                    value=value,
+                    origin="provider_ingested",
+                    agent_id=agent_id,
+                    session_id=session_id,
+                )
+                record_ids.append(record.id)
+
+        # 5. Ledger rows.
+        record_hashes(
+            self._store._db_path, agent_id, session_id,
+            [(digest, turn.turn_id) for turn, digest in accepted], source,
+        )
+
+        return IngestResult(
+            accepted=len(accepted),
+            skipped=skipped,
+            memory_records=tuple(record_ids),
+            jsonl_appended=appended,
+        )
+
+    def purge_session(
+        self,
+        agent_id: str,
+        session_id: str,
+        *,
+        require_confirmation: bool = True,
+    ) -> "PurgeResult":
+        """Hard-remove one session from every store that holds its content.
+
+        Unlike :meth:`delete`, which only sets ``archived = 1``, this removes the
+        bytes: memories, conflicts, embeddings, session topics, outcomes,
+        external retrieves, the conversation log and the ingest ledger.
+
+        Skills derived from the session are **kept** — they are distilled
+        knowledge, not session content. The audit log keeps a single
+        ``session_purged`` event with counts and no content, so deletion is
+        evidenced without retaining what was deleted.
+
+        Explicit only: never called from lifecycle sweeps.
+        """
+        from ..ingest import PurgeResult, remove_conversation_log
+
+        if require_confirmation:
+            raise ValueError(
+                "purge_session is irreversible. Pass require_confirmation=False "
+                "to proceed."
+            )
+
+        record_ids = self._session_record_ids_for(agent_id, session_id)
+
+        counts = {"memories": 0, "conflicts": 0, "embeddings": 0, "outcomes": 0,
+                  "external_retrieves": 0, "ledger": 0, "session_topics": 0}
+
+        with self._store._connect() as conn:
+            if record_ids:
+                placeholders = ",".join("?" for _ in record_ids)
+                cur = conn.execute(
+                    f"DELETE FROM conflicts WHERE record_a_id IN ({placeholders}) "
+                    f"OR record_b_id IN ({placeholders})",
+                    (*record_ids, *record_ids),
+                )
+                counts["conflicts"] = cur.rowcount or 0
+                cur = conn.execute(
+                    f"DELETE FROM memories WHERE id IN ({placeholders})", record_ids
+                )
+                counts["memories"] = cur.rowcount or 0
+            cur = conn.execute("DELETE FROM outcomes WHERE session_id = ?", (session_id,))
+            counts["outcomes"] = cur.rowcount or 0
+            cur = conn.execute("DELETE FROM external_retrieves WHERE session_id = ?", (session_id,))
+            counts["external_retrieves"] = cur.rowcount or 0
+            cur = conn.execute(
+                "DELETE FROM ingest_ledger WHERE agent_id = ? AND session_id = ?",
+                (agent_id, session_id),
+            )
+            counts["ledger"] = cur.rowcount or 0
+
+        if record_ids and self._embeddings_enabled():
+            try:
+                from ..embeddings.store import EmbeddingStore
+
+                emb = EmbeddingStore(self._store._db_path.parent / "embeddings.sqlite")
+                for record_id in record_ids:
+                    emb.delete("embeddings", record_id)
+                counts["embeddings"] = len(record_ids)
+            except Exception:
+                pass
+        try:
+            import sqlite3 as _sqlite3
+
+            emb_path = self._store._db_path.parent / "embeddings.sqlite"
+            if emb_path.exists():
+                with _sqlite3.connect(str(emb_path)) as conn:
+                    cur = conn.execute(
+                        "DELETE FROM session_topics WHERE session_id = ?", (session_id,)
+                    )
+                    counts["session_topics"] = cur.rowcount or 0
+        except Exception:
+            pass
+
+        jsonl_lines = 0
+        if self.memory_dir is not None:
+            jsonl_lines = remove_conversation_log(self.memory_dir, agent_id, session_id)
+
+        # Keep the fact, drop the content.
+        self.audit_log.append(
+            "session_purged",
+            {"agent_id": agent_id, "session_id": session_id, **counts,
+             "jsonl_lines_removed": jsonl_lines},
+        )
+
+        self._store._reload()
+
+        return PurgeResult(
+            memories=counts["memories"],
+            conflicts=counts["conflicts"],
+            embeddings=counts["embeddings"],
+            outcomes=counts["outcomes"],
+            external_retrieves=counts["external_retrieves"],
+            ledger=counts["ledger"],
+            session_topics=counts["session_topics"],
+            jsonl_lines_removed=jsonl_lines,
+        )
+
+    def _session_record_ids_for(self, agent_id: str, session_id: str) -> list[str]:
+        """Record ids persisted for this session (survives restarts)."""
+        try:
+            with self._store._connect() as conn:
+                rows = conn.execute(
+                    "SELECT id FROM memories WHERE agent_id = ? AND session_id = ?",
+                    (agent_id, session_id),
+                ).fetchall()
+            return [row["id"] for row in rows]
+        except Exception:
+            return []
+
+    def _embeddings_enabled(self) -> bool:
+        try:
+            return bool(self._resolved.get("embeddings", {}).get("enabled", False))
+        except Exception:
+            return False
 
     def consolidate(self, agent_id: str, llm_fn=None, **kwargs) -> "ConsolidationResult":
         """Cluster near-duplicate records, archive lower-confidence copies, mark the

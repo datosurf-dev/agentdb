@@ -63,6 +63,7 @@ class MemoryRecord:
     embedding: Optional[list[float]] = field(default=None, repr=False)
     consolidated: bool = False
     source_record_ids: list = field(default_factory=list)
+    session_id: Optional[str] = None
 
 
 @dataclass

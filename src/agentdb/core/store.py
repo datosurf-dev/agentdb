@@ -32,7 +32,8 @@ CREATE TABLE IF NOT EXISTS memories (
     conflict_id TEXT,
     expiry_time TEXT,
     inferred INTEGER NOT NULL DEFAULT 0,
-    working_dirs TEXT NOT NULL DEFAULT '[]'
+    working_dirs TEXT NOT NULL DEFAULT '[]',
+    session_id TEXT
 )
 """
 
@@ -44,6 +45,7 @@ _MEMORIES_MIGRATION_COLUMNS = (
     ("working_dirs", "TEXT NOT NULL DEFAULT '[]'"),
     ("consolidated", "INTEGER NOT NULL DEFAULT 0"),
     ("source_record_ids", "TEXT NOT NULL DEFAULT '[]'"),
+    ("session_id", "TEXT"),
 )
 
 _CREATE_CONFLICTS = """
@@ -100,8 +102,10 @@ class MemoryStore:
             conn.close()
 
     def _reload(self) -> None:
+        """Rebuild the in-memory cache from disk (drops rows deleted elsewhere)."""
         with self._connect() as conn:
             rows = conn.execute("SELECT * FROM memories").fetchall()
+        self._by_id.clear()
         for row in rows:
             record = self._row_to_record(row)
             self._by_id[record.id] = record
@@ -135,6 +139,7 @@ class MemoryStore:
             source_record_ids=json.loads(
                 row["source_record_ids"] if "source_record_ids" in row.keys() else "[]"
             ),
+            session_id=row["session_id"] if "session_id" in row.keys() else None,
         )
 
     def write(self, record: MemoryRecord) -> MemoryRecord:
@@ -145,8 +150,8 @@ class MemoryStore:
                     (id, key, value, origin, trust_level, agent_id, confidence,
                      version, archived, retrieval_count, created_at, entities,
                      last_retrieved, conflict_id, expiry_time, inferred, working_dirs,
-                     consolidated, source_record_ids)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     consolidated, source_record_ids, session_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     record.id,
@@ -168,6 +173,7 @@ class MemoryStore:
                     json.dumps(record.working_dirs),
                     int(record.consolidated),
                     json.dumps(record.source_record_ids),
+                    getattr(record, "session_id", None),
                 ),
             )
         self._by_id[record.id] = record

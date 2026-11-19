@@ -1,6 +1,7 @@
 # Design notes — `ingest_turns()` and `purge_session()`
 
-Status: **proposal**, not implemented. No code exists for either method.
+Status: **implemented** (`src/agentdb/ingest.py`, `AgentDB.ingest_turns` /
+`AgentDB.purge_session`). The notes below describe the behaviour as built.
 
 Two related additions:
 
