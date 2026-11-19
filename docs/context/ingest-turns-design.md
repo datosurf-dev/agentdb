@@ -210,12 +210,21 @@ They are different operations and should stay so:
 `delete()`'s archived-only behaviour should be **documented as intentional**
 (soft delete, recoverable) rather than changed.
 
-## Open questions
+## Resolved decisions
 
-1. Should `purge_session` also be reachable from `lifecycle.run_sweep()` behind a
-   retention policy (auto-purge past N days), or stay explicit-only? *(Explicit
-   only feels right — destructive ops should be deliberate.)*
-2. Should skills derived from a purged session be removed? **No** — a skill is
-   distilled knowledge, not session content. Flagging for confirmation.
-3. Do purged embeddings need a separate rebuild step for `session_topics`, or is
-   deleting the rows sufficient?
+1. **Explicit only.** `purge_session()` is never called from
+   `lifecycle.run_sweep()` and has no retention-based auto-purge. Destructive
+   operations stay deliberate and operator-initiated.
+2. **Derived skills survive a purge.** A skill is distilled knowledge, not
+   session content; removing it would silently degrade an agent that has already
+   learned from the session. Only the seven content stores listed above are
+   purged.
+3. **Row deletion is sufficient for embeddings.** Removing the rows from
+   `embeddings` and `session_topics` needs no rebuild; both are derived caches
+   and are recomputed on demand once embeddings are re-enabled.
+
+## Still open
+
+- Whether `IngestResult` should expose per-turn detail after all, once real
+  re-ingest scenarios appear. The current aggregate is intentional: cadence is
+  the caller's choice, so the method should not presume a per-turn workflow.
