@@ -5,7 +5,7 @@
 ```bash
 git clone https://github.com/datosurf-dev/agentdb.git
 cd agentdb
-pip install -e ".[dev]"
+pip install -e ".[dev,mcp]"
 ```
 
 ## Running tests

@@ -27,8 +27,10 @@ CLAUDE_CAPABILITIES = RunnerCapabilities(
     auto_elevate_threshold=3,
 )
 
-# Fireworks capabilities: partial injection
-FIREWORKS_CAPABILITIES = RunnerCapabilities(
+# Serverless capabilities: provider-hosted, OpenAI-compatible runtimes with
+# partial injection. Shared by any such provider (e.g. Fireworks, DeepInfra);
+# name the tier, not the vendor, so providers are not coupled to each other.
+SERVERLESS_CAPABILITIES = RunnerCapabilities(
     can_call_tools_mid_turn=False,
     can_write_mid_turn=False,
     has_native_memory=True,

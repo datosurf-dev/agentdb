@@ -1,6 +1,6 @@
 # AgentDB Architecture & Design Principles
 
-This is the single canonical source for AgentDB's architecture pitch and numbered design principles. `AGENTS.md`, `README.md`, and the superpowers plan each reference this document rather than repeating its content — if you're editing one of the principles below, this is the only file that should change; the others just point here.
+This is the single canonical source for AgentDB's architecture pitch and numbered design principles. `AGENTS.md` and `README.md` point here rather than repeating the content — if you're editing one of the principles below, this is the only file that should change.
 
 ## What AgentDB is
 

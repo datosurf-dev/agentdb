@@ -295,8 +295,7 @@ class SkillsAPI:
 
 class ConfigurationError(Exception):
     """Raised for any invalid memory.yaml profile configuration. Never
-    silently substituted for a default -- see Design Principle in
-    docs/superpowers/specs/2026-07-27-unified-profile-configuration-design.md."""
+    silently substituted for a default."""
 
 
 _OVERRIDE_SECTIONS = ("retrieval", "injection", "lifecycle", "capture")
@@ -387,8 +386,7 @@ def _resolve_config(yaml_dict: dict) -> dict:
             raise ConfigurationError(
                 f"memory.yaml has old-schema root key(s) {stale_keys} -- these must nest under "
                 f"a single top-level 'profile:' key now (e.g. 'capture:' becomes "
-                f"'profile.capture:'), see docs/superpowers/specs/"
-                f"2026-07-27-unified-profile-configuration-design.md"
+                f"'profile.capture:'); consult README.md for the supported configuration schema"
             )
     profile_block = yaml_dict.get("profile", {}) if yaml_dict else {}
     if not isinstance(profile_block, dict):
