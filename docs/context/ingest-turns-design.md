@@ -1,25 +1,33 @@
-# Design note — `AgentDB.ingest_turns()`
+# Design notes — `ingest_turns()` and `purge_session()`
 
-Status: **proposal**, not implemented.
+Status: **proposal**, not implemented. No code exists for either method.
+
+Two related additions:
+
+- **`ingest_turns()`** — a door for history a harness already has, so AgentDB can
+  derive memory from it without duplicating storage.
+- **`purge_session()`** — hard removal across every store, because today's
+  `delete()` is a soft delete that leaves the bytes in place.
+
+---
+
+# Part 1 — `ingest_turns()`
 
 ## Problem
 
-AgentDB can *write* a conversation log (`capture.conversation_jsonl`) but has no
-way to accept one it did not observe. Every harness (AgentGate, Claude Code,
-Codex, opencode, Hermes) already keeps its own append-only session log in its own
-format, so today a harness must either:
-
-- re-log through `finalize_turn` (**duplicate storage**), or
-- get no memory benefit from history it already has.
-
-We want a *door*, not a parser: AgentDB accepts **normalised turns** and derives
-memory from them; the harness owns its own log format.
+AgentDB can *write* a conversation log (`capture.conversation_jsonl`) but cannot
+accept one it did not observe. Every harness (AgentGate, Claude Code, Codex,
+opencode, Hermes) already keeps its own append-only session log in its own
+format, so today a harness must either re-log through `finalize_turn`
+(duplicating storage) or get no memory benefit from history it already has.
 
 ## Non-goals
 
 - **No log parsing.** No vendor format recognition, no file discovery.
-- **No LLM prompt.** Extraction/synthesis stays in `consolidate(llm_fn=...)`.
+- **No LLM prompt.** Extraction and synthesis stay in `consolidate(llm_fn=...)`.
 - **No transcript storage in the memory DB.** Turns are not memories.
+- **No opinion on cadence.** Per-turn, hourly, or a one-time dump are all the
+  caller's choice; the method only has to be safe to call repeatedly.
 
 ## Public API
 
@@ -28,7 +36,7 @@ memory from them; the harness owns its own log format.
 class ConversationTurn:
     role: Literal["user", "assistant", "system", "tool"]
     content: str
-    timestamp: datetime      # REQUIRED — a quality log always has one
+    timestamp: datetime      # REQUIRED
     turn_id: str             # REQUIRED — caller's stable id, for traceability
     memories: list[tuple[str, Any]] = ()   # optional (key, value) pairs
     tool_calls: list[dict] | None = None
@@ -37,8 +45,7 @@ class ConversationTurn:
 class IngestResult:
     accepted: int
     skipped: int             # duplicates
-    memory_records: list[str]  # record ids written
-    jsonl_appended: int
+    memory_records: list[str]
 
 def ingest_turns(
     self,
@@ -51,83 +58,164 @@ def ingest_turns(
 ```
 
 Declared on `AgentDB` in `interface/client.py`, beside `write_compaction_summary`
-and `consolidate` — it is a bulk, retroactive session-level operation, not a
+and `consolidate` — a bulk, retroactive session-level operation, not a
 turn-lifecycle hook.
 
-**`turn_id` is mandatory but is *not* the dedup key** (see below). It exists so
-records can be traced back to the source log.
+**Validation.** All fields are checked before any write: a missing `timestamp`
+or `turn_id` raises `ValueError` and **nothing is written** for that call. A log
+without timestamps is not a quality log, and silently degrading dedup would make
+re-ingest unsafe.
 
 ## Deduplication
 
-Dedup key is `sha256(agent_id | session_id | role | content | timestamp)`.
+Key: `sha256(agent_id | session_id | role | content | timestamp)`.
 
-This is deliberately *not* `turn_id`: a caller may regenerate ids, or re-ingest
-the same file with fresh ids. Content+timestamp+session catches both, while
-still allowing the same text at different times to be kept (e.g. a repeated
-`"approved"` or `"troubleshoot the PR"`).
+Deliberately **not** `turn_id`: a caller may regenerate ids, or re-ingest the
+same file with fresh ids. Content+timestamp+session catches both, while repeated
+text at different times is still kept (e.g. a repeated `"approved"` or
+`"troubleshoot the PR"`).
 
-Backed by a new table (PK gives `INSERT OR IGNORE` semantics — no scans):
+Scope is **per (agent, session)**, so two sessions may legitimately repeat text.
 
 ```sql
 CREATE TABLE ingest_ledger (
-    agent_id   TEXT NOT NULL,
-    session_id TEXT NOT NULL,
-    turn_hash  TEXT NOT NULL,
-    turn_id    TEXT NOT NULL,   -- traceability only
-    source     TEXT,
+    agent_id    TEXT NOT NULL,
+    session_id  TEXT NOT NULL,
+    turn_hash   TEXT NOT NULL,
+    turn_id     TEXT NOT NULL,   -- traceability only
+    source      TEXT,
     ingested_at TEXT NOT NULL,
     PRIMARY KEY (agent_id, session_id, turn_hash)
 );
 ```
 
-Scope is **per (agent, session)** so two different sessions may legitimately
-repeat the same text.
+The PK gives `INSERT OR IGNORE` semantics — no content scans.
 
 ## Ordering — JSONL first
 
-The conversation log is written **before** memory records:
+1. validate every turn
+2. dedupe check against `ingest_ledger`
+3. **append accepted turns to `conversations/<agent>--<session>.jsonl`**
+4. write each turn's `memories` through the normal `write()` path
+5. commit ledger rows
 
-1. dedupe check per turn against `ingest_ledger`
-2. **append accepted turns to `conversations/<agent>--<session>.jsonl`**
-3. write each turn's `memories` through the normal `write()` path
-4. commit ledger rows
+The JSONL is the durable record of what was ingested and uses the **same store
+and shape** as `capture.conversation_jsonl`, so an ingested session and a
+captured session are indistinguishable on disk. Memory writes then behave like
+any other write (permissions, conflicts, skill signals); a failure there leaves
+an intact log plus a ledger row to reconcile.
 
-Rationale: the JSONL is the durable record of what was ingested, and it is the
-same store `capture.conversation_jsonl` uses — so an ingested session occupies
-exactly the same place, in the same shape, as a captured one. Memory writes then
-behave like normal writes (permissions, conflicts, skill signals), and a failure
-there leaves an intact log plus a ledger row to reconcile rather than a silently
-truncated history.
+Step 4 may legitimately write **zero** records for a turn.
 
-Step 3 may legitimately write **zero** records for a turn (no `memories`
-supplied) — turns are not stored as memories.
+**Tool turns:** `role="tool"` is written to the JSONL only. Attached `memories`
+are ignored with a warning — tool output is high-token, low-knowledge, and the
+most common accidental-secret vector. Knowledge belongs on the assistant turn
+that interpreted it.
 
 ## Storage touched
 
 | Step | Destination | Format |
 |---|---|---|
-| 2 | `<memory_dir>/conversations/<agent>--<session>.jsonl` | agentdb's existing entry shape |
-| 3 | `<memory_dir>/database/agentdb.sqlite` | `MemoryRecord` via `write()` |
-| 4 | `ingest_ledger` table | dedup bookkeeping |
+| 3 | `<memory_dir>/conversations/<agent>--<session>.jsonl` | agentdb's existing entry shape |
+| 4 | `<memory_dir>/database/agentdb.sqlite` → `memories` | `MemoryRecord` via `write()` |
+| 5 | `ingest_ledger` | dedup bookkeeping |
 
-No new directories; no changes to `capture.conversation_jsonl`, which remains
-the opt-in "log as you go" path. `ingest_turns` is additive.
+No new directories. `capture.conversation_jsonl` is unchanged; `ingest_turns` is
+additive.
 
 ## Interaction with summarisation
 
-`consolidate()` only considers records with `created_at <= now - since_hours`
-(default **24**). Records written by `ingest_turns` are therefore **invisible to
-a default `consolidate()`** — a caller doing end-of-session ingest followed by
-`consolidate()` must pass `since_hours=0`. This is a documented trap, not a bug
-to paper over.
+`consolidate()` only considers `created_at <= now - since_hours` (default **24**),
+so records written by `ingest_turns` are **invisible to a default
+`consolidate()`**. A caller ingesting then consolidating must pass
+`since_hours=0`. Documented trap, not a bug.
 
-`ingest_turns` does **not** summarise. Its contract is dedupe + store + write
-caller-supplied memories.
+`ingest_turns` does **not** summarise.
+
+---
+
+# Part 2 — `purge_session()`
+
+## Why this exists
+
+Today `AgentDB.delete(key)` is a **soft** delete: `store.delete_by_key()` sets
+`archived = 1` and keeps the row (`core/store.py:185-190`). Archiving is correct
+for lifecycle management — it is **not** data removal.
+
+A session's content is meanwhile spread over **seven** places:
+
+| Store | Location | Session data |
+|---|---|---|
+| memories | `database/agentdb.sqlite` → `memories` | rows (`archived` still holds content) |
+| conflicts | `database/agentdb.sqlite` → `conflicts` | references to record ids |
+| embeddings | `embeddings/…` → `embeddings`, `session_topics` | vectors + topic rows |
+| outcomes | `database/agentdb.sqlite` → `outcomes` | per-turn outcomes (`session_id`) |
+| external retrieves | `database/agentdb.sqlite` → `external_retrieves` | per-session flags (`session_id`) |
+| conversation log | `conversations/<agent>--<session>.jsonl` | **full raw transcript** |
+| audit log | `database/agentdb.sqlite` → `audit_log` | event metadata |
+
+A user who says *"this session leaked a token, remove it"* therefore deletes one
+view and leaves the bytes in six other places. That gap exists **today**,
+before ingest; ingestion would add a seventh (the ledger plus re-landed JSONL).
+
+## API
+
+```python
+@dataclass(frozen=True)
+class PurgeResult:
+    memories: int
+    embeddings: int
+    outcomes: int
+    external_retrieves: int
+    conflicts: int
+    ledger: int
+    jsonl_lines_removed: int
+
+def purge_session(
+    self,
+    agent_id: str,
+    session_id: str,
+    *,
+    require_confirmation: bool = True,
+) -> PurgeResult
+```
+
+## What it does
+
+| Store | Action |
+|---|---|
+| `memories` | **hard DELETE** rows for that agent+session (not archive) |
+| `conflicts` | DELETE rows referencing purged record ids |
+| `embeddings` / `session_topics` | DELETE rows for the purged record ids / session |
+| `outcomes` | DELETE rows for the session |
+| `external_retrieves` | DELETE rows for the session |
+| `conversations/*.jsonl` | remove the file (or the session's lines, if shared) |
+| `ingest_ledger` | DELETE rows for `(agent, session)` — otherwise a re-ingest would be silently skipped while the data is gone |
+| `audit_log` | **append** `session_purged` with counts only, **no content** |
+
+**Audit is kept, content is not.** The event is the evidence that deletion
+happened; keeping the payload would defeat the purpose.
+
+## Relationship to `delete()`
+
+They are different operations and should stay so:
+
+| | `delete(key)` | `purge_session()` |
+|---|---|---|
+| Intent | retire a memory | remove a session's data |
+| Mechanism | `archived = 1` (recoverable) | hard DELETE (irreversible) |
+| Scope | one key | every store for the session |
+| Use case | lifecycle, supersession | privacy / leak remediation |
+
+`delete()`'s archived-only behaviour should be **documented as intentional**
+(soft delete, recoverable) rather than changed.
 
 ## Open questions
 
-1. Should `ingest_turns` return per-turn outcomes (accepted/skipped with reason)
-   rather than aggregate counts? Useful for drift detection on re-ingest.
-2. Should the ledger be pruned when a session is deleted/archived?
-3. Tool turns (`role="tool"`) carry large content; store them in JSONL but never
-   as memories — confirm that's the expectation.
+1. Should `purge_session` also be reachable from `lifecycle.run_sweep()` behind a
+   retention policy (auto-purge past N days), or stay explicit-only? *(Explicit
+   only feels right — destructive ops should be deliberate.)*
+2. Should skills derived from a purged session be removed? **No** — a skill is
+   distilled knowledge, not session content. Flagging for confirmation.
+3. Do purged embeddings need a separate rebuild step for `session_topics`, or is
+   deleting the rows sufficient?

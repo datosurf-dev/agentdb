@@ -164,5 +164,8 @@ the harness supplies the values.
 - Conversation JSONL is write-only; there is no ingestion path from it back into
   memory. See [`ingest-turns-design.md`](ingest-turns-design.md) for the proposed
   `ingest_turns()` door (accepts normalised turns, no parsing, no LLM).
+- `delete(key)` is a **soft** delete (`archived = 1`); session content also lives
+  in `conversations/`, embeddings, outcomes, `external_retrieves` and the audit
+  log. Hard removal is proposed separately as `purge_session()` in the same note.
 - Injection covers memory records, skills, workspace and current-session work
   context — **not** prior-session transcripts.
