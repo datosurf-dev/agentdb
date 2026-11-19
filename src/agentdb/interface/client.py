@@ -1166,7 +1166,7 @@ class AgentDB:
 
         Explicit only: never called from lifecycle sweeps.
         """
-        from ..ingest import PurgeResult, remove_conversation_log
+        from ..ingest import _CREATE_INGEST_LEDGER, PurgeResult, remove_conversation_log
 
         if require_confirmation:
             raise ValueError(
@@ -1196,34 +1196,33 @@ class AgentDB:
             counts["outcomes"] = cur.rowcount or 0
             cur = conn.execute("DELETE FROM external_retrieves WHERE session_id = ?", (session_id,))
             counts["external_retrieves"] = cur.rowcount or 0
+            # The ledger table only exists once ingest_turns() has run; create
+            # it if absent so a purge never fails on a DB that was populated
+            # only through write().
+            conn.execute(_CREATE_INGEST_LEDGER)
             cur = conn.execute(
                 "DELETE FROM ingest_ledger WHERE agent_id = ? AND session_id = ?",
                 (agent_id, session_id),
             )
             counts["ledger"] = cur.rowcount or 0
 
-        if record_ids and self._embeddings_enabled():
+        # Embeddings live in a separate DB (database/embeddings.db), created
+        # only when an embedding provider was configured. Reuse the live store
+        # so we target the correct path and don't reconstruct it with a
+        # missing model/dimensions. If it isn't active, there is nothing to
+        # purge here.
+        if self._embedding_store is not None and record_ids:
             try:
-                from ..embeddings.store import EmbeddingStore
-
-                emb = EmbeddingStore(self._store._db_path.parent / "embeddings.sqlite")
                 for record_id in record_ids:
-                    emb.delete("embeddings", record_id)
+                    self._embedding_store.delete("memories", record_id)
                 counts["embeddings"] = len(record_ids)
             except Exception:
                 pass
-        try:
-            import sqlite3 as _sqlite3
-
-            emb_path = self._store._db_path.parent / "embeddings.sqlite"
-            if emb_path.exists():
-                with _sqlite3.connect(str(emb_path)) as conn:
-                    cur = conn.execute(
-                        "DELETE FROM session_topics WHERE session_id = ?", (session_id,)
-                    )
-                    counts["session_topics"] = cur.rowcount or 0
-        except Exception:
-            pass
+            try:
+                cur = self._embedding_store.delete_session_topic(session_id)
+                counts["session_topics"] = cur
+            except Exception:
+                pass
 
         jsonl_lines = 0
         if self.memory_dir is not None:

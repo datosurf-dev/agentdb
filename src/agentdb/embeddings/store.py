@@ -189,3 +189,11 @@ class EmbeddingStore:
                 (session_id,),
             ).fetchone()
         return _unpack(row["embedding"]) if row else None
+
+    def delete_session_topic(self, session_id: str) -> int:
+        """Remove the session_topic row for this session. Returns rowcount."""
+        with self._connect() as conn:
+            cur = conn.execute(
+                "DELETE FROM session_topics WHERE session_id = ?", (session_id,)
+            )
+            return cur.rowcount or 0

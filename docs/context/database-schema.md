@@ -305,7 +305,7 @@ ingest_turns(agent_id, session_id, turns, source=...)
 purge_session(agent_id, session_id)   # hard delete; requires require_confirmation=False
     → _session_record_ids_for(): SELECT id FROM memories WHERE agent_id=? AND session_id=?  (persisted)
     → DELETE conflicts / memories by those record ids; DELETE outcomes / external_retrieves / ingest_ledger by session
-    → DELETE embeddings + session_topics (see caveat below)
+    → DELETE memory-embeddings (via self._embedding_store → database/embeddings.db) + the session_topic row
     → remove conversation JSONL
     → audit_log: session_purged (counts only, no content)
     → _store._reload()
@@ -317,7 +317,7 @@ Claude adapter finalize_turn(...)
     → optional record_outcome (via finalize_turn_async's outcome recording)
 ```
 
-> **Caveat — embeddings path mismatch (`purge_session`).** `AgentDB.__init__` writes embeddings to `database/embeddings.db`, but `purge_session()` opens `database/embeddings.sqlite` when clearing vectors for the purged records. These are different files, so the embedding/session-topic purge currently targets the wrong path (the whole block is wrapped in a bare `except Exception: pass`, so it fails silently). This is a code inconsistency, not just stale documentation — flagging it rather than papering over it here.
+The embedding purge reuses the live `self._embedding_store` (correct path `database/embeddings.db`, correct model/dimensions) rather than reconstructing a store; when no embedding provider is active there is nothing to purge. The `ingest_ledger` delete creates the table if absent, so a purge never fails on a DB populated only via `write()`.
 
 Skills derived from a session are intentionally **kept** by `purge_session()`.
 
