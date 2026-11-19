@@ -1260,12 +1260,6 @@ class AgentDB:
         except Exception:
             return []
 
-    def _embeddings_enabled(self) -> bool:
-        try:
-            return bool(self._resolved.get("embeddings", {}).get("enabled", False))
-        except Exception:
-            return False
-
     def consolidate(self, agent_id: str, llm_fn=None, **kwargs) -> "ConsolidationResult":
         """Cluster near-duplicate records, archive lower-confidence copies, mark the
         surviving canonical as consolidated=True with source_record_ids provenance.
