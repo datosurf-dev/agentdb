@@ -17,7 +17,7 @@ The package currently provides:
 - **Runtime integration:** a generic `AgentDBBackend`, model-agnostic middleware, a Claude runtime wrapper, and a Hermes `MemoryProvider` adapter.
 - **Optional integrations:** stdio MCP server, Anthropic message ingestor, and email/Slack notifications.
 
-> **Scope:** AgentDB is a memory and context-selection library. It does **not** manage or inject skills — skill registration, versioning, staleness, proposals and evolution were removed and now belong to a separate package (see `migration-handoff/skill-extraction/`).
+> **Scope:** AgentDB is a memory and context-selection library. It does **not** manage or inject skills — skill registration, versioning, staleness, proposals and evolution were removed and now belong to a separate package (see `docs/spec/migration-handoff/`).
 
 The current storage implementation is embedded SQLite. There is no Postgres/cloud backend or HTTP MCP transport. The gateway dispatcher is in-memory; the audit log is stored separately in SQLite.
 
@@ -96,7 +96,7 @@ Important current limits:
 - `read()` and `retrieve()` do not enforce `can_read`; do not treat that field as a read-access boundary.
 - Agent-scoped retrieval is enabled for agents configured under `profile.agents` in `memory.yaml`; otherwise retrieval is not filtered by `agent_id`.
 - The router governs calls through the client API; direct access to internal storage is outside that control path.
-- The no-argument `AgentDB()` constructor currently selects SQLite's `:memory:` path, but initialization fails because the store opens separate short-lived connections. Use `memory_dir=` or `path=` instead.
+- The no-argument `AgentDB()` constructor uses a workspace (`AGENTDB_MEMORY_DIR` / `AGENTDB_HOME` / `agentdb-workspace/`) or SQLite `:memory:`. `AgentDB(path=":memory:")` uses a process-wide in-memory database (no file created); two in-memory instances in one process share it.
 
 ## Configuration and embeddings
 
@@ -127,7 +127,9 @@ Embeddings can also be enabled with `AgentDB(local_embed=True)` or a custom `emb
 - `db.audit_log.replay()`: replay persisted audit entries.
 - `AgentDBBackend` (`from agentdb.backend import AgentDBBackend`): key/value `read`, `write`, `delete`, `list`, `grep`, and `glob` for a selected agent and trust zone.
 
-Retrieval returns `RetrievalResult` with records, conflicts, authority override instructions, a token estimate, and a truncation flag. `retrieve_by_entities()` supports action-oriented lookups. Semantic matching requires embeddings; without them, retrieval uses the non-semantic signals and existing text/entity matching.
+Retrieval returns `RetrievalResult` with records, conflicts, authority override instructions, a token estimate, a truncation flag, and an optional `trace` (pass `trace=True`) exposing candidate sources, exclusions, and per-candidate ranking evidence. Candidates are the **union of lexical and (optional) semantic matches**, ranked by the existing multi-signal ranker and packed within a rendered-token budget that skips oversized records rather than stopping. `retrieve_by_entities()` uses the same eligibility filters, ranking, and budget policy. Semantic matching requires embeddings; without them, retrieval uses the lexical path and the other non-semantic signals. Set `embeddings.semantic_candidates: false` to force lexical-only retrieval even when embeddings are configured.
+
+Consolidation produces a **derived `derived_canonical` record** with full source lineage; the original source records are never overwritten (only archived from default selection), and a canonical is invalidated when its sources change. Compaction summaries and checkpoints default to `agent_inferred` provenance — pass `origin="human_approved"` only for a verified human action.
 
 ## Runtime integrations
 

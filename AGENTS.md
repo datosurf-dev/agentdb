@@ -7,7 +7,8 @@ These instructions are repository-level and apply to all agent work in this repo
 ## Canonical Context Sources
 
 1. Repository instructions: `AGENTS.md`
-2. Product contract and target boundary (skills are out of scope): `docs/spec/PRODUCT_CONTRACT.md`, `docs/spec/DECISIONS_AND_TRACEABILITY.md`
+2. Product contract and target boundary (skills are out of scope): `docs/spec/PRODUCT_CONTRACT.md`, `docs/spec/DECISIONS_AND_TRACEABILITY.md`, `docs/spec/TECHNICAL_SPEC.md`
+2a. Core-alignment implementation report, benchmarks, and remaining decisions: `docs/spec/implementation/` (AGENTDB_ALIGNMENT_REPORT, RETRIEVAL_BENCHMARKS, CONSOLIDATION_VALIDATION, MIGRATION_AND_ROLLBACK, REMAINING_DECISIONS)
 3. Architecture & design principles: `docs/context/architecture-principles.md`
 4. Capabilities by type: `docs/context/capabilities.md`
 5. Database schema and memory assets: `docs/context/database-schema.md` (verify details against source)

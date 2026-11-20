@@ -21,7 +21,9 @@ policy in `RELEASING.md`.
 - **Distilled knowledge (ADB-06/07):** consolidation now creates a new
   `derived_canonical` record with immutable source lineage (sources are never
   overwritten), a conservative merge gate (no false merges), source-revision
-  invalidation, and canonical/source dedup at retrieval.
+  invalidation, and canonical/source dedup at retrieval. When a canonical's
+  value omits a query-critical detail an archived source carries, that source is
+  re-injected (`unique_detail`, surfaced in `trace.unique_detail_ids`).
 - **Reliability (ADB-12):** `AgentDB(path=":memory:")` uses a working in-memory
   DB (no bogus `./:memory:` file).
 - **Schema:** additive, idempotent columns `kind`, `producer`, `derivation` on
