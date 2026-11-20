@@ -73,7 +73,7 @@ class AgentDBHermesProvider(MemoryProvider, GatewayAdapter):
         self._session_id: str = ""
 
     # ------------------------------------------------------------------
-    # Phase 1 — core governed memory loop (Principle 12a)
+    # Core governed memory loop (Principle 12a)
     # ------------------------------------------------------------------
 
     def initialize(self, session_id: str, **kwargs) -> None:

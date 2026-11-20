@@ -3,17 +3,16 @@ from __future__ import annotations
 import dataclasses
 import json
 import os
-import sqlite3
 import warnings
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import TYPE_CHECKING, Any, Callable, Optional, Sequence
 
 import yaml
 
-from ..core.models import ConflictRecord, MemoryRecord, SessionProfile, Skill
+from ..core.models import MemoryRecord, SessionProfile, Skill
 from ..core.profiles import BUILTIN_PROFILES
 from ..core.store import MemoryStore
 from ..core.system import SystemStats
@@ -24,6 +23,10 @@ from ..governance.permission_router import PermissionDenied, PermissionRouter
 from ..retrieval.algorithm import MultiSignalRanker
 from ..skills.skill_store import SkillStore
 from ..core.sqlite_connection import connected
+
+if TYPE_CHECKING:
+    from ..governance.lifecycle_manager import ConsolidationResult
+    from ..ingest import IngestResult, PurgeResult
 
 
 # ---------------------------------------------------------------------------
@@ -1266,7 +1269,6 @@ class AgentDB:
         Dispatches untracked_skill_candidate when a cluster exceeds threshold and no
         scoped skill governs the domain. If llm_fn is provided, synthesizes the
         canonical value and re-checks skill conflicts on LLM-produced canonicals."""
-        from ..governance.lifecycle_manager import ConsolidationResult
         result = self.lifecycle.consolidate(
             agent_id, gateway=self.gateway, llm_fn=llm_fn, **kwargs
         )
@@ -1463,7 +1465,7 @@ class AgentDB:
                 self._session_record_ids[session_id] = []
             self._session_record_ids[session_id].extend(record_ids)
 
-        seq = self.audit_log.append(
+        self.audit_log.append(
             EVENT_MEMORY_RETRIEVE,
             {
                 "query": query,

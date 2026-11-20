@@ -27,6 +27,7 @@ from .capabilities import RunnerCapabilities, LOCAL_CAPABILITIES
 
 if TYPE_CHECKING:
     from ..interface.client import AgentDB, RetrievalResult
+    from ..core.models import MemoryRecord
 
 
 def _utcnow() -> datetime:
@@ -80,13 +81,6 @@ class DirectoryRecord:
     last_seen_turn: int
     access_count: int
     elevated: bool = False
-
-
-@dataclass(frozen=True)
-class ClaudeRuntimeConfig:
-    model: str
-    system_prompt: Optional[str] = None
-    max_tokens: int = 1024
 
 
 class AgentDBMiddleware(GatewayAdapter):

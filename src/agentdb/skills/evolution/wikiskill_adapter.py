@@ -6,7 +6,6 @@ from ..skill_store import SkillLockConflict
 
 if TYPE_CHECKING:
     from ...interface.client import AgentDB
-    from ...core.models import Skill
 
 
 class WikiSkillAdapter:

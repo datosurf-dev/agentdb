@@ -316,17 +316,6 @@ class SkillStore:
 
         return results
 
-    def mark_retrieved(self, skill_id: str) -> None:
-        now = _utcnow().isoformat()
-        with self._connect() as conn:
-            conn.execute(
-                """
-                UPDATE skills SET last_retrieved = ?
-                WHERE id = ? AND archived = 0
-                """,
-                (now, skill_id),
-            )
-
     def _persist_health_score(self, skill_id: str, version: str, health_score: float) -> None:
         with self._connect() as conn:
             conn.execute(
