@@ -1,16 +1,51 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone  # noqa: F401 — timezone used in run_sweep
 
-from agentdb.core.models import Origin
+from agentdb.core.models import MemoryRecord, Origin
 from agentdb.core.store import MemoryStore
 from agentdb.core.system import SystemStats
 
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _record_digest(record) -> str:
+    """Stable content digest of a source record (for lineage/invalidation)."""
+    payload = json.dumps(
+        {"key": record.key, "value": record.value, "origin": str(record.origin)},
+        sort_keys=True, default=str,
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _key_slug(key: str) -> str:
+    """Return a normalized domain slug for a record key.
+
+    Records are only merge candidates if their keys share this slug. The slug is
+    the *domain* portion of the key — the last path segment with a trailing
+    qualifier token (``note``/``update``/``v2``/...) removed — so
+    ``analytics-schema-note`` and ``analytics-schema-update`` share the domain
+    ``analytics-schema``, while ``orders-note`` and ``billing-note`` do not.
+    Word overlap alone is NOT sufficient — related-but-distinct records must not
+    be merged (T05).
+    """
+    parts = [p for p in str(key).replace(":", "/").split("/") if p]
+    if parts and parts[0] == "memory":
+        parts = parts[1:]
+    seg = parts[-1] if parts else str(key)
+    tokens = [t for t in seg.replace(".", "-").replace("_", "-").split("-") if t]
+    # Drop a trailing qualifier token if present, keeping at least 2 tokens.
+    _QUALIFIERS = {"note", "notes", "update", "updates", "draft", "tmp", "temp",
+                   "old", "new", "v1", "v2", "v3", "copy"}
+    if len(tokens) >= 3 and tokens[-1].lower() in _QUALIFIERS:
+        tokens = tokens[:-1]
+    return "-".join(tokens).lower() if tokens else seg.lower()
 
 
 def _origin_value(origin) -> str:
@@ -309,6 +344,80 @@ class LifecycleManager:
     # Consolidation
     # ------------------------------------------------------------------
 
+    DERIVATION_VERSION = "1"
+
+    def _merge_compatible(self, group: list) -> bool:
+        """Conservative factual-compatibility gate for a cluster (T05).
+
+        Require (a) all records share the same key domain slug, and (b) no pair
+        forms a temporal/authority conflict. Records that merely share words or
+        represent temporal versions of the same fact are NOT auto-merged.
+        """
+        if len({_key_slug(r.key) for r in group}) != 1:
+            return False
+        from agentdb.governance.conflict_detector import ConflictDetector
+        det = ConflictDetector()
+        for i in range(len(group)):
+            for j in range(i + 1, len(group)):
+                if det.check(group[i], group[j]) is not None:
+                    return False
+                if det.check(group[j], group[i]) is not None:
+                    return False
+        return True
+
+    def _build_canonical(self, cluster: list, agent_id: str, llm_fn) -> "MemoryRecord | None":
+        """Create a NEW derived canonical record from a cluster.
+
+        Sources are never mutated. The canonical is a fresh record whose
+        provenance is ``agent_inferred`` (a derived record cannot acquire
+        human authority from mixed sources — contract P-03 / decision A3).
+        Returns the canonical, or None if synthesis is impossible.
+        """
+        cluster_sorted = sorted(cluster, key=lambda r: r.confidence, reverse=True)
+        top_conf = cluster_sorted[0].confidence
+        sources = [
+            {"id": r.id, "key": r.key, "digest": _record_digest(r), "origin": _origin_value(r.origin)}
+            for r in cluster_sorted
+        ]
+
+        # Canonical value: synthesized when an llm_fn is supplied and succeeds;
+        # otherwise the highest-confidence source value (unchanged copy).
+        canonical_value = cluster_sorted[0].value
+        if llm_fn is not None:
+            try:
+                prompt = (
+                    f"Synthesize one canonical memory from these {len(cluster)} records:\n"
+                    + "\n".join(f"- {r.key}: {r.value}" for r in cluster_sorted)
+                    + "\nReturn only the synthesized content, no explanation."
+                )
+                synthesized = llm_fn(prompt)
+                if synthesized:
+                    canonical_value = synthesized
+            except Exception:
+                pass  # fall back to the top source value; never block on LLM
+
+        canonical = MemoryRecord(
+            key=f"memory/canonical/{_key_slug(cluster_sorted[0].key)}/{uuid.uuid4()}",
+            value=canonical_value,
+            origin="agent_inferred",  # derived; never implicitly human_approved
+            trust_level="agent",
+            agent_id=agent_id,
+            confidence=top_conf,
+            consolidated=True,
+            source_record_ids=[r.id for r in cluster_sorted],
+            kind="derived_canonical",
+            producer="consolidation",
+            derivation={
+                "version": self.DERIVATION_VERSION,
+                "created_at": _utcnow().isoformat(),
+                "strategy": "cluster_synthesis" if llm_fn is not None else "cluster_copy",
+                "sources": sources,
+            },
+            entities=list(cluster_sorted[0].entities or []),
+            working_dirs=list(cluster_sorted[0].working_dirs or []),
+        )
+        return canonical
+
     def consolidate(
         self,
         agent_id: str,
@@ -318,11 +427,19 @@ class LifecycleManager:
         llm_fn=None,
         gateway=None,
     ) -> ConsolidationResult:
-        """Cluster near-duplicate records and archive lower-confidence copies.
+        """Cluster near-duplicate records into a derived canonical.
+
+        Behavior (ADB-06/07):
+        - Source records are **never** mutated or overwritten; their values stay
+          exact and inspectable (T03).
+        - The canonical is a NEW ``derived_canonical`` record with full source
+          lineage (``source_record_ids`` + per-source digests in ``derivation``).
+        - Only factually-compatible clusters are merged; related-but-distinct or
+          temporal/contradictory records are left untouched (T05).
+        - Sources are archived (soft) from default selection, not deleted.
 
         ``gateway`` and ``skill_candidate_threshold`` are accepted for API
-        compatibility but unused: AgentDB no longer dispatches skill-candidate
-        events (skill management moved to an independent package).
+        compatibility but unused.
         """
         from datetime import timedelta
         cutoff = _utcnow() - timedelta(hours=since_hours)
@@ -331,42 +448,38 @@ class LifecycleManager:
             if r.agent_id == agent_id
             and not r.archived
             and _origin_value(r.origin) != "human_approved"
+            and r.kind != "derived_canonical"  # do not re-consolidate canonicals
             and r.created_at <= cutoff
         ]
-        clusters = _lc_cluster(all_records, min_overlap=2)
-        result = ConsolidationResult(clusters_found=len(clusters))
+        raw_clusters = _lc_cluster(all_records, min_overlap=2)
+        result = ConsolidationResult(clusters_found=len(raw_clusters))
 
-        for cluster in clusters:
-            cluster.sort(key=lambda r: r.confidence, reverse=True)
-            canonical = cluster[0]
-            to_archive = cluster[1:]
+        for cluster in raw_clusters:
+            if len(cluster) < min_cluster_size:
+                continue
+            if not self._merge_compatible(cluster):
+                # Distinct/temporal/contradictory — leave sources untouched.
+                continue
 
-            canonical.consolidated = True
-            canonical.source_record_ids = [r.id for r in cluster]
-
+            canonical = self._build_canonical(cluster, agent_id, llm_fn)
+            if canonical is None:
+                continue
             if llm_fn is not None:
-                try:
-                    prompt = (
-                        f"Synthesize one canonical memory from these {len(cluster)} records:\n"
-                        + "\n".join(f"- {r.key}: {r.value}" for r in cluster)
-                        + "\nReturn only the synthesized content, no explanation."
-                    )
-                    canonical.value = llm_fn(prompt)
-                    result.synthesized_record_ids.append(canonical.id)
-                except Exception:
-                    pass
+                result.synthesized_record_ids.append(canonical.id)
 
             try:
                 self._store.write(canonical)
             except Exception:
-                pass
+                continue
 
-            for rec in to_archive:
+            for rec in cluster:
                 try:
+                    # Soft-archive the source from default selection; its value
+                    # and lineage remain intact and audit-recoverable.
                     self._store.archive_record(rec.id)
                     result.records_archived += 1
-                    result.records_merged += 1
                 except Exception:
                     pass
+            result.records_merged += len(cluster)
 
         return result

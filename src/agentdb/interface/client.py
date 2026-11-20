@@ -1147,6 +1147,13 @@ class AgentDB:
                 return "repo_scope"
         if not include_consolidated and record.consolidated:
             return "consolidated_excluded"
+        # Derived canonicals are invalidated when any source has been revised
+        # since derivation (T04): a stale canonical must not be presented as
+        # fresh. Fall back to the (audit-retained) sources instead.
+        if getattr(record, "kind", "source") == "derived_canonical":
+            invalid = self._canonical_invalidation_reason(record)
+            if invalid is not None:
+                return invalid
         # Expired records are ineligible for selection.
         if record.expiry_time is not None:
             exp = record.expiry_time
@@ -1154,6 +1161,28 @@ class AgentDB:
                 exp = exp.replace(tzinfo=timezone.utc)
             if exp <= _utcnow():
                 return "expired"
+        return None
+
+    def _canonical_invalidation_reason(self, canonical: MemoryRecord) -> Optional[str]:
+        """Return a reason string if a derived canonical is invalidated, else None.
+
+        A canonical is invalidated when a source it was derived from no longer
+        exists or its content digest no longer matches the recorded derivation
+        digest (i.e. the source was revised). (ADB-06/T04)
+        """
+        from ..governance.lifecycle_manager import _record_digest
+
+        derivation = getattr(canonical, "derivation", {}) or {}
+        sources = derivation.get("sources", [])
+        if not sources:
+            # No lineage recorded: treat as unverifiable and skip selection.
+            return "canonical_no_lineage"
+        for src in sources:
+            rec = self._store.get_by_id(src.get("id"))
+            if rec is None:
+                return "canonical_source_missing"
+            if _record_digest(rec) != src.get("digest"):
+                return "canonical_source_revised"
         return None
 
     def _hybrid_candidates(

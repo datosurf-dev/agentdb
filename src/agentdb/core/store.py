@@ -47,6 +47,9 @@ _MEMORIES_MIGRATION_COLUMNS = (
     ("consolidated", "INTEGER NOT NULL DEFAULT 0"),
     ("source_record_ids", "TEXT NOT NULL DEFAULT '[]'"),
     ("session_id", "TEXT"),
+    ("kind", "TEXT NOT NULL DEFAULT 'source'"),
+    ("producer", "TEXT"),
+    ("derivation", "TEXT NOT NULL DEFAULT '{}'"),
 )
 
 _CREATE_CONFLICTS = """
@@ -132,6 +135,11 @@ class MemoryStore:
                 row["source_record_ids"] if "source_record_ids" in row.keys() else "[]"
             ),
             session_id=row["session_id"] if "session_id" in row.keys() else None,
+            kind=row["kind"] if "kind" in row.keys() and row["kind"] else "source",
+            producer=row["producer"] if "producer" in row.keys() else None,
+            derivation=json.loads(
+                row["derivation"] if "derivation" in row.keys() and row["derivation"] else "{}"
+            ),
         )
 
     def write(self, record: MemoryRecord) -> MemoryRecord:
@@ -142,8 +150,8 @@ class MemoryStore:
                     (id, key, value, origin, trust_level, agent_id, confidence,
                      version, archived, retrieval_count, created_at, entities,
                      last_retrieved, conflict_id, expiry_time, inferred, working_dirs,
-                     consolidated, source_record_ids, session_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     consolidated, source_record_ids, session_id, kind, producer, derivation)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     record.id,
@@ -166,6 +174,9 @@ class MemoryStore:
                     int(record.consolidated),
                     json.dumps(record.source_record_ids),
                     getattr(record, "session_id", None),
+                    getattr(record, "kind", "source"),
+                    getattr(record, "producer", None),
+                    json.dumps(getattr(record, "derivation", {}) or {}),
                 ),
             )
         self._by_id[record.id] = record

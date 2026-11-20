@@ -64,6 +64,13 @@ class MemoryRecord:
     consolidated: bool = False
     source_record_ids: list = field(default_factory=list)
     session_id: Optional[str] = None
+    # Distilled-knowledge lineage (ADB-06). ``kind`` distinguishes an original
+    # source record from a derived canonical. ``producer`` records what created
+    # the record (user/agent/provider/consolidation). ``derivation`` holds
+    # per-source digests and evidence when this record is a derived canonical.
+    kind: str = "source"  # "source" | "derived_canonical"
+    producer: Optional[str] = None
+    derivation: dict = field(default_factory=dict)
 
 
 @dataclass
