@@ -49,9 +49,8 @@ schema bloat and conflicting backends. `AgentDBHermesProvider` is that one provi
 
 Hermes ships its own built-in memory system (FTS5 session search, MEMORY.md bootstrap,
 daily working notes). AgentDB does not replace this — it wraps it: enforcing trust
-zones on what gets written, adding provenance and conflict detection on top of what
-gets retrieved, and injecting governed skills alongside Hermes's own context. The
-built-in memory format stays intact.
+zones on what gets written and adding provenance and conflict detection on top of
+what gets retrieved. The built-in memory format stays intact.
 
 This is integration shape **(C)** from the codebase assessment
 (`docs/integrations/openclaw-hermes-assessment.md`).
@@ -64,7 +63,7 @@ names are verified against `agent/memory_provider.py`.
 | Hermes hook | When called | AgentDB call | Type |
 |---|---|---|---|
 | `initialize(session_id, **kwargs)` | Once at agent startup | `AgentDB.__init__()` (if not pre-constructed); store `session_id`, register reconciliation handlers | Setup |
-| `system_prompt_block()` | During system prompt assembly | `db.retrieve(query="", agent_id=...).skill_warnings` + inject governed skill content | 12a |
+| `system_prompt_block()` | During system prompt assembly | Returns `""` — AgentDB supplies memory via `prefetch`/retrieval, not a system-prompt block | 12a |
 | `prefetch(query, *, session_id)` | Before each API call | `db.retrieve(query, agent_id, session_id)` — returns governed context for the turn | 12a |
 | `queue_prefetch(query, *, session_id)` | After each turn — pre-warms next turn | No-op or background `db.retrieve()` to stamp `last_retrieved`; see Open questions | 12a |
 | `sync_turn(user, asst, *, session_id)` | After each turn completes | `db.write(key=..., value=asst, origin="agent_inferred", agent_id=..., session_id=...)` | 12a |
@@ -98,25 +97,14 @@ The `initialize()` kwargs always include `hermes_home`, `platform`, and optional
 `agent_context`, `agent_identity`, `agent_workspace`, `parent_session_id`, `user_id`.
 Use `agent_identity` as `agent_id` if set; fall back to the profile name.
 
-## Skill coexistence
+## Memory coexistence
 
-Hermes has its own skill system — autonomous skill creation after complex tasks,
-self-improvement during use, and [agentskills.io](https://agentskills.io) format
-compatibility. AgentDB's skills are governance-grade: versioned records, computed
-health scores, human-approved origin, staleness warnings.
-
-These are not the same thing and should not be merged:
-
-- **Hermes skills** are agent-authored, live in the agent's workspace, and represent
-  learned procedural knowledge. They are `agent_inferred` from AgentDB's perspective.
-- **AgentDB skills** are human-approved instruction records with computed health scores.
-  They surface via `system_prompt_block()` as governed guidance alongside (not
-  replacing) Hermes's own skill injection.
-
-Concretely: `system_prompt_block()` should inject AgentDB governed skill content in a
-clearly labelled section. Hermes's own skill injection continues independently. No
-AgentDB code path should touch Hermes's skill files, and no Hermes skill creation path
-should write directly to `skills.sqlite`.
+Hermes ships its own built-in memory system; AgentDB wraps it by adding governed,
+provenance-aware memory alongside it. AgentDB does not manage Hermes's own
+workspace files — it stores its records in its own SQLite database and never
+touches Hermes's native memory files. `system_prompt_block()` returns an empty
+string; AgentDB supplies context through retrieval (`prefetch`), not by injecting
+a system-prompt block.
 
 ## Dreaming and lifecycle sweep coexistence
 
@@ -211,8 +199,9 @@ limitations of the shipped adapter, not pre-build decisions.
    with the task's entity set. If the result is very large or low-signal, consider
    gating on a confidence threshold before writing.
 
-4. **`system_prompt_block()` injects a `## Governed Skills` section.** Verify this
-   header does not conflict with any Hermes-reserved section header in the target profile.
+4. **`system_prompt_block()` returns an empty string.** AgentDB injects nothing into
+   the Hermes system prompt; retrieval happens via `prefetch`. Keep the hook a no-op
+   so it can be added to without colliding with Hermes-reserved section headers.
 
 5. **`on_memory_write` cannot veto Hermes-native writes.** The hook fires after the
    write has already landed in Hermes's own store — it is a 12a governance point for

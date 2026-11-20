@@ -167,4 +167,4 @@ the harness supplies the values.
 - Conversation JSONL is write-only from AgentDB's own retrieval perspective, **but** `AgentDB.ingest_turns()` now provides an explicit ingestion door: the harness normalises its own turns into `ConversationTurn` objects and `ingest_turns()` validates, dedupes (via `ingest_ledger`) and writes them. There is still no parser that reads the raw JSONL back into memory automatically — see [`ingest-turns-design.md`](ingest-turns-design.md) for the design that landed.
 - `delete(key)` is a **soft** delete (`archived = 1`); session content also lives in `conversations/`, embeddings, outcomes, `external_retrieves` and the audit log. `AgentDB.purge_session(agent_id, session_id, require_confirmation=False)` is the implemented **hard** removal that clears all of those for one session (keeping a content-free `session_purged` audit event). See [`ingest-turns-design.md`](ingest-turns-design.md).
 - Injection covers memory records, workspace and current-session work
-  context — **not** prior-session transcripts, and never skills.
+  context — **not** prior-session transcripts.

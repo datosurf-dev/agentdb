@@ -17,7 +17,7 @@ The package currently provides:
 - **Runtime integration:** a generic `AgentDBBackend`, model-agnostic middleware, a Claude runtime wrapper, and a Hermes `MemoryProvider` adapter.
 - **Optional integrations:** stdio MCP server, Anthropic message ingestor, and email/Slack notifications.
 
-> **Scope:** AgentDB is a memory and context-selection library. It does **not** manage or inject skills — skill registration, versioning, staleness, proposals and evolution were removed and now belong to a separate package.
+> **Scope:** AgentDB is a focused memory and context-selection library: it stores, ranks, and injects provenance-aware memory for agents.
 
 The current storage implementation is embedded SQLite. There is no Postgres/cloud backend or HTTP MCP transport. The gateway dispatcher is in-memory; the audit log is stored separately in SQLite.
 
@@ -135,7 +135,7 @@ Consolidation produces a **derived `derived_canonical` record** with full source
 
 ### Model-agnostic middleware
 
-`AgentDBMiddleware` (`from agentdb.adapters import AgentDBMiddleware`) provides `prepare_turn` / `finalize_turn` and `run_turn`, plus async variants. The async preparation path can inject workspace information and recent work context according to `RunnerCapabilities`; the synchronous path prepares memory context. Neither path injects skills.
+`AgentDBMiddleware` (`from agentdb.adapters import AgentDBMiddleware`) provides `prepare_turn` / `finalize_turn` and `run_turn`, plus async variants. The async preparation path can inject workspace information and recent work context according to `RunnerCapabilities`; the synchronous path prepares memory context.
 
 ### Claude
 
@@ -143,7 +143,7 @@ Consolidation produces a **derived `derived_canonical` record** with full source
 
 ### Hermes
 
-`AgentDBHermesProvider` implements Hermes's `MemoryProvider` interface. It supplies retrieval, turn persistence, and lifecycle hooks (`system_prompt_block()` returns an empty string — AgentDB does not inject skills). Governance applies to AgentDB records; a post-write Hermes hook cannot veto a write already made to Hermes-native storage.
+`AgentDBHermesProvider` implements Hermes's `MemoryProvider` interface. It supplies retrieval, turn persistence, and lifecycle hooks. Governance applies to AgentDB records; a post-write Hermes hook cannot veto a write already made to Hermes-native storage.
 
 ### Other frameworks
 
