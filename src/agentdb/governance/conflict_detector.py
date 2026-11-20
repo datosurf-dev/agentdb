@@ -13,10 +13,40 @@ Human-approved overwriting anything lower is NOT a conflict — it supersedes cl
 """
 from __future__ import annotations
 
+import re
+
 from agentdb.core.models import ConflictRecord, MemoryRecord
 
 # Origins that are considered "agent-tier" (lower authority than human_approved)
 _AGENT_TIER_ORIGINS = {"agent_inferred", "provider_ingested"}
+
+# Value-compatibility classifications (see CONTEXTUAL-SPEC §4).
+COMPATIBLE = "compatible"
+CONTEXT_SPECIFIC_DIFFERENCE = "context_specific_difference"
+VERIFIED_SUPERSESSION = "verified_supersession"
+UNRESOLVED_CONTRADICTION = "unresolved_contradiction"
+INSUFFICIENT_EVIDENCE = "insufficient_evidence"
+
+# Tokens that denote a *value* (a version, number, or hyphenated enum/identifier
+# such as "us-east", "eu-west", "port-8080") rather than prose. A single
+# differing value-token in otherwise-parallel assertions is a scope-specific
+# value difference / unresolved contradiction, NOT a safe merge. Narrow on
+# purpose: no natural-language contradiction engine.
+_VALUE_TOKEN_RE = re.compile(r"^(v?\d+(?:\.\d+)*|[a-z]?\d+[a-z0-9]*|[a-z0-9]+(?:-[a-z0-9]+)+)$", re.IGNORECASE)
+
+
+def _norm_tokens(value) -> list[str]:
+    """Tokenize a record value deterministically for comparison.
+
+    Whitespace/dotted/comma separated; hyphenated compounds ("us-east") stay a
+    single token so they compare as one value slot.
+    """
+    text = str(value).lower()
+    return [t for t in re.split(r"[^a-z0-9.\-]+", text) if t]
+
+
+def _is_value_token(tok: str) -> bool:
+    return bool(_VALUE_TOKEN_RE.match(tok))
 
 
 class ConflictDetector:
@@ -64,6 +94,87 @@ class ConflictDetector:
             )
 
         return None
+
+    @staticmethod
+    def classify_value_compatibility(
+        a_value,
+        b_value,
+        *,
+        same_key: bool = False,
+        explicit_supersession: bool = False,
+    ) -> str:
+        """Classify whether two record *values* are safe to combine into one
+        derived canonical (CONTEXTUAL-SPEC §4). Deterministic; no NL engine.
+
+        Returns one of: COMPATIBLE, CONTEXT_SPECIFIC_DIFFERENCE,
+        VERIFIED_SUPERSESSION, UNRESOLVED_CONTRADICTION, INSUFFICIENT_EVIDENCE.
+
+        Rules (narrow, value-oriented):
+        - Identical values → COMPATIBLE.
+        - Differ in exactly one token position, and that differing token is a
+          value token (version / number / identifier) on both sides, with the
+          remaining tokens identical → the two are *the same assertion with a
+          differing value*. That is a contradiction unless explicit supersession
+          is established → UNRESOLVED_CONTRADICTION (or VERIFIED_SUPERSESSION
+          if ``explicit_supersession``).
+        - Differ only by prose (non-value tokens) → COMPATIBLE (near-duplicate).
+        - Otherwise (differ in multiple positions, or a value token appears /
+          disappears) → UNRESOLVED_CONTRADICTION when the difference is
+          value-bearing, else INSUFFICIENT_EVIDENCE (default = do not merge).
+        """
+        if a_value == b_value:
+            return COMPATIBLE
+
+        ta, tb = _norm_tokens(a_value), _norm_tokens(b_value)
+        if not ta or not tb:
+            return INSUFFICIENT_EVIDENCE
+        if ta == tb:
+            # Same tokens, different raw formatting → same assertion.
+            return COMPATIBLE
+        # Token multisets identical (reordering / repetition) → same assertion.
+        if sorted(ta) == sorted(tb):
+            return COMPATIBLE
+
+        # Aligned comparison: only meaningful when token counts match so a
+        # single position can be identified as the discriminating value.
+        if len(ta) == len(tb):
+            diffs = [i for i, (x, y) in enumerate(zip(ta, tb)) if x != y]
+            if len(diffs) == 1:
+                i = diffs[0]
+                if _is_value_token(ta[i]) and _is_value_token(tb[i]):
+                    # A parallel assertion requires a shared subject/context
+                    # (at least one identical non-value token besides the
+                    # differing value). "use postgres 15" vs "use postgres 16"
+                    # qualifies; bare labels "v1" vs "v2" do not (no shared
+                    # context) and fall through to insufficient evidence.
+                    shared_context = any(
+                        (x == y and not _is_value_token(x))
+                        for k, (x, y) in enumerate(zip(ta, tb))
+                        if k != i
+                    )
+                    if not shared_context:
+                        return INSUFFICIENT_EVIDENCE
+                    if explicit_supersession:
+                        return VERIFIED_SUPERSESSION
+                    return UNRESOLVED_CONTRADICTION
+                # Differing token(s) are prose, not a value → near-duplicate.
+                return COMPATIBLE
+            # Multiple differing positions.
+            value_bearing = any(
+                _is_value_token(ta[i]) or _is_value_token(tb[i]) for i in diffs
+            )
+            if value_bearing:
+                return UNRESOLVED_CONTRADICTION
+            return INSUFFICIENT_EVIDENCE
+
+        # Different lengths: a value token appearing/disappearing is a real
+        # distinction; a purely additive prose tail is compatible.
+        value_diff = {t for t in ta if _is_value_token(t)} ^ {
+            t for t in tb if _is_value_token(t)
+        }
+        if value_diff:
+            return UNRESOLVED_CONTRADICTION
+        return INSUFFICIENT_EVIDENCE
 
     @staticmethod
     def check_semantic_batch(

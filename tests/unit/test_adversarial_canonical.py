@@ -132,8 +132,7 @@ def test_d5_shared_keyword_distinct_domain_not_merged(tmp_path):
     assert not db._store.get_by_id("B").archived
 
 
-# D6 — contradictory facts must not be *destroyed*; they may (currently) merge
-# across qualifier keys in the same domain. See OPEN_DECISIONS for the gap.
+# D6 — contradictory facts must not be merged nor destroyed (OD-1 fixed).
 def test_d6_same_key_temporal_conflict_not_merged(tmp_path):
     """Identical-key temporal conflict (v1 vs v2): not merged (hard invariant)."""
     db = _db(tmp_path)
@@ -152,13 +151,10 @@ def test_d6_same_key_temporal_conflict_not_merged(tmp_path):
 def test_d6_cross_key_contradictory_values_remain_recoverable(tmp_path):
     """Cross-key contradiction in one domain (postgres 15 vs 16):
 
-    The current conservative gate treats qualifier-suffixed keys in a shared
-    domain as mergeable and does NOT detect value-level contradiction without
-    identical keys. This test pins the *upheld* invariants: no source is
-    destroyed or overwritten, and lineage retains both source IDs. Whether such
-    records should also be *prevented* from merging is recorded as an open
-    product decision (docs/implementation/OPEN_DECISIONS.md) — not silently
-    invented here.
+    With OD-1 fixed, these records no longer merge. This test pins the
+    invariants that must hold either way: no source is destroyed or overwritten,
+    and (if any canonical existed) it would retain both source IDs. Sources stay
+    recoverable and distinguishable.
     """
     db = _db(tmp_path)
     with frozen_clock():
@@ -179,14 +175,9 @@ def test_d6_cross_key_contradictory_values_remain_recoverable(tmp_path):
         assert set(c.source_record_ids) == {"V15", "V16"}
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="KNOWN GAP: cross-key contradictory values in one domain are merged; "
-           "value-level contradiction detection is an open product decision "
-           "(OPEN_DECISIONS.md). Remove xfail when a deterministic conservative "
-           "gate is approved and implemented.",
-)
 def test_d6_cross_key_contradiction_should_not_merge(tmp_path):
+    """OD-1 fixed: cross-key records with a single differing value token
+    ("postgres 15" vs "postgres 16") must NOT be merged into one canonical."""
     db = _db(tmp_path)
     with frozen_clock():
         write_specs(db, [
@@ -196,6 +187,9 @@ def test_d6_cross_key_contradiction_should_not_merge(tmp_path):
         db.consolidate("a1", since_hours=0, min_cluster_size=2)
     all_recs = list(db._store._by_id.values())
     assert not [r for r in all_recs if r.kind == "derived_canonical"]
+    # Both sources remain active (distinction preserved).
+    assert not db._store.get_by_id("V15").archived
+    assert not db._store.get_by_id("V16").archived
 
 
 # D7 — unique source details remain accessible
@@ -208,12 +202,14 @@ def test_d7_unique_detail_retrievable_after_consolidation(tmp_path):
         write_specs(db, [
             make_record_spec("S1", "memory/auth-schema-note",
                              "auth schema uses tokens"),
+            # S2 adds a non-value detail token ("rotation") so the pair is a
+            # compatible near-duplicate that merges; the canonical stub omits it.
             make_record_spec("S2", "memory/auth-schema-update",
-                             "auth schema uses tokens, error E4097 on expiry"),
+                             "auth schema uses tokens rotation"),
         ])
         db.consolidate("a1", since_hours=0, min_cluster_size=2, llm_fn=_stub_llm)
-    # Query names the canonical domain (auth schema) AND the detail (E4097).
-    res = db.retrieve("auth schema E4097", agent_id="a1", limit=10, trace=True)
+    # Query names the canonical domain (auth schema) AND the detail (rotation).
+    res = db.retrieve("auth schema rotation", agent_id="a1", limit=10, trace=True)
     assert "S2" in [r.id for r in res.records]
     assert "S2" in res.trace.get("unique_detail_ids", [])
 
@@ -297,7 +293,8 @@ def test_d8_missing_source_invalidates_canonical(tmp_path):
     strict=True,
     reason="KNOWN GAP: concurrent consolidate() calls each create a canonical "
            "because there is no idempotency guard/lock; a proper fix is a "
-           "storage/concurrency design decision (OPEN_DECISIONS.md OD-6). "
+           "storage/concurrency design decision (tracked separately; see "
+           "docs/spec/implementation/MIGRATION_REPORT.md). "
            "Remove xfail when a guard is approved and implemented.",
 )
 def test_d10_concurrent_consolidation_no_duplicates(tmp_path):

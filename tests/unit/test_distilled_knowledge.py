@@ -136,8 +136,14 @@ def test_human_approved_sources_never_merged(tmp_path):
 
 def test_retrieval_returns_canonical_not_its_archived_sources(tmp_path):
     db = _db(tmp_path)
-    db.write("memory/analytics-schema-note", "v1 detail", origin="agent_inferred", agent_id="a1")
-    db.write("memory/analytics-schema-update", "v2 detail", origin="agent_inferred", agent_id="a1")
+    # Compatible near-duplicates (same assertion, prose difference — no value
+    # contradiction), so they consolidate into one canonical (CONTEXTUAL-SPEC §4).
+    db.write("memory/analytics-schema-note",
+             "analytics schema uses a columnar layout",
+             origin="agent_inferred", agent_id="a1")
+    db.write("memory/analytics-schema-update",
+             "analytics schema columnar layout confirmed",
+             origin="agent_inferred", agent_id="a1")
     db.consolidate("a1", since_hours=0, min_cluster_size=2)
     canon = _canonicals(db, "a1")[0]
 
@@ -176,25 +182,26 @@ def test_canonical_ids_explainable_in_trace(tmp_path):
 
 def test_unique_detail_source_reinjected_when_canonical_omits_it(tmp_path):
     db = _db(tmp_path)
-    # Two same-domain records; one carries an error code the summary drops.
+    # Two compatible same-domain records (prose near-duplicates; the second adds
+    # a non-value detail token "traceback") so they merge. The synthesized
+    # canonical omits that detail, so a query naming it must re-inject the source.
     db.write("memory/api-errors-note",
-             "API returns error code E4097 on duplicate key",
+             "API validation errors on duplicate key",
              origin="agent_inferred", agent_id="a1", confidence=0.6)
     db.write("memory/api-errors-update",
-             "API validation errors were reworked last quarter",
+             "API validation errors on duplicate key traceback",
              origin="agent_inferred", agent_id="a1", confidence=0.9)
-    # Synthesize a canonical that OMITS the error code.
+    # Synthesize a canonical that OMITS the detail token.
     db.consolidate("a1", since_hours=0, min_cluster_size=2,
-                   llm_fn=lambda prompt: "API validation errors were reworked last quarter.")
+                   llm_fn=lambda prompt: "API validation errors on duplicate key")
     canon = [r for r in db._store.list_all() if r.kind == "derived_canonical"][0]
-    assert "E4097" not in str(canon.value)
+    assert "traceback" not in str(canon.value)
 
-    res = db.retrieve("api errors code E4097", agent_id="a1", trace=True, budget_tokens=500)
+    res = db.retrieve("api errors traceback", agent_id="a1", trace=True, budget_tokens=500)
     ids = [r.id for r in res.records]
-    keys = [r.key for r in res.records]
-    # Canonical present, and the source carrying E4097 re-injected as unique detail.
+    # Canonical present, and the source carrying the "traceback" detail re-injected.
     assert canon.id in ids
-    assert any("E4097" in str(r.value) for r in res.records)
+    assert any("traceback" in str(r.value) for r in res.records)
     assert res.trace.get("unique_detail_ids"), "trace must record unique-detail re-injection"
 
 

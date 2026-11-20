@@ -347,21 +347,38 @@ class LifecycleManager:
     DERIVATION_VERSION = "1"
 
     def _merge_compatible(self, group: list) -> bool:
-        """Conservative factual-compatibility gate for a cluster (T05).
+        """Conservative factual-compatibility gate for a cluster (T05, OD-1).
 
-        Require (a) all records share the same key domain slug, and (b) no pair
-        forms a temporal/authority conflict. Records that merely share words or
-        represent temporal versions of the same fact are NOT auto-merged.
+        A cluster is mergeable only if ALL pairs are safe to combine:
+        (a) all records share the same key domain slug (same subject), AND
+        (b) no pair forms a same-key temporal/authority conflict, AND
+        (c) no pair's *values* are a context-specific difference or an
+            unresolved contradiction (CONTEXTUAL-SPEC §4). Cross-key records
+            with a single differing value token (e.g. "postgres 15" vs
+            "postgres 16") are NOT merged — the distinction must survive.
+
+        Unknown/insufficient evidence defaults to no-merge (spec §4).
         """
         if len({_key_slug(r.key) for r in group}) != 1:
             return False
-        from agentdb.governance.conflict_detector import ConflictDetector
+        from agentdb.governance.conflict_detector import (
+            ConflictDetector,
+            UNRESOLVED_CONTRADICTION,
+        )
         det = ConflictDetector()
         for i in range(len(group)):
             for j in range(i + 1, len(group)):
-                if det.check(group[i], group[j]) is not None:
+                a, b = group[i], group[j]
+                # Same-key temporal/authority conflicts remain disqualifying.
+                if det.check(a, b) is not None or det.check(b, a) is not None:
                     return False
-                if det.check(group[j], group[i]) is not None:
+                # Value-level contradiction gate (works across different keys in
+                # a shared domain). We ONLY block merges that are a demonstrable
+                # value contradiction — parallel assertions differing solely by a
+                # value token (e.g. "postgres 15" vs "postgres 16"). Other value
+                # relationships (prose near-duplicates, missing scope) retain the
+                # prior conservative behavior rather than blocking every merge.
+                if det.classify_value_compatibility(a.value, b.value) == UNRESOLVED_CONTRADICTION:
                     return False
         return True
 
