@@ -77,26 +77,6 @@ class ConflictRecord:
 
 
 @dataclass
-class Skill:
-    id: str
-    name: str
-    content: str
-    authored_by: str
-    scope: list
-    version: str = "1.0.0"
-    archived: bool = False
-    health_score: float = 1.0
-    health_score_reasons: list = field(default_factory=list)
-    created_at: datetime = field(default_factory=_utcnow)
-    updated_at: datetime = field(default_factory=_utcnow)
-    last_retrieved: Optional[datetime] = None
-    parent_skill_id: Optional[str] = None
-    origin: str = "human"
-    validation_score: Optional[float] = None
-    metadata: dict = field(default_factory=dict)
-
-
-@dataclass
 class SessionProfile:
     session_id: str
     agent_id: Optional[str] = None

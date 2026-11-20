@@ -2,27 +2,17 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Optional
-from .sqlite_connection import connect, connected
+from .sqlite_connection import connected
 
 
 class SystemStats:
-    def __init__(self, db_path: Path, skills_db_path: Optional[Path] = None) -> None:
+    def __init__(self, db_path: Path) -> None:
         self._db_path = db_path
-        self._skills_db_path = skills_db_path
 
     @contextmanager
     def _connect(self):
         with connected(self._db_path) as conn:
             yield conn
-
-    @contextmanager
-    def _connect_path(self, path: Path):
-        conn = connect(path)
-        try:
-            yield conn
-        finally:
-            conn.close()
 
     def agentdb_stats(self) -> dict:
         with self._connect() as conn:
@@ -81,21 +71,6 @@ class SystemStats:
             except Exception:
                 pass
 
-        # Skill counts — queried from skills DB (separate file)
-        total_skills = 0
-        stale_skill_count = 0
-        skills_path = self._skills_db_path or self._db_path
-        try:
-            with self._connect_path(skills_path) as sconn:
-                total_skills = sconn.execute(
-                    "SELECT COUNT(*) FROM skills WHERE archived = 0"
-                ).fetchone()[0]
-                stale_skill_count = sconn.execute(
-                    "SELECT COUNT(*) FROM skills WHERE archived = 0 AND health_score < 0.6"
-                ).fetchone()[0]
-        except Exception:
-            pass
-
         return {
             "total_memories": total,
             "avg_confidence": avg_confidence or 0.0,
@@ -104,6 +79,4 @@ class SystemStats:
             "outcome_positive_rate": outcome_rate,
             "retrieval_count_total": retrieval_total,
             "external_conflict_rate": external_conflict_rate,
-            "total_skills": total_skills,
-            "stale_skill_count": stale_skill_count,
         }

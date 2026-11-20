@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 
-from ..core.models import MemoryRecord, Skill
+from ..core.models import MemoryRecord
 
 
 def _embed_text_for_record(r: MemoryRecord) -> str:
@@ -13,8 +13,3 @@ def _embed_text_for_record(r: MemoryRecord) -> str:
     else:
         value_str = str(r.value)[:2000]
     return f"{key_readable}: {value_str}"
-
-
-def _embed_text_for_skill(skill: Skill) -> str:
-    """Build the text representation of a skill for embedding."""
-    return f"{skill.name}: {skill.content}"[:2000]

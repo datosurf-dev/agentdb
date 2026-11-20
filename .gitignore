@@ -23,3 +23,6 @@ agentdb-workspace/
 
 # Agent specs
 docs/spec
+
+# Accidental literal ":memory:" path from ad-hoc scripts
+:memory:

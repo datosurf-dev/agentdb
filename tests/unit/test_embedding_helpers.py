@@ -1,7 +1,7 @@
 import json
 import pytest
-from agentdb.core.models import MemoryRecord, Skill
-from agentdb.embeddings.text import _embed_text_for_record, _embed_text_for_skill
+from agentdb.core.models import MemoryRecord
+from agentdb.embeddings.text import _embed_text_for_record
 
 
 def _rec(key="user/pref/format", value="markdown"):
@@ -51,19 +51,3 @@ def test_embed_text_for_record_truncates_value_at_2000_chars():
     r = _rec(key="k", value="x" * 3000)
     text = _embed_text_for_record(r)
     assert len(text) <= 2010
-
-
-def test_embed_text_for_skill_includes_name_and_content():
-    skill = Skill(
-        id="s1", name="code review", content="Review all PRs carefully before merging.",
-        authored_by="human", scope=["agent1"]
-    )
-    text = _embed_text_for_skill(skill)
-    assert "code review" in text
-    assert "Review all PRs" in text
-
-
-def test_embed_text_for_skill_truncates_at_2000():
-    skill = Skill(id="s1", name="n", content="x" * 3000, authored_by="human", scope=[])
-    text = _embed_text_for_skill(skill)
-    assert len(text) <= 2000

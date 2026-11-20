@@ -87,18 +87,6 @@ def test_audit_keeps_the_event_but_not_the_content(db):
     assert "s1" in payload
 
 
-def test_skills_derived_from_the_session_survive(db):
-    skill = db.skills_api.create_skill(
-        skill_id="deploy-check",
-        name="deploy-check",
-        content="verify CI before deploy",
-        scope=["a1"],
-    )
-    seed(db)
-    db.purge_session("a1", "s1", require_confirmation=False)
-    assert db.skills_api.get_skill(skill.id) is not None
-
-
 def test_purge_removes_embeddings_from_the_correct_db(tmp_path):
     """Regression: purge_session used to open database/embeddings.sqlite while
     embeddings are actually written to database/embeddings.db, so vectors were

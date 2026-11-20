@@ -15,9 +15,6 @@ The dispatcher subscribes to gateway events and calls ``channel.send(subject, bo
 for each one.  Multiple channels receive every event.
 
 Default subscribed events:
-  - skill_stale
-  - skill_review_needed
-  - untracked_skill_candidate
   - conflict_detected
 """
 from __future__ import annotations
@@ -30,50 +27,12 @@ if TYPE_CHECKING:
     from ..gateway import Gateway
 
 _DEFAULT_EVENTS = (
-    "skill_stale",
-    "skill_review_needed",
-    "untracked_skill_candidate",
     "conflict_detected",
 )
 
 
 def _format(event: str, kwargs: dict) -> tuple[str, str]:
     """Return (subject, body) for a governance event."""
-    if event == "skill_stale":
-        skill_id = kwargs.get("skill_id", "unknown")
-        return (
-            f"AgentDB: Skill '{skill_id}' is stale",
-            (
-                f"Skill '{skill_id}' has crossed the staleness threshold (health < 0.6).\n"
-                "Review or update its content so agents receive current guidance."
-            ),
-        )
-
-    if event == "skill_review_needed":
-        skill_id = kwargs.get("skill_id", "unknown")
-        memory_key = kwargs.get("memory_key", "unknown")
-        agent_id = kwargs.get("agent_id", "unknown")
-        return (
-            f"AgentDB: Skill conflict signal for '{skill_id}'",
-            (
-                f"Agent '{agent_id}' wrote memory '{memory_key}' whose keywords overlap "
-                f"skill '{skill_id}'.\n"
-                "Review whether the memory contradicts, extends, or duplicates the skill."
-            ),
-        )
-
-    if event == "untracked_skill_candidate":
-        sample_key = kwargs.get("sample_key", "unknown")
-        cluster_size = kwargs.get("cluster_size", "?")
-        return (
-            "AgentDB: Untracked skill candidate detected",
-            (
-                f"Memory consolidation found a cluster of {cluster_size} records "
-                f"(sample key: '{sample_key}') with no governing skill.\n"
-                "Consider creating a skill to govern this knowledge domain."
-            ),
-        )
-
     if event == "conflict_detected":
         key = kwargs.get("key", "unknown")
         agent_id = kwargs.get("agent_id", "unknown")

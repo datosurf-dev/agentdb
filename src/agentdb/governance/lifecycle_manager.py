@@ -25,7 +25,6 @@ class ConsolidationResult:
     clusters_found: int = 0
     records_merged: int = 0
     records_archived: int = 0
-    skill_candidates: int = 0
     synthesized_record_ids: list = field(default_factory=list)
 
 
@@ -71,7 +70,6 @@ class LifecycleManager:
         system: SystemStats,
         session_record_ids: dict | None = None,
         embedding_store=None,
-        skill_store=None,
         confidence_decay_rate: float | None = None,
         archival_threshold: float | None = None,
         staleness_days: int | None = None,
@@ -83,7 +81,6 @@ class LifecycleManager:
             session_record_ids if session_record_ids is not None else {}
         )
         self._embedding_store = embedding_store
-        self._skill_store = skill_store
         cls = type(self)
         self.CONFIDENCE_DECAY_RATE = confidence_decay_rate if confidence_decay_rate is not None else cls.CONFIDENCE_DECAY_RATE
         self.ARCHIVAL_THRESHOLD = archival_threshold if archival_threshold is not None else cls.ARCHIVAL_THRESHOLD
@@ -175,10 +172,6 @@ class LifecycleManager:
         if self._embedding_store is not None:
             active_memory_ids = [r.id for r in self._store.list_all()]
             self._embedding_store.prune_orphans("memories", active_memory_ids)
-
-            if self._skill_store is not None:
-                active_skill_ids = self._skill_store.list_all_active_ids()
-                self._embedding_store.prune_orphans("skills", active_skill_ids)
 
         return {"decayed": decayed, "archived": len(archived_ids)}
 
@@ -325,6 +318,12 @@ class LifecycleManager:
         llm_fn=None,
         gateway=None,
     ) -> ConsolidationResult:
+        """Cluster near-duplicate records and archive lower-confidence copies.
+
+        ``gateway`` and ``skill_candidate_threshold`` are accepted for API
+        compatibility but unused: AgentDB no longer dispatches skill-candidate
+        events (skill management moved to an independent package).
+        """
         from datetime import timedelta
         cutoff = _utcnow() - timedelta(hours=since_hours)
         all_records = [
@@ -336,11 +335,6 @@ class LifecycleManager:
         ]
         clusters = _lc_cluster(all_records, min_overlap=2)
         result = ConsolidationResult(clusters_found=len(clusters))
-
-        skill_word_sets = []
-        if self._skill_store is not None:
-            for skill in self._skill_store.get_for_agent(agent_id):
-                skill_word_sets.append(_lc_words(f"{skill.id} {skill.name}"))
 
         for cluster in clusters:
             cluster.sort(key=lambda r: r.confidence, reverse=True)
@@ -374,21 +368,5 @@ class LifecycleManager:
                     result.records_merged += 1
                 except Exception:
                     pass
-
-            if gateway is not None and len(cluster) >= skill_candidate_threshold:
-                cluster_words = _lc_words(" ".join(r.key for r in cluster))
-                governed = any(len(sw & cluster_words) >= 1 for sw in skill_word_sets)
-                if not governed:
-                    try:
-                        gateway.dispatch(
-                            "untracked_skill_candidate",
-                            agent_id=agent_id,
-                            dominant_words=list(cluster_words)[:10],
-                            record_count=len(cluster),
-                            sample_keys=[r.key for r in cluster[:3]],
-                        )
-                        result.skill_candidates += 1
-                    except Exception:
-                        pass
 
         return result

@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Any, Callable, Optional, Sequence
 
 import yaml
 
-from ..core.models import MemoryRecord, SessionProfile, Skill
+from ..core.models import MemoryRecord, SessionProfile
 from ..core.profiles import BUILTIN_PROFILES
 from ..core.store import MemoryStore
 from ..core.system import SystemStats
@@ -21,7 +21,6 @@ from ..governance.conflict_detector import ConflictDetector
 from ..governance.lifecycle_manager import LifecycleManager
 from ..governance.permission_router import PermissionDenied, PermissionRouter
 from ..retrieval.algorithm import MultiSignalRanker
-from ..skills.skill_store import SkillStore
 from ..core.sqlite_connection import connected
 
 if TYPE_CHECKING:
@@ -134,25 +133,6 @@ def _classify_request_type(text: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Skill conflict helpers
-# ---------------------------------------------------------------------------
-
-_SKILL_CONFLICT_STOP_WORDS = frozenset({
-    "with", "from", "this", "that", "have", "been", "will",
-    "your", "into", "they", "them", "then", "when", "what",
-})
-_SKILL_CONFLICT_MIN_WORD_LEN = 4
-
-
-def _skill_words(text: str) -> set:
-    cleaned = str(text).replace("-", " ").replace("_", " ").lower()
-    return {
-        w for w in cleaned.split()
-        if len(w) >= _SKILL_CONFLICT_MIN_WORD_LEN and w not in _SKILL_CONFLICT_STOP_WORDS
-    }
-
-
-# ---------------------------------------------------------------------------
 # Audit log
 # ---------------------------------------------------------------------------
 
@@ -190,97 +170,6 @@ class AuditLog:
                 sequence=row["sequence"],
             )
             for row in rows
-        ]
-
-
-# ---------------------------------------------------------------------------
-# Skills API (high-level facade)
-# ---------------------------------------------------------------------------
-
-class SkillsAPI:
-    def __init__(
-        self,
-        skill_store: SkillStore,
-        embedding_provider=None,
-        embedding_store=None,
-    ) -> None:
-        self._store = skill_store
-        self._embedding_provider = embedding_provider
-        self._embedding_store = embedding_store
-
-    def _maybe_embed_skill(self, skill: Skill) -> None:
-        if self._embedding_provider is None or self._embedding_store is None:
-            return
-        try:
-            from ..embeddings.text import _embed_text_for_skill
-            vec = self._embedding_provider.embed(_embed_text_for_skill(skill))
-            self._embedding_store.put(
-                "skills", f"{skill.id}:{skill.version}", vec, working_dirs=[]
-            )
-        except Exception:
-            pass
-
-    def create_skill(
-        self,
-        skill_id: str,
-        name: str,
-        content: str,
-        scope: list[str],
-        origin: str = "human",
-        validation_score: Optional[float] = None,
-        metadata: Optional[dict] = None,
-    ) -> Skill:
-        skill = Skill(
-            id=skill_id,
-            name=name,
-            content=content,
-            authored_by="human",
-            scope=scope,
-            origin=origin,
-            validation_score=validation_score,
-            metadata=metadata or {},
-        )
-        created = self._store.create(skill)
-        self._maybe_embed_skill(created)
-        return created
-
-    def update_skill_version(
-        self,
-        skill_id: str,
-        content: str,
-        new_version: str,
-        origin: str = "human",
-        validation_score: Optional[float] = None,
-        metadata: Optional[dict] = None,
-    ) -> Skill:
-        updated = self._store.update(
-            skill_id, content, new_version,
-            origin=origin,
-            validation_score=validation_score,
-            metadata=metadata,
-        )
-        self._maybe_embed_skill(updated)
-        return updated
-
-    def get_skill(self, skill_id: str) -> Optional[Skill]:
-        return self._store.get(skill_id)
-
-    def archive_skill(self, skill_id: str, version: str) -> None:
-        self._store.archive(skill_id, version)
-        if self._embedding_store is not None:
-            try:
-                self._embedding_store.delete("skills", f"{skill_id}:{version}")
-            except Exception:
-                pass
-
-    def list_stale_skills_for_agent(self, agent_id: str) -> list[Skill]:
-        return self._store.list_stale(agent_id)
-
-    def list_skill_warnings_for_agent(self, agent_id: str) -> list[str]:
-        stale = self._store.list_stale(agent_id)
-        return [
-            f"Skill '{skill.id}' is stale (health_score={skill.health_score:.2f})"
-            for skill in stale
         ]
 
 
@@ -422,8 +311,8 @@ database:
 
 # Uncomment to enable governance notifications.
 # notifications:
-#   # events: omit to receive all four, or list a subset:
-#   #   skill_stale | skill_review_needed | untracked_skill_candidate | conflict_detected
+#   # events: omit to receive the default, or list a subset:
+#   #   conflict_detected
 #   channels:
 #     - type: email
 #       to: ops@example.com
@@ -528,16 +417,7 @@ class AgentDB:
         # Initialize stores using shared DB path
         self._store = MemoryStore(db_path)
         self.audit_log = AuditLog(db_path)
-        skills_db_path_for_stats = db_path.parent / "skills.sqlite" if db_path != Path(":memory:") else db_path
-        self._system = SystemStats(db_path, skills_db_path=skills_db_path_for_stats)
-
-        # Skills store - use separate DB or same
-        skills_db_path = db_path.parent / "skills.sqlite" if db_path != Path(":memory:") else db_path
-
-        def _on_skill_stale(skill_id: str) -> None:
-            self.gateway.dispatch("skill_stale", skill_id=skill_id)
-
-        self.skills = SkillStore(db_path=skills_db_path, on_stale_crossing=_on_skill_stale)
+        self._system = SystemStats(db_path)
 
         # Initialize outcomes table
         self._init_outcomes_table()
@@ -599,13 +479,6 @@ class AgentDB:
                 dimensions=self._embedding_provider.dimensions,
             )
 
-        # Skills API — created after embedding init so it receives embedding deps
-        self.skills_api = SkillsAPI(
-            self.skills,
-            embedding_provider=self._embedding_provider,
-            embedding_store=self._embedding_store,
-        )
-
         # Ranker with weights from resolved config; semantic weight activated when provider present
         self._ranker = self._build_ranker()
 
@@ -617,8 +490,6 @@ class AgentDB:
             self.gateway.subscribe("conversation_started", self._handle_conversation_started_embedding)
         # Metadata handler always active (repo filter + auto-trigger — no embeddings required)
         self.gateway.subscribe("conversation_started", self._handle_conversation_started_metadata)
-        # Auto-propose skill drafts from ungoverned consolidation clusters
-        self.gateway.subscribe("untracked_skill_candidate", self._on_untracked_skill_candidate)
 
         # Lifecycle manager — initialized after _session_record_ids is created
         lc = self._resolved_config["lifecycle"]
@@ -627,7 +498,6 @@ class AgentDB:
             system=self._system,
             session_record_ids=self._session_record_ids,
             embedding_store=self._embedding_store,
-            skill_store=self.skills,
             confidence_decay_rate=lc["confidence_decay_rate"],
             archival_threshold=lc["archival_threshold"],
             staleness_days=lc["staleness_days"],
@@ -741,79 +611,6 @@ class AgentDB:
             except Exception:
                 pass
 
-    def _on_untracked_skill_candidate(
-        self, agent_id: str, dominant_words: list, sample_keys: list, **kwargs
-    ) -> None:
-        try:
-            self.gateway.auto_propose_from_cluster(
-                dominant_words=dominant_words,
-                sample_keys=sample_keys,
-                agent_id=agent_id,
-            )
-        except Exception:
-            pass
-
-    def _check_skill_conflict(self, record: MemoryRecord) -> None:
-        if not record.agent_id:
-            return
-        scoped_skills = self.skills.get_for_agent(record.agent_id)
-        if not scoped_skills:
-            return
-
-        record_words = _skill_words(record.key)
-        for entity in (record.entities or []):
-            record_words.update(_skill_words(entity))
-        repo = _extract_repo(record.working_dirs)
-        if repo:
-            record_words.update(_skill_words(repo))
-
-        for skill in scoped_skills:
-            skill_ws = _skill_words(f"{skill.id} {skill.name}")
-            dispatched = False
-
-            if skill_ws & record_words:
-                try:
-                    self.gateway.dispatch(
-                        "skill_review_needed",
-                        skill_id=skill.id,
-                        record_id=record.id,
-                        record_key=record.key,
-                        agent_id=record.agent_id,
-                        reason="keyword_overlap",
-                    )
-                except Exception:
-                    pass
-                dispatched = True
-
-            if (
-                not dispatched
-                and self._embedding_provider is not None
-                and self._embedding_store is not None
-            ):
-                try:
-                    from ..embeddings.provider import _cosine
-                    record_vec = self._embedding_store.get("memories", record.id)
-                    skill_vec = self._embedding_store.get(
-                        "skills", f"{skill.id}:{skill.version}"
-                    )
-                    if record_vec is not None and skill_vec is not None:
-                        threshold = float(
-                            self._raw_embeddings_cfg.get("skill_conflict_threshold", 0.70)
-                        )
-                        sim = _cosine(record_vec, skill_vec)
-                        if sim >= threshold:
-                            self.gateway.dispatch(
-                                "skill_review_needed",
-                                skill_id=skill.id,
-                                record_id=record.id,
-                                record_key=record.key,
-                                agent_id=record.agent_id,
-                                reason="semantic_overlap",
-                                similarity=sim,
-                            )
-                except Exception:
-                    pass
-
     @property
     def _reconciliation_handlers(self) -> dict[str, list[Callable]]:  # type: ignore[override]
         """Deprecated — handlers now live in db.gateway._handlers."""
@@ -827,7 +624,7 @@ class AgentDB:
 
     @property
     def gateway(self) -> Gateway:
-        """Unified governance surface: reconciliation, conflict queue, proposals."""
+        """Unified governance surface: reconciliation and conflict queue."""
         if self._gateway is None:
             self._gateway = Gateway(self)
         return self._gateway
@@ -1003,12 +800,6 @@ class AgentDB:
             except Exception:
                 pass
 
-        # Skill conflict signal — after embedding is stored so semantic path can run
-        try:
-            self._check_skill_conflict(record)
-        except Exception:
-            pass
-
         self.audit_log.append(
             EVENT_MEMORY_WRITE,
             {
@@ -1162,10 +953,8 @@ class AgentDB:
         bytes: memories, conflicts, embeddings, session topics, outcomes,
         external retrieves, the conversation log and the ingest ledger.
 
-        Skills derived from the session are **kept** — they are distilled
-        knowledge, not session content. The audit log keeps a single
-        ``session_purged`` event with counts and no content, so deletion is
-        evidenced without retaining what was deleted.
+        The audit log keeps a single ``session_purged`` event with counts and no
+        content, so deletion is evidenced without retaining what was deleted.
 
         Explicit only: never called from lifecycle sweeps.
         """
@@ -1266,9 +1055,7 @@ class AgentDB:
     def consolidate(self, agent_id: str, llm_fn=None, **kwargs) -> "ConsolidationResult":
         """Cluster near-duplicate records, archive lower-confidence copies, mark the
         surviving canonical as consolidated=True with source_record_ids provenance.
-        Dispatches untracked_skill_candidate when a cluster exceeds threshold and no
-        scoped skill governs the domain. If llm_fn is provided, synthesizes the
-        canonical value and re-checks skill conflicts on LLM-produced canonicals."""
+        If llm_fn is provided, synthesizes the canonical value."""
         result = self.lifecycle.consolidate(
             agent_id, gateway=self.gateway, llm_fn=llm_fn, **kwargs
         )
@@ -1276,14 +1063,6 @@ class AgentDB:
             self.lifecycle._reset_consolidation_state(agent_id)
         except Exception:
             pass
-        if llm_fn is not None:
-            for record_id in result.synthesized_record_ids:
-                try:
-                    canonical = self._store.get_by_id(record_id)
-                    if canonical:
-                        self._check_skill_conflict(canonical)
-                except Exception:
-                    pass
         return result
 
     def checkpoint(self, agent_id: str, session_id: str) -> None:

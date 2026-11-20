@@ -148,30 +148,10 @@ class TestSlackChannel:
 # ---------------------------------------------------------------------------
 
 class TestFormat:
-    def test_skill_stale(self):
+    def test_skill_events_are_generic_fallback(self):
+        # Skill notification events no longer have dedicated formatters.
         subject, body = _format("skill_stale", {"skill_id": "orders-model"})
-        assert "orders-model" in subject
-        assert "stale" in subject.lower()
-        assert "0.6" in body
-
-    def test_skill_review_needed(self):
-        subject, body = _format("skill_review_needed", {
-            "skill_id": "orders-model",
-            "memory_key": "memory/orders/note",
-            "agent_id": "a1",
-        })
-        assert "orders-model" in subject
-        assert "a1" in body
-        assert "memory/orders/note" in body
-
-    def test_untracked_skill_candidate(self):
-        subject, body = _format("untracked_skill_candidate", {
-            "sample_key": "memory/revenue/schema",
-            "cluster_size": 5,
-        })
-        assert "Untracked" in subject
-        assert "5" in body
-        assert "memory/revenue/schema" in body
+        assert "skill_stale" in subject
 
     def test_conflict_detected(self):
         subject, body = _format("conflict_detected", {
@@ -202,38 +182,27 @@ class TestNotificationDispatcher:
         ch = self._mock_channel()
         dispatcher = NotificationDispatcher(db.gateway, channels=[ch])
         dispatcher.attach()
-        for event in ("skill_stale", "skill_review_needed",
-                      "untracked_skill_candidate", "conflict_detected"):
-            assert event in db.gateway._handlers
+        assert "conflict_detected" in db.gateway._handlers
 
-    def test_skill_stale_routes_to_channel(self, tmp_path):
+    def test_conflict_detected_routes_to_channel(self, tmp_path):
         db = AgentDB(path=tmp_path / "test.db")
         ch = self._mock_channel()
         dispatcher = NotificationDispatcher(db.gateway, channels=[ch])
         dispatcher.attach()
 
-        db.gateway.dispatch("skill_stale", skill_id="my-skill")
+        db.gateway.dispatch("conflict_detected", key="memory/orders/schema",
+                            agent_id="a1", conflict_type="temporal")
 
         ch.send.assert_called_once()
         subject, body = ch.send.call_args[0]
-        assert "my-skill" in subject
-
-    def test_skill_review_needed_routes_to_channel(self, tmp_path):
-        db = AgentDB(path=tmp_path / "test.db")
-        ch = self._mock_channel()
-        NotificationDispatcher(db.gateway, channels=[ch]).attach()
-
-        db.gateway.dispatch("skill_review_needed",
-                            skill_id="orders", memory_key="memory/x", agent_id="a1")
-
-        ch.send.assert_called_once()
+        assert "memory/orders/schema" in subject
 
     def test_multiple_channels_all_receive_event(self, tmp_path):
         db = AgentDB(path=tmp_path / "test.db")
         ch1, ch2 = self._mock_channel(), self._mock_channel()
         NotificationDispatcher(db.gateway, channels=[ch1, ch2]).attach()
 
-        db.gateway.dispatch("skill_stale", skill_id="s1")
+        db.gateway.dispatch("conflict_detected", key="k", agent_id="a", conflict_type="temporal")
 
         ch1.send.assert_called_once()
         ch2.send.assert_called_once()
@@ -245,7 +214,7 @@ class TestNotificationDispatcher:
         good_ch = self._mock_channel()
 
         NotificationDispatcher(db.gateway, channels=[bad_ch, good_ch]).attach()
-        db.gateway.dispatch("skill_stale", skill_id="s1")  # must not raise
+        db.gateway.dispatch("conflict_detected", key="k", agent_id="a", conflict_type="temporal")  # must not raise
 
         good_ch.send.assert_called_once()
 
@@ -253,12 +222,11 @@ class TestNotificationDispatcher:
         db = AgentDB(path=tmp_path / "test.db")
         ch = self._mock_channel()
         dispatcher = NotificationDispatcher(
-            db.gateway, channels=[ch], events=["skill_stale"]
+            db.gateway, channels=[ch], events=["conflict_detected"]
         )
         dispatcher.attach()
 
-        assert "skill_stale" in db.gateway._handlers
-        assert "conflict_detected" not in db.gateway._handlers
+        assert "conflict_detected" in db.gateway._handlers
 
     def test_empty_events_list_subscribes_nothing(self, tmp_path):
         db = AgentDB(path=tmp_path / "test.db")
@@ -268,19 +236,18 @@ class TestNotificationDispatcher:
         after = set(db.gateway._handlers.keys())
         assert after == before
 
-    def test_dispatcher_with_real_db_skill_stale_event(self, tmp_path):
-        """Smoke test: writing a skill that goes stale fires channel via gateway."""
+    def test_dispatcher_with_real_db_conflict_event(self, tmp_path):
+        """Smoke test: dispatching a conflict event fires the channel via gateway."""
         db = AgentDB(path=tmp_path / "test.db")
         ch = self._mock_channel()
         NotificationDispatcher(db.gateway, channels=[ch]).attach()
 
-        # Manually trigger the skill_stale event (staleness is governed by
-        # SkillStore health score; we test the dispatch path directly here).
-        db.gateway.dispatch("skill_stale", skill_id="revenue-model")
+        db.gateway.dispatch("conflict_detected", key="memory/revenue/schema",
+                            agent_id="a1", conflict_type="value")
 
         ch.send.assert_called_once()
         subject, _ = ch.send.call_args[0]
-        assert "revenue-model" in subject
+        assert "memory/revenue/schema" in subject
 
 
 # ---------------------------------------------------------------------------
@@ -298,8 +265,8 @@ class TestYamlNotifications:
         memory_dir = tmp_path / "mem"
         _write_memory_yaml(memory_dir, "profile:\n  name: budget_optimized\n")
         db = AgentDB(memory_dir=memory_dir)
-        # Should not raise and no notification handlers added beyond defaults
-        assert "skill_stale" not in db.gateway._handlers
+        # Should not raise and no notification handlers added
+        assert "conflict_detected" not in db.gateway._handlers
 
     def test_email_channel_wired_from_yaml(self, tmp_path):
         memory_dir = tmp_path / "mem"
@@ -318,11 +285,12 @@ notifications:
             mock_smtp_cls.return_value.__enter__ = lambda s: mock_server
             mock_smtp_cls.return_value.__exit__ = MagicMock(return_value=False)
             db = AgentDB(memory_dir=memory_dir)
-            db.gateway.dispatch("skill_stale", skill_id="orders-model")
+            db.gateway.dispatch("conflict_detected", key="memory/orders/schema",
+                                agent_id="a1", conflict_type="temporal")
 
         mock_server.send_message.assert_called_once()
         msg = mock_server.send_message.call_args[0][0]
-        assert "orders-model" in msg["Subject"]
+        assert "memory/orders/schema" in msg["Subject"]
         assert msg["To"] == "ops@example.com"
 
     def test_slack_channel_wired_from_yaml(self, tmp_path):
@@ -348,7 +316,8 @@ notifications:
         importlib.reload(ch_mod)
 
         db = AgentDB(memory_dir=memory_dir)
-        db.gateway.dispatch("skill_stale", skill_id="orders-model")
+        db.gateway.dispatch("conflict_detected", key="memory/orders/schema",
+                            agent_id="a1", conflict_type="temporal")
 
         mock_client.chat_postMessage.assert_called_once()
         assert mock_client.chat_postMessage.call_args[1]["channel"] == "#alerts"
@@ -360,7 +329,7 @@ profile:
   name: budget_optimized
 notifications:
   events:
-    - skill_stale
+    - conflict_detected
   channels:
     - type: email
       to: ops@example.com
@@ -371,8 +340,7 @@ notifications:
             mock_smtp_cls.return_value.__exit__ = MagicMock(return_value=False)
             db = AgentDB(memory_dir=memory_dir)
 
-        assert "skill_stale" in db.gateway._handlers
-        assert "conflict_detected" not in db.gateway._handlers
+        assert "conflict_detected" in db.gateway._handlers
 
     def test_missing_email_to_raises(self, tmp_path):
         from agentdb.interface.client import ConfigurationError

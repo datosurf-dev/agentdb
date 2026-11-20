@@ -5,7 +5,6 @@ from .models import (
     MemoryTier,
     MemoryRecord,
     ConflictRecord,
-    Skill,
 )
 
 __all__ = [
@@ -15,5 +14,4 @@ __all__ = [
     "MemoryTier",
     "MemoryRecord",
     "ConflictRecord",
-    "Skill",
 ]

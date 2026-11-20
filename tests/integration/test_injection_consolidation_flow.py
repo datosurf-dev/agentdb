@@ -116,21 +116,13 @@ def test_include_consolidated_controls_injection(tmp_path):
 def test_llm_consolidation_synthesizes_and_retraces(tmp_path):
     """
     With an LLM synthesizer the canonical value becomes a synthesis of all cluster
-    members. source_record_ids still traces all originals. The synthesized canonical
-    triggers a skill conflict re-check so governance catches domain drift.
+    members. source_record_ids still traces all originals.
     """
     db = AgentDB(path=tmp_path / "test.db")
-    db.skills_api.create_skill(
-        "orders-model", "Orders Model", "The orders domain.", scope=["a1"],
-    )
     r1 = db.write("memory/orders-model-note", "Orders table was refactored",
                   origin="agent_inferred", agent_id="a1", confidence=0.7)
     r2 = db.write("memory/orders-model-update", "Orders table has new partition key",
                   origin="agent_inferred", agent_id="a1", confidence=0.9)
-
-    fired = []
-    db.gateway.subscribe("skill_review_needed", lambda **kw: fired.append(kw))
-    fired.clear()  # discard write() signals
 
     db.consolidate(
         "a1",
@@ -145,6 +137,3 @@ def test_llm_consolidation_synthesizes_and_retraces(tmp_path):
     assert "partition" in str(canonical.value), "LLM value should be the synthesized text"
     assert set(canonical.source_record_ids) == {r1.id, r2.id}
     assert canonical.consolidated is True
-    # Skill conflict re-check fired for the canonical
-    assert any(f["skill_id"] == "orders-model" for f in fired), \
-        "skill conflict must be re-checked after LLM synthesis"

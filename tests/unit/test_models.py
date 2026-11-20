@@ -7,7 +7,6 @@ from agentdb.core.models import (
     MemoryRecord,
     MemoryTier,
     Origin,
-    Skill,
     TrustLevel,
 )
 
@@ -64,17 +63,3 @@ def test_memory_tier_values() -> None:
     assert MemoryTier.EPISODIC == "episodic"
     assert MemoryTier.LONG_TERM == "long_term"
     assert MemoryTier.ORG == "org"
-
-
-def test_skill_dataclass() -> None:
-    s = Skill(
-        id="s1",
-        name="python-style",
-        content="use type hints",
-        authored_by="human",
-        scope=["coder_agent"],
-    )
-    assert s.version == "1.0.0"
-    assert s.archived is False
-    assert s.health_score == 1.0
-    assert isinstance(s.health_score_reasons, list)

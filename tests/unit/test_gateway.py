@@ -4,10 +4,6 @@ Unit tests for db.gateway (Task 16).
 Tests follow the brief spec exactly:
   - test_subscribe_and_dispatch_fires_handler
   - test_conflict_queue_empty_before_any_conflicts
-  - test_propose_writes_memory_record
-  - test_approve_calls_skills_api
-  - test_reject_archives_draft_without_touching_skills
-  - test_list_proposals_filters_by_status
   - test_gateway_adapter_inherits_gateway_reference
   - test_claude_middleware_still_works_after_migration  (regression)
 """
@@ -50,127 +46,6 @@ def test_conflict_queue_empty_before_any_conflicts(tmp_path):
     assert queue == []
 
 
-def test_propose_writes_memory_record(tmp_path):
-    db = _make_db(tmp_path)
-    gw = db.gateway
-    proposal_id = gw.propose(
-        name="summarise-bullets",
-        content="Always reply with bullet points",
-        scope=["research_agent"],
-        agent_id="research_agent",
-    )
-    assert isinstance(proposal_id, str) and proposal_id
-
-    # The record must be retrievable via db.read
-    record = db.read(f"proposal/{proposal_id}")
-    assert record is not None
-    assert record.value["status"] == "pending"
-    assert record.value["name"] == "summarise-bullets"
-
-
-def test_propose_works_with_permissions_enforced_and_no_explicit_grant(tmp_path):
-    """
-    Regression guard for a real production gap: this test suite's other
-    gateway tests use _make_db() with no permissions_path at all, so they
-    never exercised the permission-gated path — which is exactly how the
-    proposal/ write-denied bug shipped undetected. This test configures a
-    real permissions file for an agent with zero explicit proposal/ grant.
-    """
-    perms = tmp_path / "permissions.yaml"
-    perms.write_text(
-        "\n".join(
-            [
-                "default_policy: deny",
-                "agents:",
-                "  research_agent:",
-                "    can_write:",
-                "      - \"memory/working/\"",
-            ]
-        )
-    )
-    db = AgentDB(path=tmp_path / "test.db", permissions_path=perms)
-    proposal_id = db.gateway.propose(
-        name="summarise-bullets",
-        content="Always reply with bullet points",
-        scope=["research_agent"],
-        agent_id="research_agent",
-    )
-    assert db.read(f"proposal/{proposal_id}") is not None
-
-
-def test_approve_calls_skills_api(tmp_path):
-    db = _make_db(tmp_path)
-    gw = db.gateway
-    proposal_id = gw.propose(
-        name="summarise-bullets",
-        content="Always reply with bullet points",
-        scope=["research_agent"],
-        agent_id="research_agent",
-    )
-    gw.approve(proposal_id)
-
-    # Skill must now exist in skills_api
-    skill = db.skills_api.get_skill(proposal_id)
-    assert skill is not None
-    assert skill.name == "summarise-bullets"
-    assert skill.content == "Always reply with bullet points"
-
-    # Proposal record must be archived
-    record = db._store.get_by_key(f"proposal/{proposal_id}")
-    assert record is None or record.archived
-
-
-def test_reject_archives_draft_without_touching_skills(tmp_path):
-    db = _make_db(tmp_path)
-    gw = db.gateway
-    proposal_id = gw.propose(
-        name="verbose-mode",
-        content="Always write 500 words",
-        scope=["research_agent"],
-        agent_id="research_agent",
-    )
-    gw.reject(proposal_id, reason="too verbose")
-
-    # No skill should exist
-    skill = db.skills_api.get_skill(proposal_id)
-    assert skill is None
-
-    # Proposal record must be archived / status=rejected
-    record = db._store.get_by_key(f"proposal/{proposal_id}")
-    assert record is None or record.archived
-
-
-def test_list_proposals_filters_by_status(tmp_path):
-    db = _make_db(tmp_path)
-    gw = db.gateway
-    p1 = gw.propose(
-        name="skill-a", content="content-a", scope=["agent-x"], agent_id="agent-x"
-    )
-    p2 = gw.propose(
-        name="skill-b", content="content-b", scope=["agent-x"], agent_id="agent-x"
-    )
-    p3 = gw.propose(
-        name="skill-c", content="content-c", scope=["agent-x"], agent_id="agent-x"
-    )
-    gw.approve(p2)
-    gw.reject(p3, reason="nope")
-
-    pending = gw.list_proposals(status="pending")
-    approved = gw.list_proposals(status="approved")
-    rejected = gw.list_proposals(status="rejected")
-
-    pending_ids = {p["proposal_id"] for p in pending}
-    assert p1 in pending_ids
-    assert p2 not in pending_ids
-    assert p3 not in pending_ids
-
-    approved_ids = {p["proposal_id"] for p in approved}
-    assert p2 in approved_ids
-
-    rejected_ids = {p["proposal_id"] for p in rejected}
-    assert p3 in rejected_ids
-
-
 def test_gateway_adapter_inherits_gateway_reference(tmp_path):
     db = _make_db(tmp_path)
 
@@ -186,9 +61,8 @@ def test_gateway_adapter_inherits_gateway_reference(tmp_path):
 
 def test_gateway_adapter_exposes_agent_id_publicly(tmp_path):
     """
-    Downstream apps need the bound agent_id to scope their own calls (e.g.
-    the scope= argument on gateway.propose()) without reaching into the
-    underscore-prefixed private attribute.
+    Downstream apps need the bound agent_id to scope their own calls without
+    reaching into the underscore-prefixed private attribute.
     """
     db = _make_db(tmp_path)
 
