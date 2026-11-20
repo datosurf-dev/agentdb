@@ -32,12 +32,12 @@ def test_e_compaction_summary_default_is_not_human_approved(tmp_path):
     assert str(rec.origin) == "agent_inferred"
 
 
-def test_e_trust_boundary_explicit_human_origin_is_caller_controlled(tmp_path):
-    """DOCUMENTED TRUST BOUNDARY: ``origin='human_approved'`` is honored without
-    independent verification. This test exists to make that boundary *visible*
-    and is deliberately not treated as a fix target — adding an authorization
-    system is a product decision (OPEN_DECISIONS.md). If this behavior is ever
-    gated behind verification, update this test and the decision log together.
+def test_e_asserted_human_origin_is_not_verified_authority(tmp_path):
+    """OD-2: a caller-supplied ``origin='human_approved'`` is *asserted*, not
+    *verified*, human authority. The origin string is preserved (legacy
+    compatibility) but the record does not carry verified approval evidence, so
+    it does not rank as verified-human authority. Verified authority requires the
+    trusted-host approval pathway (see test_od2_authority.py).
     """
     db = _db(tmp_path)
     db.write_compaction_summary(
@@ -45,7 +45,9 @@ def test_e_trust_boundary_explicit_human_origin_is_caller_controlled(tmp_path):
         origin="human_approved",
     )
     rec = db.read("memory/compaction/summary/s1")
-    assert str(rec.origin) == "human_approved"  # caller-controlled, unverified
+    assert str(rec.origin) == "human_approved"   # origin preserved (legacy)
+    assert rec.has_verified_approval() is False  # but NOT verified
+    assert rec.authority() == "asserted_human"
 
 
 # E — derived records do not silently inherit stronger authority

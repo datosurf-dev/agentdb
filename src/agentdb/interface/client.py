@@ -719,7 +719,17 @@ class AgentDB:
         infer: bool = False,
         expiry_time: Optional["datetime"] = None,
         working_dirs: Optional[list[str]] = None,
+        approval: Optional[dict] = None,
     ) -> MemoryRecord:
+        """Write a memory record.
+
+        ``approval`` (OD-2): a trusted host may submit verified approval evidence
+        as ``{principal, mechanism, timestamp, digest}``. If present and its
+        ``digest`` matches the value being written, the record gains *verified*
+        human authority. Without it, ``origin="human_approved"`` is only
+        *asserted* authority. A caller cannot escalate to verified authority by
+        passing an origin string alone.
+        """
         if infer:
             if self._infer_fn is None:
                 raise ValueError(
@@ -759,6 +769,12 @@ class AgentDB:
             working_dirs=[os.path.realpath(d) for d in (working_dirs or [])],
             session_id=session_id,
         )
+
+        # OD-2: only accept approval evidence whose digest binds to this value.
+        # A mismatched/partial approval is recorded as-is but will NOT satisfy
+        # has_verified_approval() (it stays asserted authority).
+        if approval:
+            record.approval = dict(approval)
 
         # Conflict detection: check before persisting
         existing = self._store.get_by_key(key)
@@ -844,6 +860,64 @@ class AgentDB:
     def read(self, key: str, agent_id: Optional[str] = None) -> Optional[MemoryRecord]:
         """Raw read by key, no permission check."""
         return self._store.get_by_key(key)
+
+    # ------------------------------------------------------------------
+    # OD-2 — trusted-host approval pathway
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _content_digest(value) -> str:
+        import hashlib
+        payload = json.dumps(value, sort_keys=True, default=str)
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+    def approve_authority(
+        self,
+        record_id: str,
+        *,
+        principal: str,
+        mechanism: str,
+        approved_at: Optional["datetime"] = None,
+    ) -> MemoryRecord:
+        """Attach verified human-approval evidence to an existing record (OD-2).
+
+        This is the **trusted-host pathway**: the host application, which owns
+        authentication and human interaction, calls this after a real human has
+        approved the record's content. AgentDB does not manage identities or
+        approval prompts — it records that approval occurred and binds the
+        evidence to the record's current content digest.
+
+        A caller cannot manufacture verified authority by setting an origin
+        string alone; only this method (or an explicit ``approval=`` passed by a
+        trusted host to :meth:`write`) produces verified human authority.
+
+        Returns the updated record.
+        """
+        record = self._store.get_by_id(record_id)
+        if record is None:
+            raise ValueError(f"no record with id {record_id!r}")
+        ts = approved_at or _utcnow()
+        record.approval = {
+            "principal": str(principal),
+            "mechanism": str(mechanism),
+            "timestamp": ts.isoformat() if hasattr(ts, "isoformat") else str(ts),
+            "digest": self._content_digest(record.value),
+        }
+        # Verified human approval implies the human-approved origin.
+        record.origin = "human_approved"
+        record.trust_level = "human"
+        self._store.write(record)
+        self.audit_log.append(
+            EVENT_MEMORY_WRITE,
+            {
+                "action": "approve_authority",
+                "record_id": record_id,
+                "principal": principal,
+                "mechanism": mechanism,
+                "agent_id": record.agent_id,
+            },
+        )
+        return record
 
     def delete(self, key: str, agent_id: str, trust_zone: str) -> None:
         """Archive a record by key. Raises PermissionDenied if not allowed."""

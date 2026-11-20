@@ -50,6 +50,7 @@ _MEMORIES_MIGRATION_COLUMNS = (
     ("kind", "TEXT NOT NULL DEFAULT 'source'"),
     ("producer", "TEXT"),
     ("derivation", "TEXT NOT NULL DEFAULT '{}'"),
+    ("approval", "TEXT NOT NULL DEFAULT '{}'"),
 )
 
 _CREATE_CONFLICTS = """
@@ -140,6 +141,9 @@ class MemoryStore:
             derivation=json.loads(
                 row["derivation"] if "derivation" in row.keys() and row["derivation"] else "{}"
             ),
+            approval=json.loads(
+                row["approval"] if "approval" in row.keys() and row["approval"] else "{}"
+            ),
         )
 
     def write(self, record: MemoryRecord) -> MemoryRecord:
@@ -150,8 +154,9 @@ class MemoryStore:
                     (id, key, value, origin, trust_level, agent_id, confidence,
                      version, archived, retrieval_count, created_at, entities,
                      last_retrieved, conflict_id, expiry_time, inferred, working_dirs,
-                     consolidated, source_record_ids, session_id, kind, producer, derivation)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     consolidated, source_record_ids, session_id, kind, producer, derivation,
+                     approval)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     record.id,
@@ -177,6 +182,7 @@ class MemoryStore:
                     getattr(record, "kind", "source"),
                     getattr(record, "producer", None),
                     json.dumps(getattr(record, "derivation", {}) or {}),
+                    json.dumps(getattr(record, "approval", {}) or {}),
                 ),
             )
         self._by_id[record.id] = record

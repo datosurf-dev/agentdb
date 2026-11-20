@@ -71,6 +71,41 @@ class MemoryRecord:
     kind: str = "source"  # "source" | "derived_canonical"
     producer: Optional[str] = None
     derivation: dict = field(default_factory=dict)
+    # Verified approval evidence (OD-2). When present and well-formed this
+    # upgrades an origin="human_approved" record from *asserted* to *verified*
+    # human authority. Shape: {principal, mechanism, timestamp, digest}. A caller
+    # cannot set this by passing an origin string alone — only the trusted-host
+    # approval pathway (AgentDB.approve_authority) populates it.
+    approval: dict = field(default_factory=dict)
+
+    # -- authority helpers (OD-2) ------------------------------------------
+    def has_verified_approval(self) -> bool:
+        """True only when this record carries well-formed verified approval
+        evidence AND its origin is human_approved AND the evidence digest still
+        matches the current value (so post-approval edits void the approval)."""
+        if str(self.origin) != "human_approved":
+            return False
+        ap = self.approval or {}
+        if not (ap.get("principal") and ap.get("mechanism")
+                and ap.get("timestamp") and ap.get("digest")):
+            return False
+        import hashlib
+        import json as _json
+        digest = hashlib.sha256(
+            _json.dumps(self.value, sort_keys=True, default=str).encode("utf-8")
+        ).hexdigest()
+        return digest == ap.get("digest")
+
+    def authority(self) -> str:
+        """Effective authority class: 'verified_human' | 'asserted_human' |
+        'provider' | 'agent'. Legacy origin='human_approved' without evidence is
+        'asserted_human' (not silently treated as verified)."""
+        origin = str(self.origin)
+        if origin == "human_approved":
+            return "verified_human" if self.has_verified_approval() else "asserted_human"
+        if origin == "provider_ingested":
+            return "provider"
+        return "agent"
 
 
 @dataclass
