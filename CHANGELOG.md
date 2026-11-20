@@ -4,7 +4,7 @@ All notable changes to AgentDB are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions follow the pre-1.0
 policy in `RELEASING.md`.
 
-## [Unreleased]
+## [0.5.0] — 2026-11-20
 
 ### Changed — core product alignment
 - **Provenance fix (ADB-03):** `write_compaction_summary()` / `checkpoint()` now
@@ -56,7 +56,7 @@ policy in `RELEASING.md`.
   4 skipped` at extraction.
 
 ### Notes
-- Recommended version bump for this change: **MINOR** (`0.4.1` → `0.5.0`) per the
-  pre-1.0 "breaking changes bump MINOR" policy. Left to the release manager.
+- Released as **MINOR** (`0.4.1` → `0.5.0`) per the pre-1.0 "breaking changes
+  bump MINOR" policy.
 - Deferred / out of scope: no Skill Governance implementation or AgentDB↔skill
   integration contract was added.
