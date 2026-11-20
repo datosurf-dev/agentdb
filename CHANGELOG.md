@@ -6,6 +6,25 @@ policy in `RELEASING.md`.
 
 ## [Unreleased]
 
+### Changed — core product alignment
+- **Provenance fix (ADB-03):** `write_compaction_summary()` / `checkpoint()` now
+  default to `origin="agent_inferred"`; machine summaries no longer acquire
+  `human_approved` implicitly. Pass `origin="human_approved"` only for a
+  verified human action.
+- **Hybrid retrieval (ADB-05/08/09/10):** lexical ∪ semantic candidate union
+  (semantic-only records now reachable), shared eligibility filters across both
+  branches, budget packing that skips oversized records instead of stopping,
+  `retrieve_by_entities` parity, and an optional `trace=` diagnostic. Reuses the
+  existing multi-signal ranker; deterministic lexical fallback.
+- **Distilled knowledge (ADB-06/07):** consolidation now creates a new
+  `derived_canonical` record with immutable source lineage (sources are never
+  overwritten), a conservative merge gate (no false merges), source-revision
+  invalidation, and canonical/source dedup at retrieval.
+- **Reliability (ADB-12):** `AgentDB(path=":memory:")` uses a working in-memory
+  DB (no bogus `./:memory:` file).
+- **Schema:** additive, idempotent columns `kind`, `producer`, `derivation` on
+  `memories`; legacy rows unaffected. See `docs/spec/implementation/MIGRATION_AND_ROLLBACK.md`.
+
 ### Changed — BREAKING
 - **Skill management removed from AgentDB core.** Skill registration, versioning,
   health/staleness tracking, proposals/approval, evolution bridges, skill-specific

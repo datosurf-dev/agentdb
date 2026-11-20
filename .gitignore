@@ -21,8 +21,10 @@ ENV/
 # Runtime workspace created by AgentDB() defaults / tests
 agentdb-workspace/
 
-# Agent specs
-docs/spec
+# Agent specs. Ignore the local working spec docs but TRACK the committed
+# alignment deliverables under docs/spec/implementation/.
+docs/spec/*
+!docs/spec/implementation/
 
 # Accidental literal ":memory:" path from ad-hoc scripts
 :memory:
