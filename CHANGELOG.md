@@ -14,8 +14,10 @@ policy in `RELEASING.md`.
 - **Hybrid retrieval (ADB-05/08/09/10):** lexical ∪ semantic candidate union
   (semantic-only records now reachable), shared eligibility filters across both
   branches, budget packing that skips oversized records instead of stopping,
-  `retrieve_by_entities` parity, and an optional `trace=` diagnostic. Reuses the
-  existing multi-signal ranker; deterministic lexical fallback.
+  `retrieve_by_entities` parity (now ranked via the multi-signal ranker), and an
+  optional `trace=` diagnostic. Reuses the existing multi-signal ranker;
+  deterministic lexical fallback. New config flag `embeddings.semantic_candidates`
+  (default `true`) forces lexical-only retrieval when set `false`.
 - **Distilled knowledge (ADB-06/07):** consolidation now creates a new
   `derived_canonical` record with immutable source lineage (sources are never
   overwritten), a conservative merge gate (no false merges), source-revision

@@ -177,3 +177,36 @@ def test_retrieval_is_deterministic(tmp_path):
     r1 = [r.key for r in db.retrieve("orders", agent_id="a1").records]
     r2 = [r.key for r in db.retrieve("orders", agent_id="a1").records]
     assert r1 == r2
+
+
+# ---------------------------------------------------------------------------
+# Entity retrieval uses the multi-signal ranker (not ad-hoc recency)
+# ---------------------------------------------------------------------------
+
+def test_entity_retrieval_prefers_higher_provenance(tmp_path):
+    db = _db_lexical(tmp_path)
+    # Same entity; human_approved must outrank agent_inferred regardless of age.
+    db.write("memory/e/low", "x", origin="agent_inferred", agent_id="a1", entities=["E"])
+    db.write("memory/e/high", "y", origin="human_approved", agent_id="a1", entities=["E"])
+    res = db.retrieve_by_entities(["E"], agent_id="a1")
+    keys = [r.key for r in res.records]
+    assert keys[0] == "memory/e/high"
+
+
+# ---------------------------------------------------------------------------
+# Operational kill-switch for the semantic candidate branch
+# ---------------------------------------------------------------------------
+
+def test_semantic_candidates_disabled_forces_lexical(tmp_path):
+    db = _db_embed(tmp_path)
+    # Record is only reachable via semantic branch (no lexical overlap).
+    db.write("m/alpha", "phrase containing similar_to_A marker",
+             origin="agent_inferred", agent_id="a1", confidence=0.9)
+    # Default: semantic branch on -> retrieved.
+    res_on = db.retrieve("topic_A documents please", agent_id="a1", limit=10)
+    assert "m/alpha" in [r.key for r in res_on.records]
+
+    # Disable semantic candidate discovery -> lexical-only -> not retrieved.
+    db._raw_embeddings_cfg["semantic_candidates"] = False
+    res_off = db.retrieve("topic_A documents please", agent_id="a1", limit=10)
+    assert "m/alpha" not in [r.key for r in res_off.records]

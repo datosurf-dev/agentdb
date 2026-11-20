@@ -1226,7 +1226,15 @@ class AgentDB:
         trace.setdefault("lexical_count", len(lexical))
         trace.setdefault("semantic_count", 0)
 
-        if query_embedding is not None and self._embedding_store is not None and self._embedding_provider is not None:
+        # Operational kill-switch: allow forcing lexical-only retrieval even when
+        # embeddings are configured (deterministic fallback for operators).
+        _semantic_enabled = bool(self._raw_embeddings_cfg.get("semantic_candidates", True))
+        if (
+            _semantic_enabled
+            and query_embedding is not None
+            and self._embedding_store is not None
+            and self._embedding_provider is not None
+        ):
             from ..embeddings.provider import _cosine
             from ..embeddings.text import _embed_text_for_record
 
@@ -1565,9 +1573,15 @@ class AgentDB:
                 excluded_reasons[rec.id] = reason
 
         # Shared budget packing (skip oversized, continue with smaller).
-        # Rank entity matches by recency so packing order is deterministic.
-        eligible.sort(key=lambda r: r.created_at, reverse=True)
-        ranked = [SimpleNamespace(record=r) for r in eligible]
+        # Rank entity matches through the SAME multi-signal ranker used by
+        # retrieve() — with no query embedding, so ordering is driven by
+        # provenance/recency/confidence/causal (semantic contributes 0). This
+        # replaces the previous ad-hoc recency-only ordering.
+        ranked = self._ranker.rank(
+            "", eligible, agent_id=agent_id,
+            query_embedding=None,
+            session_working_dirs=None,
+        )
         records, token_total, truncated, budget_excluded = self._pack_budget(
             ranked, resolved_budget_tokens
         )
