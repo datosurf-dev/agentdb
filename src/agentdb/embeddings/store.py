@@ -152,6 +152,20 @@ class EmbeddingStore:
             ).fetchall()
         return {row["record_id"]: _unpack(row["embedding"]) for row in rows}
 
+    def get_all(self, table: str) -> dict[str, list[float]]:
+        """Return every stored embedding for a namespace: {record_id: vector}.
+
+        Used for semantic candidate discovery over the whole corpus (not just
+        ids already chosen by a lexical pass), so that a record with strong
+        semantic relevance but no lexical overlap is still eligible.
+        """
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT record_id, embedding FROM embeddings WHERE table_name = ?",
+                (table,),
+            ).fetchall()
+        return {row["record_id"]: _unpack(row["embedding"]) for row in rows}
+
     def delete(self, table: str, record_id: str) -> None:
         with self._connect() as conn:
             conn.execute(
