@@ -423,7 +423,6 @@ class LifecycleManager:
         agent_id: str,
         since_hours: int = 24,
         min_cluster_size: int = 2,
-        skill_candidate_threshold: int = 5,
         llm_fn=None,
         gateway=None,
     ) -> ConsolidationResult:
@@ -438,8 +437,8 @@ class LifecycleManager:
           temporal/contradictory records are left untouched (T05).
         - Sources are archived (soft) from default selection, not deleted.
 
-        ``gateway`` and ``skill_candidate_threshold`` are accepted for API
-        compatibility but unused.
+        ``gateway`` is accepted for API compatibility (the general governance
+        surface passed by ``AgentDB.consolidate``) but is unused here.
         """
         from datetime import timedelta
         cutoff = _utcnow() - timedelta(hours=since_hours)

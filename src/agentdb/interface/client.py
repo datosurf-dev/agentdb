@@ -1083,9 +1083,26 @@ class AgentDB:
             return []
 
     def consolidate(self, agent_id: str, llm_fn=None, **kwargs) -> "ConsolidationResult":
-        """Cluster near-duplicate records, archive lower-confidence copies, mark the
-        surviving canonical as consolidated=True with source_record_ids provenance.
-        If llm_fn is provided, synthesizes the canonical value."""
+        """Cluster near-duplicate records into a NEW derived canonical record.
+
+        Source records are never overwritten; they are soft-archived (still
+        recoverable) and their lineage is recorded on the canonical via
+        ``source_record_ids`` and ``derivation``. A valid canonical may be
+        selected in place of its archived sources. If ``llm_fn`` is provided it
+        synthesizes the canonical value; otherwise the highest-confidence source
+        value is copied. Unrelated or contradictory records are not merged."""
+        # Obsolete skill-era keyword, retained as a no-op for backward
+        # compatibility: it no longer selects or ranks anything (skill
+        # management was removed from AgentDB). Accept it, warn, and drop it so
+        # callers that still pass it do not hard-fail.
+        if "skill_candidate_threshold" in kwargs:
+            kwargs.pop("skill_candidate_threshold")
+            warnings.warn(
+                "consolidate(skill_candidate_threshold=...) is obsolete and ignored: "
+                "AgentDB no longer manages skills.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
         result = self.lifecycle.consolidate(
             agent_id, gateway=self.gateway, llm_fn=llm_fn, **kwargs
         )
