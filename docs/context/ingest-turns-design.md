@@ -103,7 +103,7 @@ The PK gives `INSERT OR IGNORE` semantics — no content scans.
 The JSONL is the durable record of what was ingested and uses the **same store
 and shape** as `capture.conversation_jsonl`, so an ingested session and a
 captured session are indistinguishable on disk. Memory writes then behave like
-any other write (permissions, conflicts, skill signals); a failure there leaves
+any other write (permissions, conflicts); a failure there leaves
 an intact log plus a ledger row to reconcile.
 
 Step 4 may legitimately write **zero** records for a turn.
@@ -216,11 +216,7 @@ They are different operations and should stay so:
 1. **Explicit only.** `purge_session()` is never called from
    `lifecycle.run_sweep()` and has no retention-based auto-purge. Destructive
    operations stay deliberate and operator-initiated.
-2. **Derived skills survive a purge.** A skill is distilled knowledge, not
-   session content; removing it would silently degrade an agent that has already
-   learned from the session. Only the seven content stores listed above are
-   purged.
-3. **Row deletion is sufficient for embeddings.** Removing the rows from
+2. **Row deletion is sufficient for embeddings.** Removing the rows from
    `embeddings` and `session_topics` needs no rebuild; both are derived caches
    and are recomputed on demand once embeddings are re-enabled.
 

@@ -35,34 +35,6 @@ class FakeAgentDBClaudeMiddleware:
         self.db = db
         self.agent_id = agent_id
         self._conflicts: list = []
-        self._proposals: dict[str, dict] = {}
 
     def pending_conflicts(self, resolved: bool = False) -> list:
         return self._conflicts
-
-    def propose_skill(
-        self,
-        name: str,
-        content: str,
-        scope: list[str],
-        entities: Optional[list[str]] = None,
-        session_id: Optional[str] = None,
-    ) -> str:
-        proposal_id = f"fake-proposal-{len(self._proposals) + 1}"
-        self._proposals[proposal_id] = {
-            "proposal_id": proposal_id,
-            "name": name,
-            "content": content,
-            "scope": scope,
-            "status": "pending",
-        }
-        return proposal_id
-
-    def approve_proposal(self, proposal_id: str, resolution: Optional[str] = None) -> None:
-        self._proposals[proposal_id]["status"] = "approved"
-
-    def reject_proposal(self, proposal_id: str, reason: Optional[str] = None) -> None:
-        self._proposals[proposal_id]["status"] = "rejected"
-
-    def list_proposals(self, status: str = "pending") -> list[dict]:
-        return [p for p in self._proposals.values() if p["status"] == status]

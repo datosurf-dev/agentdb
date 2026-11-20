@@ -19,7 +19,6 @@ Current runtime-facing code includes:
 - downstream Claude SDK hook-registration example in `examples/claude_agent_sdk_hook_registration.py`
 - built-in profiles: `budget_optimized`, `full_storage`, and `research`
 - optional custom directory tracking tied to session/message IDs
-- skills drift management via `db.skills_api`
 - reproducible Slack-style runtime handler example in `examples/slack_assistant_agentdb_runtime.py`
 
 ## Recommended Reading Order

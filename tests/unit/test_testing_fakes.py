@@ -45,24 +45,3 @@ def test_fake_construction_stores_curated_params():
 def test_fake_pending_conflicts_defaults_empty():
     fake = FakeAgentDBClaudeMiddleware(db=object(), agent_id="a")
     assert fake.pending_conflicts() == []
-
-
-def test_fake_propose_then_list_pending():
-    fake = FakeAgentDBClaudeMiddleware(db=object(), agent_id="a")
-    proposal_id = fake.propose_skill(name="n", content="c", scope=["a"])
-    pending = fake.list_proposals(status="pending")
-    assert any(p["proposal_id"] == proposal_id for p in pending)
-
-
-def test_fake_approve_removes_from_pending():
-    fake = FakeAgentDBClaudeMiddleware(db=object(), agent_id="a")
-    proposal_id = fake.propose_skill(name="n", content="c", scope=["a"])
-    fake.approve_proposal(proposal_id)
-    assert not any(p["proposal_id"] == proposal_id for p in fake.list_proposals(status="pending"))
-
-
-def test_fake_reject_removes_from_pending():
-    fake = FakeAgentDBClaudeMiddleware(db=object(), agent_id="a")
-    proposal_id = fake.propose_skill(name="n", content="c", scope=["a"])
-    fake.reject_proposal(proposal_id, reason="not needed")
-    assert not any(p["proposal_id"] == proposal_id for p in fake.list_proposals(status="pending"))

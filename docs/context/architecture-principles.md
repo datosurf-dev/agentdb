@@ -4,9 +4,9 @@ This is the single canonical source for AgentDB's architecture pitch and numbere
 
 ## What AgentDB is
 
-A governed memory layer that arbitrates between what agents infer and what humans intend. It enforces a trust hierarchy at write time, provenance-weights recall at read time, and tracks versioned human instructions (skills) that agents cannot silently overwrite. Every write is validated before it lands. Every read returns a governed context package. The boundary is enforced at the memory layer — not by convention, not by prompt instructions, not by hoping agents behave.
+A governed memory layer that arbitrates between what agents infer and what humans intend. It enforces a trust hierarchy at write time and provenance-weights recall at read time. Every write is validated before it lands. Every read returns a governed context package. The boundary is enforced at the memory layer — not by convention, not by prompt instructions, not by hoping agents behave.
 
-AgentDB complements existing runtime memory instead of replacing it by default. The core product loop is: **Track** relevant memory assets → **Reconcile** conflicts proactively → **Rank** what matters → **Inject** compact memory context before action. Skills are governed database objects used for conflict detection and staleness signalling — they are tracked and versioned, but not injected into agent context.
+AgentDB complements existing runtime memory instead of replacing it by default. The core product loop is: **Track** relevant memory assets → **Reconcile** conflicts proactively → **Rank** what matters → **Inject** compact memory context before action. Skills are no longer part of AgentDB: they were extracted to an independent package and AgentDB never injects them (see `migration-handoff/skill-extraction/`).
 
 ## Design Principles
 
@@ -18,11 +18,8 @@ These principles define the implementation constraints for all AgentDB work.
 
 2. **Framework-agnostic backend interface first.** AgentDB defines a generic pluggable backend interface (`AgentDBBackend`). Frameworks adopt it — AgentDB does not adapt to them. deepagents is the flagship integration and named first-class example, but the interface is not deepagents-specific.
 
-3. **Skills are database objects, not prompt files.** Skills (versioned instruction records) are first-class database primitives with computed health scores. A skill with a health score that degrades when underlying knowledge drifts is a database feature — not prompt management.
-
 4. **Algorithm as foundation, not feature.** The multi-signal ranking algorithm (provenance weight + causal WAL signal) is the technical moat. It is not marketed as a differentiator — it is what makes the database worth using.
 
-4a. **Algorithm + skills complement.** The ranking algorithm and governed skills are a single development foundation: memory records capture facts and prior outcomes, the algorithm ranks what matters now, and skills are the authoritative baseline for detecting when agent behavior drifts from human intent. Skills are NOT injected into agent context — their value is in conflict detection and staleness signalling, not prompt augmentation.
 
 5. **Three providers at launch.** Anthropic, OpenAI, Google (Vertex AI Agent Engine MemoryBankService). All three ship in Phase 3.
 
@@ -42,7 +39,7 @@ These principles define the implementation constraints for all AgentDB work.
 
     - **12a. Real-time enforcement** — synchronous, wired into the framework's own control flow (e.g. Claude SDK's `PreToolUse` hook + turn-start `prepare_turn`), so governed context reaches the agent before or during its action regardless of whether the agent "remembers" to ask for it. Because every current retrieval call is a live query (nothing is cached), a real-time hook already sees the freshest possible state on every firing — no event bus or push mechanism is needed for this type. Done means: a test proves the framework's own hook mechanism triggers it, and that it changes the context/instructions reaching the agent at that checkpoint.
 
-    - **12b. Async integrity checks** — decoupled from any single agent's turn: conflict-queue notifications, corpus-wide staleness/lifecycle sweeps (Task 9), reconciliation triggers (`file_modified`, `cron`), the skill draft reconciliation pipeline (Task 13 — proposing/flagging is 12b; the actual commit to a skill is write-time governance, a separate, more restrictive gate), cross-agent "something you rely on just changed" notices. The concrete mechanism is `AgentDB.register_reconciliation_handler(trigger, handler)` / `dispatch_reconciliation_trigger(trigger, **kwargs)` (see Design Principle 7) — a live, in-memory register/dispatch pair already implemented, not a new subsystem to build. What's missing today is dispatch call sites for new trigger types (e.g. `conflict_detected`, `skill_stale`) at the places those events actually happen, and consumers (an MCP tool, a Slack/Telegram notifier in a host app) registering handlers against them. These exist to catch what real-time enforcement structurally cannot: a different agent, in a different session, changing something the current agent is relying on, with no upcoming hook checkpoint to pick it up. Done means: it runs independent of any agent's turn, it's auditable (an audit-log entry, not silent), and it has a named consumer (a queue, a dispatcher, a notification target) registered via this mechanism. Publishing an event with no subscriber wired to an enforcement point is telemetry, not enforcement.
+    - **12b. Async integrity checks** — decoupled from any single agent's turn: conflict-queue notifications, corpus-wide staleness/lifecycle sweeps (Task 9), reconciliation triggers (`file_modified`, `cron`), cross-agent "something you rely on just changed" notices. The concrete mechanism is `AgentDB.register_reconciliation_handler(trigger, handler)` / `dispatch_reconciliation_trigger(trigger, **kwargs)` (see Design Principle 7) — a live, in-memory register/dispatch pair already implemented, not a new subsystem to build. What's missing today is dispatch call sites for new trigger types (e.g. `conflict_detected`) at the places those events actually happen, and consumers (an MCP tool, a Slack/Telegram notifier in a host app) registering handlers against them. These exist to catch what real-time enforcement structurally cannot: a different agent, in a different session, changing something the current agent is relying on, with no upcoming hook checkpoint to pick it up. Done means: it runs independent of any agent's turn, it's auditable (an audit-log entry, not silent), and it has a named consumer (a queue, a dispatcher, a notification target) registered via this mechanism. Publishing an event with no subscriber wired to an enforcement point is telemetry, not enforcement.
 
     Every adapter, and every new memory-freshness capability, must state which of these two types it is and meet that type's bar before being marked done.
 
@@ -58,7 +55,6 @@ These principles define the implementation constraints for all AgentDB work.
     | `db.lifecycle` | Archival sweep + outcome reinforcement | Implemented (2026-07-14) |
     | `db.providers` | Anthropic / OpenAI / Google provider sync | Not started (Phase 6) |
     | `db.system` | Introspection tables | Implemented (partial) |
-    | `db.skills_api` | Skill CRUD | Implemented |
     | `db.audit_log` | Audit trail replay | Implemented |
 
     New capabilities that span more than one method and serve a distinct consumer must land on the matching sub-surface or open a discussion about adding one — not on the `AgentDB` top-level namespace.

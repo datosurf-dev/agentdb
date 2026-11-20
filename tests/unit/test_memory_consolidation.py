@@ -70,33 +70,6 @@ def test_include_consolidated_true_returns_canonical_by_default(tmp_path):
     assert any(r.consolidated for r in result.records)
 
 
-# ── Skill candidate dispatch ──────────────────────────────────────────────────
-
-def test_consolidate_dispatches_untracked_skill_candidate(tmp_path):
-    db = _db(tmp_path)
-    for i in range(5):
-        db.write(f"memory/analytics-schema-record-{i}", f"value {i}",
-                 origin="agent_inferred", agent_id="a1")
-    fired = []
-    db.gateway.subscribe("untracked_skill_candidate", lambda **kw: fired.append(kw))
-    db.consolidate("a1", since_hours=0, min_cluster_size=2, skill_candidate_threshold=3)
-    assert len(fired) >= 1
-    assert "agent_id" in fired[0]
-    assert "dominant_words" in fired[0]
-    assert "sample_keys" in fired[0]
-
-
-def test_consolidate_no_dispatch_when_skill_exists(tmp_path):
-    db = _db(tmp_path)
-    db.skills_api.create_skill("analytics-schema", "Analytics Schema", "Revenue.", scope=["a1"])
-    for i in range(5):
-        db.write(f"memory/analytics-schema-record-{i}", f"value {i}",
-                 origin="agent_inferred", agent_id="a1")
-    fired = []
-    db.gateway.subscribe("untracked_skill_candidate", lambda **kw: fired.append(kw))
-    db.consolidate("a1", since_hours=0, min_cluster_size=2, skill_candidate_threshold=3)
-    assert fired == []
-
 
 # ── Correctness and safety ────────────────────────────────────────────────────
 
@@ -140,35 +113,6 @@ def test_consolidate_with_llm_fn_synthesizes_value(tmp_path):
                    llm_fn=lambda prompt: "synthesized canonical memory")
     active = [r for r in db._store.list_all() if not r.archived and r.agent_id == "a1"]
     assert any("synthesized" in str(r.value) for r in active)
-
-
-def test_llm_canonical_triggers_skill_conflict_recheck(tmp_path):
-    db = _db(tmp_path)
-    db.skills_api.create_skill(
-        "analytics-schema", "Analytics Schema", "Revenue schema.", scope=["a1"],
-    )
-    db.write("memory/analytics-schema-note", "v1", origin="agent_inferred", agent_id="a1")
-    db.write("memory/analytics-schema-update", "v2", origin="agent_inferred", agent_id="a1")
-    fired = []
-    db.gateway.subscribe("skill_review_needed", lambda **kw: fired.append(kw))
-    fired.clear()  # discard fires from write() calls above
-    db.consolidate("a1", since_hours=0, min_cluster_size=2,
-                   llm_fn=lambda prompt: "analytics schema synthesized")
-    assert any(f.get("reason") == "keyword_overlap" for f in fired)
-
-
-def test_non_llm_consolidation_does_not_recheck_skill_conflict(tmp_path):
-    db = _db(tmp_path)
-    db.skills_api.create_skill(
-        "analytics-schema", "Analytics Schema", "Revenue schema.", scope=["a1"],
-    )
-    db.write("memory/analytics-schema-note", "v1", origin="agent_inferred", agent_id="a1")
-    db.write("memory/analytics-schema-update", "v2", origin="agent_inferred", agent_id="a1")
-    fired = []
-    db.gateway.subscribe("skill_review_needed", lambda **kw: fired.append(kw))
-    fired.clear()
-    db.consolidate("a1", since_hours=0, min_cluster_size=2)  # no llm_fn
-    assert fired == []
 
 
 # ── Auto-trigger ──────────────────────────────────────────────────────────────

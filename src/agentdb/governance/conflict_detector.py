@@ -1,10 +1,13 @@
 """
-Phase 1 conflict detector — temporal and authority conflicts only.
+Conflict detector — temporal, authority, and semantic conflicts.
 
 Temporal:  same key + same origin → two records with equal authority, neither
            supersedes the other.
 Authority: agent_inferred / provider_ingested tries to overwrite human_approved
            → the agent has less authority than the existing human-approved value.
+Semantic:  `check_semantic_batch` flags near-duplicate/contradictory values by
+           embedding cosine similarity — active only when an embedding store is
+           supplied (otherwise it is a no-op).
 
 Human-approved overwriting anything lower is NOT a conflict — it supersedes cleanly.
 """

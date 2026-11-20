@@ -71,18 +71,3 @@ def test_embed_fn_takes_priority_over_local_embed(tmp_path):
         embed_fn=_embed, local_embed=True
     )
     assert isinstance(db._embedding_provider, FunctionEmbeddingProvider)
-
-
-def test_skill_store_list_all_active_ids(tmp_path):
-    db = AgentDB(path=tmp_path / "agentdb.sqlite", memory_dir=tmp_path)
-    db.skills_api.create_skill("s1", "My Skill", "Do things.", scope=["agent1"])
-    ids = db.skills.list_all_active_ids()
-    assert "s1:1.0.0" in ids
-
-
-def test_skill_store_list_all_active_ids_excludes_archived(tmp_path):
-    db = AgentDB(path=tmp_path / "agentdb.sqlite", memory_dir=tmp_path)
-    db.skills_api.create_skill("s1", "My Skill", "Do things.", scope=["agent1"])
-    db.skills_api.archive_skill("s1", "1.0.0")
-    ids = db.skills.list_all_active_ids()
-    assert "s1:1.0.0" not in ids

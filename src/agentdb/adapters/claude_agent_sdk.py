@@ -15,7 +15,7 @@ from .middleware import _extract_text_from_model_response
 from .capabilities import CLAUDE_CAPABILITIES
 
 if TYPE_CHECKING:
-    from ..interface.client import AgentDB, RetrievalResult
+    from ..interface.client import AgentDB
 
 
 class AgentDBClaudeRuntime:

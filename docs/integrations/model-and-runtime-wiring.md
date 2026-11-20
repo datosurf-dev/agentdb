@@ -325,41 +325,13 @@ For strong behavior, use this loop:
 
 This enables memory governance and gradual confidence calibration over time.
 
-## C.1) Skill Drift Management (Available Now)
+## C.1) Skill Management — Moved Out of AgentDB
 
-AgentDB now exposes a high-level skills lifecycle API for drift-oriented operations:
-
-- `db.skills_api.create_skill(...)`
-- `db.skills_api.update_skill_version(...)`
-- `db.skills_api.list_skills_for_agent(...)`
-- `db.skills_api.list_stale_skills_for_agent(...)`
-- `db.skills_api.list_skill_warnings_for_agent(...)`
-
-Example:
-
-```python
-from agentdb import AgentDB
-
-db = AgentDB(path="./agentdb.db", permissions_path="./permissions.yaml")
-
-db.skills_api.create_skill(
-    skill_id="analytics-style",
-    name="analytics-style",
-    content="Use concise bullet points and include assumptions.",
-    scope=["research_agent"],
-)
-
-skills = db.skills_api.list_skills_for_agent(agent_id="research_agent")
-warnings = db.skills_api.list_skill_warnings_for_agent(agent_id="research_agent")
-stale = db.skills_api.list_stale_skills_for_agent(agent_id="research_agent")
-
-if stale:
-    db.skills_api.update_skill_version(
-        skill_id=stale[0].id,
-        content="Updated guidance after schema change.",
-        new_version="1.1.0",
-    )
-```
+Skill drift management (registry, versioning, staleness, proposals, evolution)
+has been **removed from AgentDB** and extracted to an independent package. AgentDB
+is now memory-only and does not manage or inject skills. See
+`migration-handoff/skill-extraction/` for the preserved implementation, data
+export tooling, and restoration notes.
 
 ## D) Two Operating Modes: Full Storage vs Budget Optimized
 

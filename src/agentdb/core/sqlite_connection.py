@@ -7,7 +7,7 @@ WAL mode it stays there across connections and processes. Re-running it on every
 connect therefore bought nothing and cost real contention.
 
 The failure mode was concrete: an ``AgentDB`` opens several connections at once
-(memory store, audit log, system stats, skills, embeddings). Two processes
+(memory store, audit log, system stats, embeddings). Two processes
 pointed at the same workspace start together, their pragmas collide, and one
 raises ``sqlite3.OperationalError: database is locked`` during construction.
 

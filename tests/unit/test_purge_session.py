@@ -87,13 +87,30 @@ def test_audit_keeps_the_event_but_not_the_content(db):
     assert "s1" in payload
 
 
-def test_skills_derived_from_the_session_survive(db):
-    skill = db.skills_api.create_skill(
-        skill_id="deploy-check",
-        name="deploy-check",
-        content="verify CI before deploy",
-        scope=["a1"],
+def test_purge_removes_embeddings_from_the_correct_db(tmp_path):
+    """Regression: purge_session used to open database/embeddings.sqlite while
+    embeddings are actually written to database/embeddings.db, so vectors were
+    never removed (silently swallowed)."""
+    def embed(text):
+        return [0.1, 0.2, 0.3]
+
+    db = AgentDB(memory_dir=str(tmp_path / "ws"), embed_fn=embed)
+
+    record = db.write(
+        key="memory/working/style",
+        value="bullets",
+        origin="agent_inferred",
+        agent_id="a1",
+        session_id="s1",
     )
-    seed(db)
-    db.purge_session("a1", "s1", require_confirmation=False)
-    assert db.skills_api.get_skill(skill.id) is not None
+
+    # The write path embeds the record; assert it landed in embeddings.db.
+    emb_db = db.memory_dir / "database" / "embeddings.db"
+    assert emb_db.exists()
+    assert db._embedding_store.get("memories", record.id) is not None
+
+    result = db.purge_session("a1", "s1", require_confirmation=False)
+
+    # Gone from the same store the write used, and the count is reported.
+    assert db._embedding_store.get("memories", record.id) is None
+    assert result.embeddings == 1

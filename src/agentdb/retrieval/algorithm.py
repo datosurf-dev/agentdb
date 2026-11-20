@@ -13,19 +13,22 @@ Signals (weights are starting defaults, all configurable):
                         retrieved memories decay slower.
   confidence  (0.25) — direct passthrough of record.confidence (0-1).
   causal      (0.15) — how often was this memory retrieved before
-                        successful task completions? Phase 2
-                        approximation: retrieval_count weighted by
-                        recency. Full WAL-correlation in Phase 4.
+                        successful task completions? Current approximation:
+                        retrieval_count weighted by recency. Full WAL-derived
+                        correlation is not implemented yet.
 
-Semantic signal (cosine similarity against query embedding) is added in
-Phase 3 when embeddings are active. Until then, semantic weight is 0 and
-the remaining four signals carry full weight.
+A semantic signal (cosine similarity against the query embedding) is added
+when embeddings are active: `AgentDB._build_ranker` sets a non-zero
+`weight_semantic` (default 0.20, configurable via `embeddings.semantic_ranker_weight`)
+and rescales the other signals down to sum to 1.0. When no embedding provider
+is configured, `weight_semantic` stays 0.0 and the four base signals carry
+full weight.
 """
 
 import math
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Optional
+from typing import Optional
 
 from ..core.models import MemoryRecord, Origin
 
@@ -57,7 +60,8 @@ def _aware(dt: datetime) -> datetime:
 class MultiSignalRanker:
     """
     All weights must sum to 1.0.
-    semantic_weight is 0.0 until Phase 3 activates embeddings.
+    semantic_weight defaults to 0.0 and is set non-zero by _build_ranker when
+    an embedding provider is active (the other weights are rescaled to match).
     """
 
     def __init__(
@@ -66,7 +70,7 @@ class MultiSignalRanker:
         weight_recency: float = 0.25,
         weight_confidence: float = 0.25,
         weight_causal: float = 0.15,
-        weight_semantic: float = 0.0,  # activated in Phase 3
+        weight_semantic: float = 0.0,  # set non-zero by _build_ranker when embeddings are active
         weight_workspace: float = 0.0,  # Jaccard overlap with session working dirs
         recency_lambda: float = 0.01,  # decay rate; 0.01 ~= half-life 69 days
         staleness_days: int = 90,
@@ -165,9 +169,9 @@ class MultiSignalRanker:
 
     def _causal_score(self, record: MemoryRecord, now: datetime) -> float:
         """
-        Phase 2 approximation: retrieval frequency weighted by recency.
+        Current approximation: retrieval frequency weighted by recency.
         High retrieval_count + recent last_retrieved = high causal
-        relevance. Full WAL-derived correlation deferred to Phase 4.
+        relevance. Full WAL-derived correlation is not implemented yet.
         """
         if record.retrieval_count == 0:
             return 0.0

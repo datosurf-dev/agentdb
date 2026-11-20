@@ -27,13 +27,13 @@ class PermissionRouter:
     YAML format:
         default_policy: deny
         human_zone_prefixes:
-          - "skills/"
+          - "memory/org/"
         agents:
           agent_id:
             can_write:
               - "memory/working/"
             cannot_write:
-              - "skills/"
+              - "memory/org/"
             can_read:
               - "memory/working/"
     """
