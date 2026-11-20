@@ -168,3 +168,45 @@ def test_canonical_ids_explainable_in_trace(tmp_path):
     res = db.retrieve("analytics schema", agent_id="a1", trace=True)
     ranked_ids = [x["id"] for x in res.trace["ranked"]]
     assert canon.id in ranked_ids
+
+
+# ---------------------------------------------------------------------------
+# ADB-07 / T06 — unique source-detail re-injection
+# ---------------------------------------------------------------------------
+
+def test_unique_detail_source_reinjected_when_canonical_omits_it(tmp_path):
+    db = _db(tmp_path)
+    # Two same-domain records; one carries an error code the summary drops.
+    db.write("memory/api-errors-note",
+             "API returns error code E4097 on duplicate key",
+             origin="agent_inferred", agent_id="a1", confidence=0.6)
+    db.write("memory/api-errors-update",
+             "API validation errors were reworked last quarter",
+             origin="agent_inferred", agent_id="a1", confidence=0.9)
+    # Synthesize a canonical that OMITS the error code.
+    db.consolidate("a1", since_hours=0, min_cluster_size=2,
+                   llm_fn=lambda prompt: "API validation errors were reworked last quarter.")
+    canon = [r for r in db._store.list_all() if r.kind == "derived_canonical"][0]
+    assert "E4097" not in str(canon.value)
+
+    res = db.retrieve("api errors code E4097", agent_id="a1", trace=True, budget_tokens=500)
+    ids = [r.id for r in res.records]
+    keys = [r.key for r in res.records]
+    # Canonical present, and the source carrying E4097 re-injected as unique detail.
+    assert canon.id in ids
+    assert any("E4097" in str(r.value) for r in res.records)
+    assert res.trace.get("unique_detail_ids"), "trace must record unique-detail re-injection"
+
+
+def test_no_unique_detail_reinjection_when_canonical_covers_query(tmp_path):
+    db = _db(tmp_path)
+    db.write("memory/pricing-policy-note", "pricing reflects current tiers",
+             origin="agent_inferred", agent_id="a1", confidence=0.6)
+    db.write("memory/pricing-policy-update", "pricing reflects current tiers now",
+             origin="agent_inferred", agent_id="a1", confidence=0.9)
+    db.consolidate("a1", since_hours=0, min_cluster_size=2)
+    canon = [r for r in db._store.list_all() if r.kind == "derived_canonical"][0]
+    res = db.retrieve("pricing policy", agent_id="a1", trace=True)
+    # Query covered by canonical key/domain -> no source re-injection.
+    assert not res.trace.get("unique_detail_ids")
+    assert all(r.id not in canon.source_record_ids for r in res.records)

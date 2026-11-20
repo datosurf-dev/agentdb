@@ -120,6 +120,13 @@ _REQUEST_TYPE_RULES: list = [
     ({"plan", "design", "architect", "strategy", "roadmap"}, "planning"),
 ]
 
+# Stop words excluded from "unique detail" term matching (T06).
+_UNIQUE_DETAIL_STOP = frozenset({
+    "the", "and", "for", "with", "that", "this", "from", "what", "which",
+    "does", "did", "was", "were", "are", "has", "have", "been", "into",
+    "about", "over", "when", "then", "them", "they", "your", "you",
+})
+
 
 def _extract_repo(working_dirs) -> "Optional[str]":
     if not working_dirs:
@@ -1306,6 +1313,47 @@ class AgentDB:
             token_total += est
         return selected, token_total, truncated, excluded_ids
 
+    def _unique_detail_sources(
+        self, canonical: MemoryRecord, query: str
+    ) -> list[MemoryRecord]:
+        """Archived sources of a canonical carrying a query-critical detail the
+        canonical's value omits (ADB-07 / T06). A source qualifies when it still
+        exists, is archived, shares a query term that is absent from the
+        canonical value, and has strictly greater query overlap than the
+        canonical. Lets "what is E4097" surface the source holding E4097 even
+        though the covering canonical dropped it."""
+        source_ids = getattr(canonical, "source_record_ids", []) or []
+        if not source_ids:
+            return []
+        query_terms = self._detail_terms(query)
+        if not query_terms:
+            return []
+        canon_val = canonical.value
+        canon_text = json.dumps(canon_val) if isinstance(canon_val, (dict, list)) else str(canon_val)
+        # The canonical's representation includes its key (which names the fact
+        # domain), so a term the key already covers is NOT a missing detail.
+        canon_terms = self._detail_terms(canonical.key + " " + canon_text)
+        canon_overlap = len(query_terms & canon_terms)
+
+        hits: list = []
+        for sid in source_ids:
+            src = self._store.get_by_id(sid)
+            if src is None or not src.archived:
+                continue
+            src_val = json.dumps(src.value) if isinstance(src.value, (dict, list)) else str(src.value)
+            src_terms = self._detail_terms(src.key + " " + src_val)
+            src_overlap = len(query_terms & src_terms)
+            detail = (query_terms & src_terms) - canon_terms
+            if detail and src_overlap > canon_overlap:
+                hits.append((src_overlap, src))
+        hits.sort(key=lambda t: (-t[0], t[1].id))
+        return [s for _n, s in hits]
+
+    @staticmethod
+    def _detail_terms(text: str) -> set:
+        cleaned = str(text).replace("/", " ").replace("-", " ").replace("_", " ").lower()
+        return {w for w in cleaned.split() if len(w) >= 3 and w not in _UNIQUE_DETAIL_STOP}
+
     def retrieve(
         self,
         query: str,
@@ -1412,10 +1460,33 @@ class AgentDB:
             excluded_reasons.setdefault(rr.record.id, "over_limit")
 
         # --- Budget packing: skip oversized, continue with smaller (ADB-08/T10) ---
-        selected, token_total, truncated, budget_excluded = self._pack_budget(ranked, resolved_budget_tokens)
+        selected, tok_total, truncated, budget_excluded = self._pack_budget(ranked, resolved_budget_tokens)
         for rid in budget_excluded:
             excluded_reasons.setdefault(rid, "over_budget")
+
+        # --- Unique-detail re-injection (ADB-07 / T06) ---
+        # For each selected canonical, re-inject an archived source only when it
+        # carries a query term the canonical value omits. Fit-permitting, added
+        # after primary selection and surfaced via the trace with a reason.
+        unique_detail_ids = set()
+        if selected:
+            already = {r.id for r in selected}
+            for rec in list(selected):
+                if getattr(rec, "kind", "source") != "derived_canonical":
+                    continue
+                for src in self._unique_detail_sources(rec, query):
+                    if src.id in already:
+                        continue
+                    est = _estimate_tokens(src)
+                    if resolved_budget_tokens is not None and tok_total + est > resolved_budget_tokens:
+                        excluded_reasons.setdefault(src.id, "unique_detail_over_budget")
+                        continue
+                    selected.append(src)
+                    already.add(src.id)
+                    tok_total += est
+                    unique_detail_ids.add(src.id)
         records = selected
+        token_total = tok_total
 
         # Increment retrieval counts
         for record in records:
@@ -1503,6 +1574,7 @@ class AgentDB:
                 "query": query,
                 "candidate_sources": dict(trace_info),
                 "selected_ids": [r.id for r in records],
+                "unique_detail_ids": sorted(unique_detail_ids),
                 "excluded": [
                     {"id": rid, "reason": reason}
                     for rid, reason in excluded_reasons.items()
