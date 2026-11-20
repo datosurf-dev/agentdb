@@ -110,6 +110,38 @@ until then.
 
 ---
 
+## OD-6 — Concurrent consolidation creates duplicate canonicals ⛔ open
+
+**What:** N concurrent `consolidate()` calls racing over the same cluster each
+read the sources as still-active (before any run archives them) and each write a
+`derived_canonical`, producing **N canonicals for the same source set**. A single
+sequential repeat is safe (the second run sees archived sources and creates
+nothing); only true concurrency violates idempotence.
+
+**What holds:** source records are never destroyed; values/lineage intact. The
+defect is duplicate derived records + double `records_archived` accounting.
+
+**Why it's open:** a correct fix requires choosing a concurrency-control design
+with storage implications — exactly a "report the alternatives" decision, not a
+silent redesign:
+- **(a) Unique index** on a lineage fingerprint (e.g. hash of sorted source ids)
+  in `memories`, with `INSERT OR IGNORE`. Rejects true duplicates but needs an
+  additive migration and a lineage-fingerprint column.
+- **(b) Consolidation advisory lock** (per-agent row in `consolidation_state`
+  acquired with `BEGIN IMMEDIATE`). Serializes runs; no schema change beyond
+  existing table.
+- **(c) Check-and-insert idempotency** — re-read source state inside the write
+  transaction and skip if an identical canonical already exists. Cheapest, but
+  must be airtight against the read-then-write race.
+- **(d) Document as unsupported** — consolidate() is not concurrency-safe;
+  callers must serialize. Zero code change.
+
+**Recommendation:** (b) or (c) after explicit approval — they preserve the public
+API and add no user-visible schema. Until then, fenced by
+`test_d10_concurrent_consolidation_no_duplicates` (`xfail(strict=True)`).
+
+---
+
 ## Resolved in this release ✅
 
 - **OD-R1 Retrieval tie-break determinism** — fixed (id-based secondary sort;

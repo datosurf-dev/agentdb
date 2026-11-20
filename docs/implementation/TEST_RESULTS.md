@@ -32,7 +32,7 @@ The 4 AgentDB skips are pre-existing `sentence-transformers` slow tests
 
 | Suite | Head | Result |
 |---|---|---|
-| AgentDB full | `3330c6e`+ | **504 passed, 4 skipped, 1 xfailed** |
+| AgentDB full | `3330c6e`+ | **505 passed, 4 skipped, 2 xfailed** |
 | AgentGate full (installed 0.5.0) | `ff77b4f` | **514 passed, 3 skipped** |
 | AgentGate full vs agentdb `3330c6e` (PYTHONPATH) | `ff77b4f` | **509 passed, 3 skipped** |
 | AgentGate AgentDB-specific vs `3330c6e` | `ff77b4f` | **10 passed** |
@@ -46,7 +46,7 @@ regressions. AgentGate +5 new integration tests, zero regressions.
 |---|---|---|
 | `tests/fixtures/adversarial.py` | (fixtures) | frozen clock, explicit-id specs, digests |
 | `tests/unit/test_adversarial_retrieval.py` | 19 | C1–C4 candidate/eligibility/ranking determinism/budget |
-| `tests/unit/test_adversarial_canonical.py` | 11 + 1 xfail | D1–D10 canonical invariants |
+| `tests/unit/test_adversarial_canonical.py` | 12 + 2 xfail | D1–D10 canonical invariants (incl. missing-source, concurrency) |
 | `tests/unit/test_provenance_regression.py` | 5 | E: trust boundary, derived authority, in-memory |
 | `tests/unit/test_migration_regression.py` | 4 | E: additive schema migration + rollback read |
 | `tests/unit/test_skill_cleanup_compat.py` | 4 | A: no exported skill surface, dead kwarg shim |
@@ -73,11 +73,17 @@ changed. Both tests pass post-fix.
 | `test_c3_deterministic_tie_break_independent_of_input_order` | FAIL | PASS |
 | `test_c3_deterministic_tie_break_through_retrieve` | FAIL | PASS |
 
-## Documented gap (not a test failure)
+## Documented gaps (not test failures — strict xfail)
 
 - `test_d6_cross_key_contradiction_should_not_merge` — `xfail(strict=True)`.
   Cross-key contradictory values in one domain currently merge (sources
   preserved). Tracked as **OD-1** in `OPEN_DECISIONS.md`.
+- `test_d10_concurrent_consolidation_no_duplicates` — `xfail(strict=True)`.
+  Concurrent `consolidate()` calls create duplicate canonicals (no idempotency
+  guard; sources preserved). Tracked as **OD-6** in `OPEN_DECISIONS.md`.
+
+Both xfails are strict: they fail loudly if behavior changes, forcing the
+decision doc to be updated in lock-step.
 
 ## Commands used
 

@@ -25,6 +25,7 @@ import pytest
 from agentdb import AgentDB
 from tests.fixtures.adversarial import (
     FROZEN_NOW,
+    digest_of,
     frozen_clock,
     make_record_spec,
     write_specs,
@@ -260,3 +261,82 @@ def test_d10_repeated_consolidation_idempotent_lineage(tmp_path):
     # exactly one canonical; no canonical-of-canonical, no duplicate
     assert len(canon) == 1
     assert set(canon[0].source_record_ids) == {"S1", "S2"}
+
+
+# D8b — a genuinely missing/deleted source invalidates its canonical
+def test_d8_missing_source_invalidates_canonical(tmp_path):
+    """A canonical whose source was deleted is excluded (canonical_source_missing)
+    rather than presented as fresh."""
+    db = _db(tmp_path)
+    with frozen_clock():
+        write_specs(db, [
+            make_record_spec("S1", "memory/orders/s1", "orders v1", archived=True),
+        ])
+        dg = digest_of("orders v1", key="memory/orders/s1")
+        write_specs(db, [
+            make_record_spec(
+                "C1", "memory/canonical/orders/x", "orders canonical",
+                consolidated=True, kind="derived_canonical",
+                derived_from=["S1"], derived_digests=[dg],
+            ),
+        ])
+        # Hard-delete the source (simulates a genuinely missing source).
+        with db._store._connect() as conn:
+            conn.execute("DELETE FROM memories WHERE id = ?", ("S1",))
+        db._store._reload()
+        assert db._store.get_by_id("S1") is None
+
+        res = db.retrieve("orders", agent_id="a1", limit=10, trace=True)
+    assert "C1" not in [r.id for r in res.records]
+    reasons = {e["id"]: e["reason"] for e in res.trace["excluded"]}
+    assert reasons.get("C1") == "canonical_source_missing"
+
+
+# D10b — concurrent consolidation does not double-archive or duplicate canonicals
+@pytest.mark.xfail(
+    strict=True,
+    reason="KNOWN GAP: concurrent consolidate() calls each create a canonical "
+           "because there is no idempotency guard/lock; a proper fix is a "
+           "storage/concurrency design decision (OPEN_DECISIONS.md OD-6). "
+           "Remove xfail when a guard is approved and implemented.",
+)
+def test_d10_concurrent_consolidation_no_duplicates(tmp_path):
+    """Two consolidation runs racing over the same cluster must not produce more
+    than one canonical nor double-count archived sources (idempotence under
+    concurrency). Deterministic single-process simulation using threads.
+
+    KNOWN GAP (xfail): without a guard, N concurrent runs create N canonicals for
+    the same source set. Sources themselves are never destroyed. See OD-6."""
+    import threading
+
+    db = _db(tmp_path)
+    with frozen_clock():
+        write_specs(db, [
+            make_record_spec("S1", "memory/analytics-schema-note", "analytics layout"),
+            make_record_spec("S2", "memory/analytics-schema-update", "analytics confirmed"),
+        ])
+    errors = []
+
+    def run():
+        try:
+            db.consolidate("a1", since_hours=0, min_cluster_size=2)
+        except Exception as e:  # pragma: no cover - surfaced if racy
+            errors.append(e)
+
+    threads = [threading.Thread(target=run) for _ in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert not errors, f"consolidation raised under concurrency: {errors}"
+    all_recs = list(db._store._by_id.values())
+    canon = [r for r in all_recs if r.kind == "derived_canonical"]
+    # No duplicate canonicals for the same source set.
+    lineages = {frozenset(c.source_record_ids) for c in canon}
+    assert len(canon) == len(lineages), f"duplicate canonicals: {lineages}"
+    assert len(canon) <= 1
+    # Sources archived exactly once (flag is idempotent, values intact).
+    assert db._store.get_by_id("S1").value == "analytics layout"
+    assert db._store.get_by_id("S2").value == "analytics confirmed"
+

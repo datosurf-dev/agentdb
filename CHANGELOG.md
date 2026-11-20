@@ -26,7 +26,8 @@ policy in `RELEASING.md`.
 ### Added — adversarial correctness suite (offline, deterministic)
 - `tests/unit/test_adversarial_retrieval.py` (candidate discovery, eligibility,
   ranking determinism, token budgets), `test_adversarial_canonical.py`
-  (D1–D10 canonical invariants; one documented `xfail` gap),
+  (D1–D10 canonical invariants; two documented `xfail` gaps: OD-1 cross-key
+  contradictory merge, OD-6 concurrent-consolidation duplication),
   `test_provenance_regression.py` (trust boundary + in-memory lifecycle),
   `test_migration_regression.py` (additive schema migration/rollback),
   `test_skill_cleanup_compat.py` (no exported skill surface),
