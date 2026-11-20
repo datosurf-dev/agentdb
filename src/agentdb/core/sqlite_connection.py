@@ -28,6 +28,13 @@ DEFAULT_TIMEOUT_SECONDS = 30.0
 
 PathLike = Union[str, Path]
 
+#: Sentinel for an in-memory database (SQLite convention).
+MEMORY_PATH = ":memory:"
+
+
+def _is_memory(db_path: PathLike) -> bool:
+    return str(db_path) == MEMORY_PATH
+
 
 def connect(db_path: PathLike, *, timeout: float = DEFAULT_TIMEOUT_SECONDS) -> sqlite3.Connection:
     """Open a connection with the package-wide settings applied.
@@ -38,7 +45,21 @@ def connect(db_path: PathLike, *, timeout: float = DEFAULT_TIMEOUT_SECONDS) -> s
     another process may be holding at that moment. Losing that race is harmless:
     the database is already in WAL mode, and a connection in the file's current
     journal mode works exactly as before.
+
+    In-memory databases (``:memory:``) are opened with **shared cache** so that
+    the multiple per-store connections AgentDB opens all see the *same* tables.
+    A plain ``":memory:"`` connection is private to a single connection, which
+    would make tables created by one store invisible to the next.
     """
+    if _is_memory(db_path):
+        # Shared-cache, process-local in-memory DB addressed by URI. journal_mode
+        # WAL does not apply to in-memory databases, so it is skipped.
+        conn = sqlite3.connect(
+            "file:agentdb_memdb?mode=memory&cache=shared", timeout=timeout, uri=True
+        )
+        conn.row_factory = sqlite3.Row
+        return conn
+
     conn = sqlite3.connect(str(db_path), timeout=timeout)
     conn.row_factory = sqlite3.Row
     try:

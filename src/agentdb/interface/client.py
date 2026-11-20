@@ -405,7 +405,12 @@ class AgentDB:
                     )
 
         # Determine DB path
-        if path is not None:
+        # ``:memory:`` is SQLite's in-memory sentinel — it must NOT be run
+        # through Path.resolve() (which would turn it into a literal ./:memory:
+        # file). Preserve it verbatim so a no-file, process-local DB is used.
+        if path is not None and str(path) == ":memory:":
+            db_path = Path(":memory:")
+        elif path is not None:
             db_path = Path(path).resolve()
         elif resolved_memory_dir is not None:
             db_path = (resolved_memory_dir / "database" / "agentdb.sqlite").resolve()
@@ -413,6 +418,19 @@ class AgentDB:
             db_path = Path(":memory:")
 
         self._path = db_path
+
+        # For an in-memory DB, hold one anchor connection for the lifetime of
+        # this AgentDB so the shared-cache database (and its tables) survives
+        # between the per-store connections. Without a live connection, an
+        # in-memory database is discarded and later connections see no tables.
+        self._mem_anchor = None
+        if str(db_path) == ":memory:":
+            from ..core.sqlite_connection import connect as _connect_anchor
+            self._mem_anchor = _connect_anchor(db_path)
+            self._mem_anchor.execute(
+                "CREATE TABLE IF NOT EXISTS _agentdb_anchor (id INTEGER PRIMARY KEY)"
+            )
+            self._mem_anchor.commit()
 
         # Set up permissions router
         self._permissions: Optional[PermissionRouter] = None
