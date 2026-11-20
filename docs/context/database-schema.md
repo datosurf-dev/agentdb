@@ -12,7 +12,6 @@ AgentDB writes to **up to three separate SQLite files** (the third, `embeddings.
 │   └── memory.yaml                    # runtime config (profile.name + overrides, reconciliation, embeddings, notifications)
 ├── database/
 │   ├── agentdb.sqlite                 # memories, conflicts, audit_log, outcomes, external_retrieves, consolidation_state, ingest_ledger
-│   ├── skills.sqlite                  # skills, skill_locks — separate file, separate trust boundary
 │   └── embeddings.db                  # metadata, embeddings, session_topics — separate file, only when embeddings are active
 ├── conversations/
 │   └── {agent_id}--{session_id}.jsonl # capture log + ingest_turns target; written when capture.conversation_jsonl is enabled or ingest_turns() is called
@@ -21,11 +20,11 @@ AgentDB writes to **up to three separate SQLite files** (the third, `embeddings.
 └── logs/                              # created on first run, unused
 ```
 
-Three SQLite files are in play, not two: `agentdb.sqlite` (memories + governance bookkeeping), `skills.sqlite` (skills + locks), and — only when an embedding provider is configured — `embeddings.db` (vectors). `embeddings.db` lives next to `agentdb.sqlite` (`self._path.parent / "embeddings.db"`, `interface/client.py`).
+Two SQLite files are in play: `agentdb.sqlite` (memories + governance bookkeeping) and — only when an embedding provider is configured — `embeddings.db` (vectors). `embeddings.db` lives next to `agentdb.sqlite` (`self._path.parent / "embeddings.db"`, `interface/client.py`). (Skill storage moved to a separate package; see `migration-handoff/skill-extraction/`.)
 
-If `AgentDB(path=...)` is used directly (no `memory_dir`), `agentdb.sqlite`, `skills.sqlite` and (when embeddings are active) `embeddings.db` still end up as sibling files (`path.parent / "skills.sqlite"`, `path.parent / "embeddings.db"`) — the file split holds regardless of which construction style is used.
+If `AgentDB(path=...)` is used directly (no `memory_dir`), `agentdb.sqlite` and (when embeddings are active) `embeddings.db` still end up as sibling files (`path.parent / "embeddings.db"`) — the file split holds regardless of which construction style is used.
 
-**Why separate files:** skills live in the human-approved governance zone conceptually (`authored_by` must be `"human"`, enforced in `SkillStore.create()`); giving them a physically separate SQLite file is a stronger boundary than a shared file with a `WHERE authored_by='human'` filter would be. Embeddings get their own file because they are derived, regenerable, and can be wholesale wiped on a model/dimension change without touching governed memory. Everything else (memories, conflicts, outcomes, external-retrieve stats, consolidation bookkeeping, ingest ledger) shares one file and one connection pattern because they're all facets of the same governed-memory loop and need to correlate via the audit log's sequence counter.
+**Why separate files:** Embeddings get their own file because they are derived, regenerable, and can be wholesale wiped on a model/dimension change without touching governed memory. Everything else (memories, conflicts, outcomes, external-retrieve stats, consolidation bookkeeping, ingest ledger) shares one file and one connection pattern because they're all facets of the same governed-memory loop and need to correlate via the audit log's sequence counter.
 
 ---
 
@@ -43,7 +42,7 @@ Backs `MemoryRecord` (`core/models.py`). One row per record version; a `delete()
 | `trust_level` | TEXT | derived from origin: `human` \| `agent` \| `provider` (`sealed` exists as an enum value but nothing assigns it yet) |
 | `agent_id` | TEXT | which agent wrote this |
 | `confidence` | REAL | 0–1, default 1.0. Adjusted by `record_outcome()`; human-approved records are immune |
-| `version` | INTEGER | default 1 — present but nothing currently creates a v2 of a memory record (unlike skills, which do version) |
+| `version` | INTEGER | default 1 — present but nothing currently creates a v2 of a memory record |
 | `archived` | INTEGER (bool) | soft-delete flag |
 | `retrieval_count` | INTEGER | incremented every time `retrieve()`/`retrieve_by_entities()` returns this record |
 | `created_at` | TEXT (ISO datetime) | |
@@ -137,44 +136,6 @@ Composite PK is `(agent_id, session_id, turn_hash)`. `purge_session()` deletes t
 
 ---
 
-## `skills.sqlite`
-
-### `skills` table
-Backs `Skill` (`core/models.py`), managed by `SkillStore`/`SkillsAPI`. Composite primary key `(id, version)` — updates create a new row rather than overwriting, so old versions are retained and queryable.
-
-| Column | Type | Notes |
-|---|---|---|
-| `id` | TEXT | stable skill identifier across versions |
-| `version` | TEXT | e.g. `"1.0.0"`, `"1.1.0"` |
-| `name` | TEXT | |
-| `content` | TEXT | the instruction text itself |
-| `authored_by` | TEXT | must be `"human"` — `SkillStore.create()` raises if not |
-| `scope` | TEXT (JSON list) | agent_ids this skill applies to |
-| `archived` | INTEGER (bool) | |
-| `health_score` | REAL | **not trusted from this column** — always recomputed at read time in `get_for_agent()`, per the algorithm-review skill's own rule ("computed at read time, never stored") |
-| `health_score_reasons` | TEXT (JSON list) | recomputed alongside `health_score` |
-| `created_at` | TEXT (ISO datetime) | |
-| `updated_at` | TEXT (ISO datetime) | |
-| `last_retrieved` | TEXT (ISO datetime, nullable) | fixed 2026-07-11 to actually drive staleness decay (previously staleness was computed from `created_at` regardless of retrieval activity — a real correctness bug) |
-| `parent_skill_id` | TEXT (nullable) | set to the original `id` when `update()` creates a new version |
-| `origin` | TEXT | defaults to `'human'`; migrated in via `_MIGRATION_STMTS`. Distinguishes human-authored from evolution-tool proposals |
-| `validation_score` | REAL (nullable) | migrated column; optional score supplied by `create_skill`/`update_skill_version` (e.g. from SkillOpt/WikiSkill validation) |
-| `metadata` | TEXT (JSON, nullable) | migrated column; arbitrary per-skill metadata dict |
-
-**Health score formula (current):** `age_days = now - (last_retrieved or created_at)`; if `age_days > 30`, `health_score = max(0.1, 1.0 - (age_days - 30) * 0.03)`. Below 0.6 surfaces a `staleness_warning` in retrieval results.
-
-**Not implemented:** entity-drift penalty, unresolved-conflict penalty, and a `SkillStore.search()` method. (Note: a `SkillConflict` exception *does* exist — it lives in `skills/skill_store.py` and is exported from `agentdb/__init__.py`; an earlier version of this doc wrongly listed it as never built.)
-
-### `skill_locks` table
-Tracks temporary locks so concurrent skill operations don't race (`skills/skill_store.py`, `_CREATE_SKILL_LOCKS_TABLE`).
-
-| Column | Type | Notes |
-|---|---|---|
-| `skill_id` | TEXT PK | the locked skill |
-| `locked_until` | TEXT (ISO datetime) | lock expiry |
-
----
-
 ## `embeddings.db`
 
 Only created when an embedding provider is active (`embed_fn=`, `local_embed=True`, or `embeddings.enabled: true`) **and** the DB path is not `:memory:`. Lives beside `agentdb.sqlite` (`database/embeddings.db`). Owned by `EmbeddingStore` (`embeddings/store.py`). Vectors are stored as packed `float32` BLOBs, not JSON.
@@ -194,7 +155,7 @@ One row per embedded record.
 
 | Column | Type | Notes |
 |---|---|---|
-| `table_name` | TEXT | source namespace, e.g. `memories` or `skills` (skills are embedded under `"{id}:{version}"`) |
+| `table_name` | TEXT | source namespace, e.g. `memories` |
 | `record_id` | TEXT | id within that namespace |
 | `embedding` | BLOB | packed `float32` vector |
 | `working_dirs` | TEXT (JSON list) | workspace paths active when embedded; used by the workspace-overlap signal |
@@ -286,7 +247,6 @@ retrieve(query, agent_id, ...)
     → MultiSignalRanker.rank(): reads origin, last_retrieved, confidence, retrieval_count, conflict_id
     → top `limit` selected; increment_retrieval_count() stamps retrieval_count + last_retrieved
     → audit_log: memory_retrieve (real per-record signal_scores)
-    → skills.get_for_agent(agent_id) merged in as skill_warnings (separate skills.sqlite lookup)
     → _session_record_ids[session_id] extended with returned record ids (in-memory; persisted linkage is via the session_id column)
 
 record_outcome(session_id, agent_id, outcome_type, outcome_value)
@@ -319,9 +279,7 @@ Claude adapter finalize_turn(...)
 
 The embedding purge reuses the live `self._embedding_store` (correct path `database/embeddings.db`, correct model/dimensions) rather than reconstructing a store; when no embedding provider is active there is nothing to purge. The `ingest_ledger` delete creates the table if absent, so a purge never fails on a DB populated only via `write()`.
 
-Skills derived from a session are intentionally **kept** by `purge_session()`.
-
-Skills are not returned by `retrieve()`; callers access them through the skills API or an adapter-specific injection path. They are stored separately and have a distinct health-score lifecycle that does not use memory confidence or outcome reinforcement.
+Skill management (registry, versioning, staleness, proposals, injection) is no longer part of AgentDB — it was extracted to an independent package. See `migration-handoff/skill-extraction/`.
 
 ---
 

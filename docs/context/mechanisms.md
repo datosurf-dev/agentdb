@@ -25,9 +25,6 @@ then `AGENTDB_HOME`. On construction these subdirectories are created:
 `config/`, `database/`, `conversations/`, `embeddings/`, `reconciliation/`, `logs/`
 (`interface/client.py`, `AgentDB.__init__`).
 
-**Skills** live in a **separate SQLite file** (`skills.sqlite`), versioned and
-governed separately from memories.
-
 ---
 
 ## 2. Mechanisms by type
@@ -37,7 +34,6 @@ governed separately from memories.
 | Mechanism | Declared in | When it runs | Configurable? |
 |---|---|---|---|
 | **Memory injection** | `adapters/middleware.py` → `prepare_turn` / `prepare_turn_async` | Every turn, called by the harness | Shape: `RunnerCapabilities` (code). Size: `injection.context_token_limit`, `memory_budget_chars` (`memory.yaml`) |
-| **Skills injection** | same, gated by `capabilities.inject_skills` | Every turn (async path only) | `inject_skills` flag (code) + 40% of `max_injection_tokens` |
 | **Workspace injection** | same, gated by `capabilities.inject_workspace` | Every turn (async path only) | `inject_workspace` flag + 30% of budget |
 | **Work context injection** | same + `_build_work_context_block()` | Every turn (async path only) | `inject_work_context` flag + 30% of budget |
 
@@ -61,7 +57,6 @@ budgets and header text come from the profile in `memory.yaml`.
 | **Turn write** (`write`) | `interface/client.py` → `AgentDB.write()` | Whenever the harness calls it (typically `finalize_turn`) | Caller decides key/value/origin/confidence |
 | **Auto-persist response** | `capture.auto_persist_response` in profile | End of turn, if enabled | Profile field |
 | **Conflict detection** | `AgentDB.write()` → conflict checks | On write | Threshold in profile (`retrieval.conflict_threshold`, currently reserved) |
-| **Skill-conflict signal** | `write()` keyword / semantic overlap with scoped skills | On write | Skill scope via `skills_api` |
 
 Note the trust model: `origin` decides `trust_level` (`human_approved`,
 `agent_inferred`, `provider_ingested`). Provider-ingested data is never promoted.
@@ -84,8 +79,7 @@ Note the trust model: `origin` decides `trust_level` (`human_approved`,
   `consolidate()` call**. Pass `since_hours=0` to include fresh records.
 - Clusters by key-word overlap (`_lc_cluster`), keeps the highest-confidence
   record as canonical, archives the rest, records `source_record_ids`.
-- With `llm_fn`, synthesises the canonical value and re-checks skill conflicts.
-- Dispatches `untracked_skill_candidate` when a cluster has no governing skill.
+- With `llm_fn`, synthesises the canonical value.
 - `human_approved` records are immune.
 
 **Compaction summary** writes to `memory/compaction/summary/<session_id>` and
@@ -100,7 +94,7 @@ future session for that agent (`client.py`: `write_compaction_summary`,
 |---|---|---|---|
 | **Lifecycle sweep** | `db.lifecycle.run_sweep()` | Manual — **no background scheduler** | `lifecycle.*` profile fields |
 | **Reinforcement / outcomes** | `db.lifecycle.reinforce()`, `record_outcome()` | Harness calls them | `lifecycle.reinforce_rate` |
-| **Gateway dispatch** | `db.gateway.subscribe/dispatch` | On events (`conversation_started`, `conflict_detected`, `skill_stale`, …) | `reconciliation.triggers` |
+| **Gateway dispatch** | `db.gateway.subscribe/dispatch` | On events (`conversation_started`, `conflict_detected`, …) | `reconciliation.triggers` |
 | **Notifications** | `db.gateway` handlers | On subscribed events | `notifications:` block in `memory.yaml` |
 | **Audit log** | `db.audit_log` | Every write/delete/retrieval | `db.audit_log.replay()` |
 
@@ -147,7 +141,7 @@ falling back to a default.
 | Layer | Owns | Does not own |
 |---|---|---|
 | **Harness** (AgentGate, Claude SDK, Hermes, …) | When to call `prepare_turn` / `finalize_turn` / `end_session`; which `RunnerCapabilities` apply; how to parse its own logs | Memory ranking, trust levels, governance |
-| **AgentDB** | Ranking, trust model, conflicts, lifecycle, skills, injection assembly | The transcript format of any given harness |
+| **AgentDB** | Ranking, trust model, conflicts, lifecycle, injection assembly | The transcript format of any given harness |
 
 **Capabilities are the only contract between them.** AgentDB owns the mechanism;
 the harness supplies the values.
@@ -162,6 +156,6 @@ the harness supplies the values.
   `permissions_path` is supplied.
 - No background scheduler: `run_sweep()` and `consolidate()` must be triggered.
 - Conversation JSONL is write-only from AgentDB's own retrieval perspective, **but** `AgentDB.ingest_turns()` now provides an explicit ingestion door: the harness normalises its own turns into `ConversationTurn` objects and `ingest_turns()` validates, dedupes (via `ingest_ledger`) and writes them. There is still no parser that reads the raw JSONL back into memory automatically — see [`ingest-turns-design.md`](ingest-turns-design.md) for the design that landed.
-- `delete(key)` is a **soft** delete (`archived = 1`); session content also lives in `conversations/`, embeddings, outcomes, `external_retrieves` and the audit log. `AgentDB.purge_session(agent_id, session_id, require_confirmation=False)` is the implemented **hard** removal that clears all of those for one session (keeping skills and a content-free `session_purged` audit event). See [`ingest-turns-design.md`](ingest-turns-design.md).
-- Injection covers memory records, skills, workspace and current-session work
-  context — **not** prior-session transcripts.
+- `delete(key)` is a **soft** delete (`archived = 1`); session content also lives in `conversations/`, embeddings, outcomes, `external_retrieves` and the audit log. `AgentDB.purge_session(agent_id, session_id, require_confirmation=False)` is the implemented **hard** removal that clears all of those for one session (keeping a content-free `session_purged` audit event). See [`ingest-turns-design.md`](ingest-turns-design.md).
+- Injection covers memory records, workspace and current-session work
+  context — **not** prior-session transcripts, and never skills.

@@ -1,5 +1,8 @@
 # Skill Extraction — Execution Plan (Phase 1)
 
+**Status:** ✅ Complete — all stages executed, `428 passed, 4 skipped`. See
+`HANDOFF.md` and `TEST_RESULTS.md`.
+
 **Branch:** `feat/skill-extraction-phase1`
 **Baseline commit:** `fe871c449c76025b81b4bd74561714b4d4886bf0`
 **Baseline tests:** `547 passed, 4 skipped` (`python -m pytest -q`)

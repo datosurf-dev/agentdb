@@ -1,5 +1,13 @@
 # Claude Agent SDK — Gateway & Budgeted Retrieval Guide
 
+> **Note (skill extraction):** AgentDB no longer manages or injects skills. The
+> `gateway.propose()/approve()/reject()`, `propose_skill()`, and skill proposal
+> workflow referenced throughout this historical guide have been **removed**.
+> What remains accurate here is the `memory_budget_tokens`, conflict-queue
+> (`pending_conflicts()`), and `GatewayAdapter.agent_id` material. Treat the
+> proposal/skill sections as historical context; the skill feature now lives in
+> a separate package (see `migration-handoff/skill-extraction/`).
+
 This captures lessons from a real production integration (a Telegram/Slack
 assistant) of the Claude SDK adapter's `memory_budget_tokens` and `db.gateway`
 wiring (conflict queue, proposal workflow) — the pieces added on top of the

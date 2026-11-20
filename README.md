@@ -12,11 +12,12 @@ The package currently provides:
 - **Provenance:** records are marked `human_approved`, `agent_inferred`, or `provider_ingested`; provider data is not promoted to human-approved data.
 - **Optional write authorization:** a YAML `PermissionRouter` can authorize writes and deletes. It is only active when `permissions_path` is supplied.
 - **Ranked retrieval:** provenance, recency, confidence, retrieval-frequency approximation, optional workspace overlap, and optional embedding similarity. Retrieval supports record limits and token budgets.
-- **Conflict and governance signals:** write-time conflicts, external-context overlap checks, skill-review signals, a conflict queue, and a live in-process gateway dispatcher.
-- **Skills:** separately stored, versioned records with health/staleness tracking, plus proposal and approval workflows. Core `retrieve()` does not return skills; some adapters can inject skill context.
+- **Conflict and governance signals:** write-time conflicts, external-context overlap checks, a conflict queue, and a live in-process gateway dispatcher.
 - **Lifecycle:** outcomes and reinforcement, manual lifecycle sweeps, TTL/staleness archival, and memory consolidation. On conversation start, automatic consolidation requires at least seven days and ten sessions since the previous run.
 - **Runtime integration:** a generic `AgentDBBackend`, model-agnostic middleware, a Claude runtime wrapper, and a Hermes `MemoryProvider` adapter.
-- **Optional integrations:** stdio MCP server, Anthropic message ingestor, email/Slack notifications, and WikiSkill/SkillOpt skill-evolution bridges.
+- **Optional integrations:** stdio MCP server, Anthropic message ingestor, and email/Slack notifications.
+
+> **Scope:** AgentDB is a memory and context-selection library. It does **not** manage or inject skills — skill registration, versioning, staleness, proposals and evolution were removed and now belong to a separate package (see `migration-handoff/skill-extraction/`).
 
 The current storage implementation is embedded SQLite. There is no Postgres/cloud backend or HTTP MCP transport. The gateway dispatcher is in-memory; the audit log is stored separately in SQLite.
 
@@ -37,7 +38,6 @@ python -m pip install 'agentdatabase[local-embed]'  # local sentence-transformer
 python -m pip install 'agentdatabase[mcp]'          # stdio MCP server
 python -m pip install 'agentdatabase[providers]'    # Anthropic provider client
 python -m pip install 'agentdatabase[notifications]' # Slack notifications
-python -m pip install 'agentdatabase[evolution]'    # WikiSkill and SkillOpt bridges
 ```
 
 Email notifications use the Python standard library. The `notifications` extra is needed for Slack.
@@ -81,13 +81,13 @@ Example policy:
 ```yaml
 default_policy: deny
 human_zone_prefixes:
-  - "skills/"
+  - "memory/org/"
 agents:
   assistant:
     can_write:
       - "memory/working/"
     cannot_write:
-      - "skills/"
+      - "memory/org/"
 ```
 
 Important current limits:
@@ -122,8 +122,7 @@ Embeddings can also be enabled with `AgentDB(local_embed=True)` or a custom `emb
 
 - `AgentDB`: memory writes/reads/retrieval, `consolidate()`, `checkpoint()`, `write_compaction_summary()`, `record_outcome()`, `config`, and `config_for(agent_id)`.
 - `db.lifecycle`: lifecycle sweeps, reinforcement, and outcome recording. Sweeps are not run by a background scheduler.
-- `db.gateway`: in-process event subscriptions/dispatch, conflict queue, and skill proposals.
-- `db.skills_api`: create, version, retrieve, archive, and inspect skill warnings.
+- `db.gateway`: in-process event subscriptions/dispatch and conflict queue.
 - `db.system.agentdb_stats()`: corpus and outcome statistics.
 - `db.audit_log.replay()`: replay persisted audit entries.
 - `AgentDBBackend` (`from agentdb.backend import AgentDBBackend`): key/value `read`, `write`, `delete`, `list`, `grep`, and `glob` for a selected agent and trust zone.
@@ -134,7 +133,7 @@ Retrieval returns `RetrievalResult` with records, conflicts, authority override 
 
 ### Model-agnostic middleware
 
-`AgentDBMiddleware` (`from agentdb.adapters import AgentDBMiddleware`) provides `prepare_turn` / `finalize_turn` and `run_turn`, plus async variants. The async preparation path can inject skills, workspace information, and recent work context according to `RunnerCapabilities`; the synchronous path prepares memory context.
+`AgentDBMiddleware` (`from agentdb.adapters import AgentDBMiddleware`) provides `prepare_turn` / `finalize_turn` and `run_turn`, plus async variants. The async preparation path can inject workspace information and recent work context according to `RunnerCapabilities`; the synchronous path prepares memory context. Neither path injects skills.
 
 ### Claude
 
@@ -142,7 +141,7 @@ Retrieval returns `RetrievalResult` with records, conflicts, authority override 
 
 ### Hermes
 
-`AgentDBHermesProvider` implements Hermes's `MemoryProvider` interface. It supplies retrieval, turn persistence, skills context, and lifecycle hooks. Governance applies to AgentDB records; a post-write Hermes hook cannot veto a write already made to Hermes-native storage.
+`AgentDBHermesProvider` implements Hermes's `MemoryProvider` interface. It supplies retrieval, turn persistence, and lifecycle hooks (`system_prompt_block()` returns an empty string — AgentDB does not inject skills). Governance applies to AgentDB records; a post-write Hermes hook cannot veto a write already made to Hermes-native storage.
 
 ### Other frameworks
 
@@ -155,7 +154,6 @@ See [`docs/integrations/README.md`](docs/integrations/README.md) for integration
 - **MCP:** `agentdb-mcp` starts a stdio server with `memory_write`, `memory_retrieve`, `conflict_queue`, and `memory_stats`. Set `AGENTDB_MEMORY_DIR` to select its workspace. HTTP transport is not implemented.
 - **Anthropic ingestion:** `AnthropicProvider(db, client).sync(agent_id, limit=50)` ingests text message blocks as `provider_ingested` records.
 - **Notifications:** configure email or Slack channels in `memory.yaml`; dispatch is live and in-process, not a durable queue.
-- **Skill evolution:** `src/agentdb/skills/evolution/` contains WikiSkill and SkillOpt adapters for applying proposed or accepted skill versions.
 
 ## Tests
 
