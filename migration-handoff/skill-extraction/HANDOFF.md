@@ -17,10 +17,10 @@ Skill Governance implementation and no cross-package integration were built.
 | `KNOWN_ISSUES.md` | Skill-subsystem limitations + extraction notes + open decisions |
 | `TEST_RESULTS.md` | Baseline vs post-extraction tests, requirement checks |
 | `export_skills.py` | Standalone exporter (no `agentdb` import) → JSONL |
-| `CHECKSUMS.sha256` | SHA-256 of every archived file |
-| `archive/src/...` | Original skill source (paths preserved) |
-| `archive/tests/` | Original skill-dedicated tests |
-| `archive/shared/` | Reference snapshots of shared files (skill + memory interleaved) |
+
+> **Skill source and tests now live in the standalone `agentskills` package**
+> (`github/agentskills`). This handoff keeps the inventory and migration notes;
+> the copied source/tests/checksums have been removed to avoid duplication.
 
 ## Removed functionality (AgentDB core)
 

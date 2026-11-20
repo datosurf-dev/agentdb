@@ -51,10 +51,10 @@ these; whether to carry them forward is a product decision for that package.
 
 ## Extraction-specific notes
 
-- Skill-dedicated tests were **archived, not fixed** (`archive/tests/`). They
-  assume the removed modules and will not run in AgentDB after this branch.
-- The archived `archive/shared/*.py` snapshots contain skill code *interleaved*
-  with memory code; they are reference copies, not drop-in modules.
+- Skill source and tests were **migrated to the standalone `agentskills`
+  package** (`github/agentskills`). Self-contained tests run there; the
+  AgentDB-coupled ones are kept as reference-only and do not run against that
+  package.
 - Proposals already persisted in user `agentdb.sqlite` as `proposal/` memories
   are **not** migrated automatically (they are AgentDB memories). See
   `DATA_MIGRATION.md §4`.

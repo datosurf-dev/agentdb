@@ -1,12 +1,13 @@
 # SOURCE_INVENTORY — Skill Functionality in AgentDB
 
 **Extracted from commit:** `fe871c449c76025b81b4bd74561714b4d4886bf0`
-**Archived:** see `archive/` (paths preserved under `archive/src/`, `archive/tests/`, `archive/shared/`)
-**Checksums:** `CHECKSUMS.sha256`
+**Live code now lives in:** the standalone `agentskills` package
+(`github/agentskills`) — this handoff keeps the inventory and notes, not a copy
+of the source.
 
 This inventory lists every skill-specific module, class, API and persistence
-mechanism that existed in AgentDB at the baseline commit, so the future
-independent Skill-Governance package can reconstruct behavior.
+mechanism that existed in AgentDB at the baseline commit, so the independent
+Skill-Governance package can reconstruct behavior.
 
 ## 1. Dedicated skill source modules
 
@@ -106,16 +107,20 @@ Default events included `skill_stale`, `skill_review_needed`,
 
 ## 5. Tests
 
-Dedicated skill tests archived under `archive/tests/`:
-`test_skill_store`, `test_skills_api`, `test_client_skills`,
-`test_skill_conflict_signal`, `test_skill_draft_reconciliation`,
-`test_skill_evolution_data_model`, `test_skill_evolution_lock`,
-`test_skill_evolution_package`, `test_skillopt_adapter`, `test_wikiskill_adapter`.
+Skill tests were migrated to the `agentskills` package:
 
-Shared files that referenced skills are archived under `archive/shared/` for
-restoration reference: `core_models.py`, `embeddings_text.py`, `gateway_init.py`,
-`notifications_dispatcher.py`, `adapters_capabilities.py`, `adapters_middleware.py`,
-`adapters_hermes.py`, `core_system.py`, `governance_lifecycle_manager.py`, `testing.py`.
+- **Self-contained unit tests** (run there, 61 passing):
+  `test_skill_store`, `test_skills_api`, `test_skill_evolution_data_model`,
+  `test_skill_evolution_lock`, `test_skill_evolution_package`,
+  `test_skillopt_adapter`, `test_wikiskill_adapter`.
+- **AgentDB-coupled reference tests** (kept but not run — depended on the
+  removed memory loop): `test_client_skills`, `test_skill_conflict_signal`,
+  `test_skill_draft_reconciliation`.
+
+The shared files that referenced skills (`models`, `embeddings/text`, `gateway`,
+`notifications/dispatcher`, adapter `capabilities`/`middleware`/`hermes`,
+`core/system`, `governance/lifecycle_manager`, `testing`) are captured by the
+inventory above; their live (skill-free) form remains in AgentDB.
 
 ## 6. Optional dependencies (from pyproject)
 `wikiskill = ["wikiskill>=0.1.0"]`, `skillopt = ["skillopt>=0.1.0"]`,
