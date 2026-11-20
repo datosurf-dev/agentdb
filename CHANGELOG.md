@@ -4,6 +4,39 @@ All notable changes to AgentDB are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions follow the pre-1.0
 policy in `RELEASING.md`.
 
+## [Unreleased]
+
+### Fixed — retrieval determinism (contract §5D)
+- **`MultiSignalRanker` tie-break:** equal-composite-score records are now
+  ordered by record `id` instead of leaking candidate-arrival order. Previously,
+  tied records could return in a different order across runs or entry points
+  (dict/SQLite row iteration order), violating "stable ordering for identical
+  inputs". Ranking weights are unchanged — only the secondary sort key was added.
+  Backed by deterministic adversarial tests (`tests/unit/test_adversarial_retrieval.py`).
+
+### Changed — final skill-coupling removal
+- **`LifecycleManager.consolidate()`** no longer declares the dead,
+  skill-specific `skill_candidate_threshold` parameter. It reactivated nothing.
+- **`AgentDB.consolidate()`** still *accepts* `skill_candidate_threshold` for
+  backward compatibility, now emitting a `DeprecationWarning` and ignoring it,
+  so existing callers do not hard-fail. Removed in a future release.
+- Corrected stale `consolidate()` docstring (canonical is a NEW derived record;
+  sources are soft-archived, not overwritten).
+
+### Added — adversarial correctness suite (offline, deterministic)
+- `tests/unit/test_adversarial_retrieval.py` (candidate discovery, eligibility,
+  ranking determinism, token budgets), `test_adversarial_canonical.py`
+  (D1–D10 canonical invariants; one documented `xfail` gap),
+  `test_provenance_regression.py` (trust boundary + in-memory lifecycle),
+  `test_migration_regression.py` (additive schema migration/rollback),
+  `test_skill_cleanup_compat.py` (no exported skill surface),
+  and reusable fixtures in `tests/fixtures/adversarial.py`.
+
+### Recommendation
+- Backward-compatible (bug fix + dead-param removal with shim) → **PATCH**
+  (`0.5.0` → `0.5.1`) per the pre-1.0 version policy. Final version to be set by
+  the release manager.
+
 ## [0.5.0] — 2026-11-20
 
 ### Changed — core product alignment
