@@ -20,7 +20,7 @@ AgentDB writes to **up to three separate SQLite files** (the third, `embeddings.
 └── logs/                              # created on first run, unused
 ```
 
-Two SQLite files are in play: `agentdb.sqlite` (memories + governance bookkeeping) and — only when an embedding provider is configured — `embeddings.db` (vectors). `embeddings.db` lives next to `agentdb.sqlite` (`self._path.parent / "embeddings.db"`, `interface/client.py`). (Skill storage moved to a separate package; see `migration-handoff/skill-extraction/`.)
+Two SQLite files are in play: `agentdb.sqlite` (memories + governance bookkeeping) and — only when an embedding provider is configured — `embeddings.db` (vectors). `embeddings.db` lives next to `agentdb.sqlite` (`self._path.parent / "embeddings.db"`, `interface/client.py`).
 
 If `AgentDB(path=...)` is used directly (no `memory_dir`), `agentdb.sqlite` and (when embeddings are active) `embeddings.db` still end up as sibling files (`path.parent / "embeddings.db"`) — the file split holds regardless of which construction style is used.
 
@@ -52,8 +52,11 @@ Backs `MemoryRecord` (`core/models.py`). One row per record version; a `delete()
 | `expiry_time` | TEXT (ISO datetime, nullable) | added 2026-07-17 (Task 10C); `lifecycle.run_sweep()` Step 0 archives records where `expiry_time ≤ now`; `human_approved` records are immune |
 | `inferred` | INTEGER (bool) | added 2026-07-17 (Task 10C); set to 1 when `write(infer=True)` is used — value was passed through a caller-supplied `infer_fn` before storage |
 | `working_dirs` | TEXT (JSON list) | added 2026-08-14 (Task 6); normalized absolute paths active at write time. Empty by default. Used by workspace_overlap ranker signal. |
-| `consolidated` | INTEGER (bool) | set to 1 on the canonical record kept by `consolidate()`; lower-confidence copies are archived. `retrieve(include_consolidated=...)` filters on it. Added alongside the consolidation work (see `consolidation_state` below). |
-| `source_record_ids` | TEXT (JSON list) | on a consolidated canonical, the ids of the records folded into it (also maintained on `MemoryRecord.source_record_ids`) |
+| `consolidated` | INTEGER (bool) | set to 1 on a `derived_canonical` record produced by `consolidate()`. Sources are soft-archived (never mutated). `retrieve(include_consolidated=...)` filters on it. |
+| `source_record_ids` | TEXT (JSON list) | on a `derived_canonical`, the ids of the records it was derived from (also on `MemoryRecord.source_record_ids`) |
+| `kind` | TEXT (default `'source'`) | `source` for original records, `derived_canonical` for consolidation output. Added 2026-11-20 (ADB-06). |
+| `producer` | TEXT (nullable) | what produced the record, e.g. `consolidation`. Added 2026-11-20. |
+| `derivation` | TEXT (JSON, default `'{}'`) | for a canonical: `{version, created_at, strategy, sources:[{id,key,digest,origin}]}` used for lineage + invalidation. Added 2026-11-20. |
 | `session_id` | TEXT (nullable) | the `session_id` the record was written under. Persisted by `write()` (`store.write()`) and enables cross-restart session→record linkage via `_session_record_ids_for()` (`SELECT id FROM memories WHERE agent_id=? AND session_id=?`). Added after the original schema doc; no longer in-memory-only. |
 
 **Fields planned but not present:** `user_id`, `expiry_policy`, `tier`, `audit_sequence`, `embedding`, `embedding_version`. `ExpiryPolicy`/`MemoryTier` enums exist in `core/models.py` but nothing attaches them to a record yet. Embeddings live in a separate DB (see `embeddings.db` below), not as a column here.
@@ -278,8 +281,6 @@ Claude adapter finalize_turn(...)
 ```
 
 The embedding purge reuses the live `self._embedding_store` (correct path `database/embeddings.db`, correct model/dimensions) rather than reconstructing a store; when no embedding provider is active there is nothing to purge. The `ingest_ledger` delete creates the table if absent, so a purge never fails on a DB populated only via `write()`.
-
-Skill management (registry, versioning, staleness, proposals, injection) is no longer part of AgentDB — it was extracted to an independent package. See `migration-handoff/skill-extraction/`.
 
 ---
 

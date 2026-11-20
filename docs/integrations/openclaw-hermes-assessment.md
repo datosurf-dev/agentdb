@@ -98,7 +98,7 @@ conflicting backends.
 | Hook | When called | AgentDB mapping |
 |---|---|---|
 | `initialize(session_id, **kwargs)` | Once at agent startup | `AgentDB.__init__()` + session setup |
-| `system_prompt_block()` | During system prompt assembly | Skill injection — governed instruction records |
+| `system_prompt_block()` | During system prompt assembly | Returns `""` — AgentDB surfaces memory via retrieval, not a prompt block |
 | `prefetch(query, *, session_id)` | Before each API call | `db.retrieve(query, agent_id, session_id)` |
 | `queue_prefetch(query, *, session_id)` | After each turn — pre-loads next turn's context | Background prefetch of next retrieval |
 | `sync_turn(user, asst, *, session_id)` | After each turn completes | `db.write()` + `finalize_turn()` equivalent |
@@ -157,7 +157,7 @@ should follow the same pattern.
 |---|---|---|---|---|
 | **Dreaming / lifecycle promotion** | Dreaming pass enabled/disabled; thresholds configurable | `on_session_end` + `on_pre_compress` hooks; provider opts in by implementing them | `db.lifecycle.run_sweep()` — on-demand only, off by default | All three are optional. User decides whether short-term memory gets promoted. AgentDB's sweep is the governance gate for both platforms if wired. |
 | **Embeddings** | Provider-level config (model name, API key) | Provider-level config | `embedding_model` in `memory.yaml`, configurable callable | All three treat the embedding model as a config detail, not a hard dependency. |
-| **Skills** | Basic; no versioning or health score | Autonomous creation; agentskills.io format | Versioned records, computed health score, staleness warnings | AgentDB's skills are governance-grade; OpenClaw/Hermes skills are agent-authored. The governance layer sits above, not replacing. |
+| **Skills** | Basic; no versioning or health score | Autonomous creation; agentskills.io format | N/A — AgentDB is memory-only and does not manage skills | OpenClaw/Hermes skills are agent-authored and stay in those runtimes; AgentDB governs memory, not skills. |
 | **Pre-compaction summarization** | Built-in flush reminder (no summarization) | `on_pre_compress()` returns a string summary | Summarizer callable (`AgentDB(summarizer=fn)`) — None by default (truncation fallback) | The summarizer callable is the shared abstraction: Hermes calls it via `on_pre_compress`, OpenClaw via the sidecar's compaction endpoint. |
 | **Cross-session recall** | FTS5 hybrid search across daily files | FTS5 + LLM summarization | Retrieval algorithm (provenance + recency + confidence + causal + workspace_overlap) | AgentDB's retrieval adds governance signals on top of both platforms' own search. workspace_overlap is opt-in (weight 0.0 by default). |
 
@@ -198,13 +198,12 @@ should follow the same pattern.
 
 For both platforms, AgentDB acts as a **governance wrapper** — not replacing the
 platform's own memory backend, but sitting above it to enforce trust zones, track
-provenance, detect conflicts, and manage skills. The platform's native format
+provenance, and detect conflicts. The platform's native format
 (Markdown for OpenClaw, provider output for Hermes) stays intact. AgentDB adds:
 
 - Write-time permission enforcement (what gets written, by whom, to which zone)
 - Provenance tagging (human-approved vs agent-inferred)
 - Multi-signal ranking on retrieval (provenance 0.35, recency 0.25, confidence 0.25, causal 0.15, workspace_overlap 0.0 opt-in)
-- Governed skills with computed health scores
 - Conflict detection and audit trail
 - Outcome-based confidence reinforcement
 

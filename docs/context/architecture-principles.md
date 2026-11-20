@@ -6,7 +6,7 @@ This is the single canonical source for AgentDB's architecture pitch and numbere
 
 A governed memory layer that arbitrates between what agents infer and what humans intend. It enforces a trust hierarchy at write time and provenance-weights recall at read time. Every write is validated before it lands. Every read returns a governed context package. The boundary is enforced at the memory layer — not by convention, not by prompt instructions, not by hoping agents behave.
 
-AgentDB complements existing runtime memory instead of replacing it by default. The core product loop is: **Track** relevant memory assets → **Reconcile** conflicts proactively → **Rank** what matters → **Inject** compact memory context before action. Skills are no longer part of AgentDB: they were extracted to an independent package and AgentDB never injects them (see `migration-handoff/skill-extraction/`).
+AgentDB complements existing runtime memory instead of replacing it by default. The core product loop is: **Track** relevant memory assets → **Reconcile** conflicts proactively → **Rank** what matters → **Inject** compact memory context before action.
 
 ## Design Principles
 

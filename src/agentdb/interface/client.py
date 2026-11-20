@@ -4,6 +4,7 @@ import dataclasses
 import json
 import os
 import warnings
+from types import SimpleNamespace
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -58,6 +59,10 @@ class RetrievalResult:
     override_instructions: list
     token_estimate: int = 0
     truncated: bool = False
+    # Structured diagnostic trace (ADB-10): per-candidate origin and exclusion
+    # reasons, plus the selected/excluded record ids. Not part of ranking; for
+    # tests and diagnostics only. Empty when tracing is disabled.
+    trace: dict = dataclasses.field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------
@@ -114,6 +119,13 @@ _REQUEST_TYPE_RULES: list = [
     ({"research", "brainstorm", "explore", "investigate", "survey"}, "research"),
     ({"plan", "design", "architect", "strategy", "roadmap"}, "planning"),
 ]
+
+# Stop words excluded from "unique detail" term matching (T06).
+_UNIQUE_DETAIL_STOP = frozenset({
+    "the", "and", "for", "with", "that", "this", "from", "what", "which",
+    "does", "did", "was", "were", "are", "has", "have", "been", "into",
+    "about", "over", "when", "then", "them", "they", "your", "you",
+})
 
 
 def _extract_repo(working_dirs) -> "Optional[str]":
@@ -400,7 +412,12 @@ class AgentDB:
                     )
 
         # Determine DB path
-        if path is not None:
+        # ``:memory:`` is SQLite's in-memory sentinel — it must NOT be run
+        # through Path.resolve() (which would turn it into a literal ./:memory:
+        # file). Preserve it verbatim so a no-file, process-local DB is used.
+        if path is not None and str(path) == ":memory:":
+            db_path = Path(":memory:")
+        elif path is not None:
             db_path = Path(path).resolve()
         elif resolved_memory_dir is not None:
             db_path = (resolved_memory_dir / "database" / "agentdb.sqlite").resolve()
@@ -408,6 +425,19 @@ class AgentDB:
             db_path = Path(":memory:")
 
         self._path = db_path
+
+        # For an in-memory DB, hold one anchor connection for the lifetime of
+        # this AgentDB so the shared-cache database (and its tables) survives
+        # between the per-store connections. Without a live connection, an
+        # in-memory database is discarded and later connections see no tables.
+        self._mem_anchor = None
+        if str(db_path) == ":memory:":
+            from ..core.sqlite_connection import connect as _connect_anchor
+            self._mem_anchor = _connect_anchor(db_path)
+            self._mem_anchor.execute(
+                "CREATE TABLE IF NOT EXISTS _agentdb_anchor (id INTEGER PRIMARY KEY)"
+            )
+            self._mem_anchor.commit()
 
         # Set up permissions router
         self._permissions: Optional[PermissionRouter] = None
@@ -1065,39 +1095,264 @@ class AgentDB:
             pass
         return result
 
-    def checkpoint(self, agent_id: str, session_id: str) -> None:
+    def checkpoint(
+        self, agent_id: str, session_id: str, origin: str = "agent_inferred"
+    ) -> None:
         """Write a compaction checkpoint record that survives lifecycle sweeps.
 
         Call this at the end of a session before context is compacted. The record
-        is stored as human_approved so it persists across sweeps and is retrievable
-        by any future session for the same agent.
+        persists across sweeps and is retrievable by any future session for the
+        same agent.
+
+        Provenance (contract P-01): the checkpoint is machine/agent-produced, so
+        it defaults to ``origin="agent_inferred"``. It is **not**
+        ``human_approved`` unless a verified human action explicitly passes
+        ``origin="human_approved"``. Agent-originated checkpoints therefore
+        remain subject to normal lifecycle decay/archival.
         """
         self.write(
             key=f"memory/compaction/checkpoint/{session_id}",
             value={"session_id": session_id, "type": "checkpoint"},
-            origin="human_approved",
+            origin=origin,
             agent_id=agent_id,
             session_id=session_id,
             confidence=1.0,
         )
 
     def write_compaction_summary(
-        self, agent_id: str, session_id: str, summary: str
+        self, agent_id: str, session_id: str, summary: str, origin: str = "agent_inferred"
     ) -> None:
         """Write a compaction summary so agents survive context truncation.
 
         The summary should describe the session's completed work and what to do
-        next. Stored as human_approved so it survives lifecycle sweeps and is
-        retrievable by any future session for the same agent.
+        next. It is retrievable by any future session for the same agent.
+
+        Provenance (contract P-01, ADB-03): a summary is machine/agent-produced,
+        so it defaults to ``origin="agent_inferred"`` and never acquires
+        ``human_approved`` implicitly. Only a verified human action may pass
+        ``origin="human_approved"`` explicitly. This prevents untrusted
+        agent input from being laundered into human authority.
         """
         self.write(
             key=f"memory/compaction/summary/{session_id}",
             value=summary,
-            origin="human_approved",
+            origin=origin,
             agent_id=agent_id,
             session_id=session_id,
             confidence=1.0,
         )
+
+    # ------------------------------------------------------------------
+    # Retrieval internals (shared by retrieve() and retrieve_by_entities())
+    # ------------------------------------------------------------------
+
+    _EPISODIC_PREFIX = "memory/episodic/"
+
+    def _eligibility_reason(self, record: MemoryRecord, *, agent_id: str, isolate_by_agent: bool,
+                            session_id: Optional[str], include_consolidated: bool) -> Optional[str]:
+        """Return a human-readable exclusion reason, or None if the record is eligible.
+
+        Applies the SAME rules regardless of which candidate branch (lexical vs
+        semantic) produced the record, so a record cannot be filtered in one
+        branch and admitted via another (ADB-05 scope-parity, T09).
+        """
+        if record.archived:
+            return "archived"
+        if isolate_by_agent and record.agent_id != agent_id:
+            return "agent_scope"
+        # Episodic records are session-local; cross-session episodic is excluded.
+        if session_id is not None and self._EPISODIC_PREFIX in record.key \
+                and f"/{session_id}/" not in record.key:
+            return "episodic_other_session"
+        # Repo filter scoped to repos this session has touched.
+        if session_id and session_id in self._session_profiles:
+            prof = self._session_profiles[session_id]
+            if prof.repos and record.working_dirs \
+                    and _extract_repo(record.working_dirs) not in prof.repos:
+                return "repo_scope"
+        if not include_consolidated and record.consolidated:
+            return "consolidated_excluded"
+        # Derived canonicals are invalidated when any source has been revised
+        # since derivation (T04): a stale canonical must not be presented as
+        # fresh. Fall back to the (audit-retained) sources instead.
+        if getattr(record, "kind", "source") == "derived_canonical":
+            invalid = self._canonical_invalidation_reason(record)
+            if invalid is not None:
+                return invalid
+        # Expired records are ineligible for selection.
+        if record.expiry_time is not None:
+            exp = record.expiry_time
+            if exp.tzinfo is None:
+                exp = exp.replace(tzinfo=timezone.utc)
+            if exp <= _utcnow():
+                return "expired"
+        return None
+
+    def _canonical_invalidation_reason(self, canonical: MemoryRecord) -> Optional[str]:
+        """Return a reason string if a derived canonical is invalidated, else None.
+
+        A canonical is invalidated when a source it was derived from no longer
+        exists or its content digest no longer matches the recorded derivation
+        digest (i.e. the source was revised). (ADB-06/T04)
+        """
+        from ..governance.lifecycle_manager import _record_digest
+
+        derivation = getattr(canonical, "derivation", {}) or {}
+        sources = derivation.get("sources", [])
+        if not sources:
+            # No lineage recorded: treat as unverifiable and skip selection.
+            return "canonical_no_lineage"
+        for src in sources:
+            rec = self._store.get_by_id(src.get("id"))
+            if rec is None:
+                return "canonical_source_missing"
+            if _record_digest(rec) != src.get("digest"):
+                return "canonical_source_revised"
+        return None
+
+    def _hybrid_candidates(
+        self,
+        query: str,
+        *,
+        agent_id: str,
+        query_embedding: Optional[list[float]],
+        lexical_cap: int,
+        trace: dict,
+    ) -> tuple[dict, dict]:
+        """Union lexical + optional semantic candidates, deduplicated by id.
+
+        Returns (records_by_id, embedding_by_id). Semantic candidates are drawn
+        from the whole corpus of stored embeddings (not just lexical hits) so a
+        strongly-relevant record with zero lexical overlap is still eligible
+        (ADB-05/T07). Record embeddings are hydrated for ranking.
+        """
+        lexical = self._store.search(query, limit=lexical_cap, agent_id=None)
+        lexical_ids = {r.id for r in lexical}
+        records: dict[str, MemoryRecord] = {r.id: r for r in lexical}
+        embeddings: dict[str, list[float]] = {}
+        trace.setdefault("lexical_count", len(lexical))
+        trace.setdefault("semantic_count", 0)
+
+        # Operational kill-switch: allow forcing lexical-only retrieval even when
+        # embeddings are configured (deterministic fallback for operators).
+        _semantic_enabled = bool(self._raw_embeddings_cfg.get("semantic_candidates", True))
+        if (
+            _semantic_enabled
+            and query_embedding is not None
+            and self._embedding_store is not None
+            and self._embedding_provider is not None
+        ):
+            from ..embeddings.provider import _cosine
+            from ..embeddings.text import _embed_text_for_record
+
+            all_vecs = self._embedding_store.get_all("memories")
+            # Add semantic candidates (whole corpus up to a cap by similarity).
+            sem_cap = int(self._raw_embeddings_cfg.get("semantic_candidate_cap", max(lexical_cap, 50)))
+            sims: list[tuple[str, float]] = []
+            for rid, vec in all_vecs.items():
+                try:
+                    sims.append((rid, _cosine(query_embedding, vec)))
+                except Exception:
+                    continue
+            sims.sort(key=lambda t: t[1], reverse=True)
+            added = 0
+            for rid, _sim in sims[:sem_cap]:
+                if rid in records:
+                    continue
+                rec = self._store._by_id.get(rid)
+                if rec is None:
+                    continue
+                records[rid] = rec
+                embeddings[rid] = all_vecs[rid]
+                added += 1
+            trace["semantic_count"] = added
+
+            # Hydrate embeddings for lexical hits and lazily embed missing ones.
+            missing = [r for rid, r in records.items() if rid not in all_vecs]
+            if missing:
+                try:
+                    vecs = self._embedding_provider.embed_batch(
+                        [_embed_text_for_record(r) for r in missing]
+                    )
+                    for rec, vec in zip(missing, vecs):
+                        self._embedding_store.put("memories", rec.id, vec, working_dirs=rec.working_dirs)
+                        embeddings[rec.id] = vec
+                except Exception:
+                    pass
+            # Ensure all semantically-found vectors are present.
+            for rid, vec in all_vecs.items():
+                if rid in records and rid not in embeddings:
+                    embeddings[rid] = vec
+
+        trace["candidate_total"] = len(records)
+        trace["semantic_only"] = len([rid for rid in records if rid not in lexical_ids])
+        return records, embeddings
+
+    def _pack_budget(
+        self, ranked: list, budget_tokens: Optional[int]
+    ) -> tuple[list, int, bool, list]:
+        """Greedily select ranked records within a rendered-token budget.
+
+        Skips an oversized record and CONTINUES to smaller eligible ones rather
+        than stopping at the first overflow (ADB-08/T10). Budget applies to the
+        estimated rendered size of each selected record. Returns
+        (selected_records, token_total, truncated, excluded_ids).
+        """
+        selected: list[MemoryRecord] = []
+        excluded_ids: list[str] = []
+        token_total = 0
+        truncated = False
+        for rr in ranked:
+            record = rr.record
+            est = _estimate_tokens(record)
+            if budget_tokens is not None and token_total + est > budget_tokens:
+                truncated = True
+                excluded_ids.append(record.id)
+                continue
+            selected.append(record)
+            token_total += est
+        return selected, token_total, truncated, excluded_ids
+
+    def _unique_detail_sources(
+        self, canonical: MemoryRecord, query: str
+    ) -> list[MemoryRecord]:
+        """Archived sources of a canonical carrying a query-critical detail the
+        canonical's value omits (ADB-07 / T06). A source qualifies when it still
+        exists, is archived, shares a query term that is absent from the
+        canonical value, and has strictly greater query overlap than the
+        canonical. Lets "what is E4097" surface the source holding E4097 even
+        though the covering canonical dropped it."""
+        source_ids = getattr(canonical, "source_record_ids", []) or []
+        if not source_ids:
+            return []
+        query_terms = self._detail_terms(query)
+        if not query_terms:
+            return []
+        canon_val = canonical.value
+        canon_text = json.dumps(canon_val) if isinstance(canon_val, (dict, list)) else str(canon_val)
+        # The canonical's representation includes its key (which names the fact
+        # domain), so a term the key already covers is NOT a missing detail.
+        canon_terms = self._detail_terms(canonical.key + " " + canon_text)
+        canon_overlap = len(query_terms & canon_terms)
+
+        hits: list = []
+        for sid in source_ids:
+            src = self._store.get_by_id(sid)
+            if src is None or not src.archived:
+                continue
+            src_val = json.dumps(src.value) if isinstance(src.value, (dict, list)) else str(src.value)
+            src_terms = self._detail_terms(src.key + " " + src_val)
+            src_overlap = len(query_terms & src_terms)
+            detail = (query_terms & src_terms) - canon_terms
+            if detail and src_overlap > canon_overlap:
+                hits.append((src_overlap, src))
+        hits.sort(key=lambda t: (-t[0], t[1].id))
+        return [s for _n, s in hits]
+
+    @staticmethod
+    def _detail_terms(text: str) -> set:
+        cleaned = str(text).replace("/", " ").replace("-", " ").replace("_", " ").lower()
+        return {w for w in cleaned.split() if len(w) >= 3 and w not in _UNIQUE_DETAIL_STOP}
 
     def retrieve(
         self,
@@ -1109,6 +1364,7 @@ class AgentDB:
         budget_tokens: Optional[int] = None,
         working_dirs: Optional[list[str]] = None,
         include_consolidated: bool = True,
+        trace: bool = False,
     ) -> RetrievalResult:
         agent_config = self.config_for(agent_id)
         isolate_by_agent = agent_config["isolate_by_agent"]
@@ -1135,77 +1391,55 @@ class AgentDB:
             except Exception:
                 query_embedding = None
 
-        candidates = self._store.search(
-            query, limit=max(resolved_limit, 50), agent_id=agent_id if isolate_by_agent else None,
+        # --- Hybrid candidate generation: lexical ∪ semantic, deduped by id ---
+        trace_info: dict = {}
+        cand_by_id, _cand_embeddings = self._hybrid_candidates(
+            query,
+            agent_id=agent_id,
+            query_embedding=query_embedding,
+            lexical_cap=max(resolved_limit, 50),
+            trace=trace_info,
         )
 
-        # Scope episodic records to the current session. Episodic records are
-        # session-local by design; cross-session insights should be promoted to
-        # structured non-episodic keys. Non-episodic records pass through unfiltered.
-        _EPISODIC_PREFIX = "memory/episodic/"
-        if session_id is not None:
-            candidates = [
-                r for r in candidates
-                if _EPISODIC_PREFIX not in r.key or f"/{session_id}/" in r.key
-            ]
+        # --- Shared eligibility: identical filter for both candidate branches ---
+        excluded_reasons: dict[str, str] = {}
+        eligible: list[MemoryRecord] = []
+        for rec in cand_by_id.values():
+            reason = self._eligibility_reason(
+                rec, agent_id=agent_id, isolate_by_agent=isolate_by_agent,
+                session_id=session_id, include_consolidated=include_consolidated,
+            )
+            if reason is None:
+                eligible.append(rec)
+            else:
+                excluded_reasons[rec.id] = reason
 
-        # Repo filter: only records from repos this session has touched (or with no repo)
-        if session_id and session_id in self._session_profiles:
-            _profile = self._session_profiles[session_id]
-            if _profile.repos:
-                candidates = [
-                    r for r in candidates
-                    if not r.working_dirs
-                    or _extract_repo(r.working_dirs) in _profile.repos
-                ]
+        # --- Session-topic semantic filter (operates on embeddings, post-eligibility) ---
+        if query_embedding is not None and self._embedding_store is not None and session_id:
+            session_topic = self._embedding_store.get_session_topic(session_id)
+            if session_topic is not None:
+                from ..embeddings.provider import _cosine
+                _threshold = float(self._raw_embeddings_cfg.get("session_topic_threshold", 0.35))
+                kept: list[MemoryRecord] = []
+                for r in eligible:
+                    vec = _cand_embeddings.get(r.id)
+                    if vec is None:
+                        kept.append(r)  # no embedding → always pass
+                        continue
+                    if _cosine(vec, session_topic) >= _threshold:
+                        kept.append(r)
+                    else:
+                        excluded_reasons[r.id] = "session_topic"
+                eligible = kept
 
-        # Consolidated filter
-        if not include_consolidated:
-            candidates = [r for r in candidates if not r.consolidated]
-
-        # Embedding hydration + session topic filter
-        if _query_passes_gate and self._embedding_store is not None:
-            from ..embeddings.provider import _cosine
-            from ..embeddings.text import _embed_text_for_record
-
-            record_ids = [r.id for r in candidates]
-            stored_embeddings = self._embedding_store.get_batch("memories", record_ids)
-
-            # Lazy regen: embed records that have no stored vector
-            missing = [r for r in candidates if r.id not in stored_embeddings]
-            if missing:
-                try:
-                    vecs = self._embedding_provider.embed_batch(
-                        [_embed_text_for_record(r) for r in missing]
-                    )
-                    for rec, vec in zip(missing, vecs):
-                        self._embedding_store.put(
-                            "memories", rec.id, vec, working_dirs=rec.working_dirs
-                        )
-                        stored_embeddings[rec.id] = vec
-                except Exception:
-                    pass
-
-            # Session topic filter
-            if session_id:
-                session_topic = self._embedding_store.get_session_topic(session_id)
-                if session_topic is not None:
-                    _threshold = float(
-                        self._raw_embeddings_cfg.get("session_topic_threshold", 0.35)
-                    )
-                    candidates = [
-                        r for r in candidates
-                        if r.id not in stored_embeddings  # no embedding → always pass
-                        or _cosine(stored_embeddings[r.id], session_topic) >= _threshold
-                    ]
-
-            # Attach embeddings as transient field before ranking
-            for r in candidates:
-                if r.id in stored_embeddings:
-                    r.embedding = stored_embeddings[r.id]
+        # Attach embeddings as transient field before ranking (reuse cached vectors).
+        for r in eligible:
+            vec = _cand_embeddings.get(r.id)
+            if vec is not None:
+                r.embedding = vec
 
         ranked_all = self._ranker.rank(
-            query, candidates, agent_id=agent_id,
+            query, eligible, agent_id=agent_id,
             query_embedding=query_embedding,
             session_working_dirs=working_dirs,
         )
@@ -1213,23 +1447,46 @@ class AgentDB:
         # Drop records that don't meet the minimum relevance threshold.
         min_score = agent_config["retrieval"]["min_composite_score"]
         if min_score > 0.0:
-            ranked_all = [rr for rr in ranked_all if rr.composite_score >= min_score]
+            kept_ranked = []
+            for rr in ranked_all:
+                if rr.composite_score >= min_score:
+                    kept_ranked.append(rr)
+                else:
+                    excluded_reasons[rr.record.id] = "below_min_score"
+            ranked_all = kept_ranked
 
         ranked = ranked_all[:resolved_limit]
+        for rr in ranked_all[resolved_limit:]:
+            excluded_reasons.setdefault(rr.record.id, "over_limit")
 
-        # Budget cap
-        selected: list[MemoryRecord] = []
-        token_total = 0
-        truncated = False
-        for rr in ranked:
-            record = rr.record
-            est = _estimate_tokens(record)
-            if resolved_budget_tokens is not None and token_total + est > resolved_budget_tokens:
-                truncated = True
-                break
-            selected.append(record)
-            token_total += est
+        # --- Budget packing: skip oversized, continue with smaller (ADB-08/T10) ---
+        selected, tok_total, truncated, budget_excluded = self._pack_budget(ranked, resolved_budget_tokens)
+        for rid in budget_excluded:
+            excluded_reasons.setdefault(rid, "over_budget")
+
+        # --- Unique-detail re-injection (ADB-07 / T06) ---
+        # For each selected canonical, re-inject an archived source only when it
+        # carries a query term the canonical value omits. Fit-permitting, added
+        # after primary selection and surfaced via the trace with a reason.
+        unique_detail_ids = set()
+        if selected:
+            already = {r.id for r in selected}
+            for rec in list(selected):
+                if getattr(rec, "kind", "source") != "derived_canonical":
+                    continue
+                for src in self._unique_detail_sources(rec, query):
+                    if src.id in already:
+                        continue
+                    est = _estimate_tokens(src)
+                    if resolved_budget_tokens is not None and tok_total + est > resolved_budget_tokens:
+                        excluded_reasons.setdefault(src.id, "unique_detail_over_budget")
+                        continue
+                    selected.append(src)
+                    already.add(src.id)
+                    tok_total += est
+                    unique_detail_ids.add(src.id)
         records = selected
+        token_total = tok_total
 
         # Increment retrieval counts
         for record in records:
@@ -1311,12 +1568,39 @@ class AgentDB:
                     "the human-approved version takes precedence over any agent-inferred value for this key."
                 )
 
+        trace_out: dict = {}
+        if trace:
+            trace_out = {
+                "query": query,
+                "candidate_sources": dict(trace_info),
+                "selected_ids": [r.id for r in records],
+                "unique_detail_ids": sorted(unique_detail_ids),
+                "excluded": [
+                    {"id": rid, "reason": reason}
+                    for rid, reason in excluded_reasons.items()
+                    if rid not in {r.id for r in records}
+                ],
+                "ranked": [
+                    {
+                        "id": rr.record.id,
+                        "composite_score": rr.composite_score,
+                        "signals": rr.signal_breakdown,
+                        "conflict_flag": rr.conflict_flag,
+                    }
+                    for rr in ranked_all
+                ],
+                "budget_requested": resolved_budget_tokens,
+                "estimated_tokens": token_total,
+                "truncated": truncated,
+            }
+
         return RetrievalResult(
             records=records,
             conflicts=conflicts,
             override_instructions=override_instructions,
             token_estimate=token_total,
             truncated=truncated,
+            trace=trace_out,
         )
 
     def retrieve_by_entities(
@@ -1324,12 +1608,57 @@ class AgentDB:
         entities: list[str],
         agent_id: str,
         session_id: Optional[str] = None,
+        budget_tokens: Optional[int] = None,
+        include_consolidated: bool = True,
+        trace: bool = False,
     ) -> RetrievalResult:
+        """Entity-driven retrieval.
+
+        Uses the SAME eligibility filters and budget packing as :meth:`retrieve`
+        (ADB-09/T11 parity): agent scope, episodic session scoping, repo scope,
+        consolidated filter, expiry, and rendered-token budget are applied here
+        too. Candidate discovery is entity-based (entity tags + key/value
+        substring fallback) rather than lexical/semantic.
+        """
         agent_config = self.config_for(agent_id)
         isolate_by_agent = agent_config["isolate_by_agent"]
-        records = self._store.search_by_entities(
+        resolved_budget_tokens = (
+            budget_tokens if budget_tokens is not None
+            else agent_config["injection"]["context_token_limit"]
+        )
+
+        raw = self._store.search_by_entities(
             entities, agent_id=agent_id if isolate_by_agent else None,
         )
+
+        # Shared eligibility (identical rules to retrieve()).
+        excluded_reasons: dict[str, str] = {}
+        eligible: list[MemoryRecord] = []
+        for rec in raw:
+            reason = self._eligibility_reason(
+                rec, agent_id=agent_id, isolate_by_agent=isolate_by_agent,
+                session_id=session_id, include_consolidated=include_consolidated,
+            )
+            if reason is None:
+                eligible.append(rec)
+            else:
+                excluded_reasons[rec.id] = reason
+
+        # Shared budget packing (skip oversized, continue with smaller).
+        # Rank entity matches through the SAME multi-signal ranker used by
+        # retrieve() — with no query embedding, so ordering is driven by
+        # provenance/recency/confidence/causal (semantic contributes 0). This
+        # replaces the previous ad-hoc recency-only ordering.
+        ranked = self._ranker.rank(
+            "", eligible, agent_id=agent_id,
+            query_embedding=None,
+            session_working_dirs=None,
+        )
+        records, token_total, truncated, budget_excluded = self._pack_budget(
+            ranked, resolved_budget_tokens
+        )
+        for rid in budget_excluded:
+            excluded_reasons.setdefault(rid, "over_budget")
 
         record_ids = [r.id for r in records]
 
@@ -1364,10 +1693,29 @@ class AgentDB:
                     "the human-approved version takes precedence over any agent-inferred value for this key."
                 )
 
+        trace_out: dict = {}
+        if trace:
+            trace_out = {
+                "query": "",
+                "trigger_source": "entity",
+                "selected_ids": record_ids,
+                "excluded": [
+                    {"id": rid, "reason": reason}
+                    for rid, reason in excluded_reasons.items()
+                    if rid not in set(record_ids)
+                ],
+                "budget_requested": resolved_budget_tokens,
+                "estimated_tokens": token_total,
+                "truncated": truncated,
+            }
+
         return RetrievalResult(
             records=records,
             conflicts=conflicts,
             override_instructions=override_instructions,
+            token_estimate=token_total,
+            truncated=truncated,
+            trace=trace_out,
         )
 
     def record_outcome(

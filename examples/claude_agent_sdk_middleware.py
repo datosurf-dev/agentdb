@@ -26,7 +26,7 @@ def main() -> None:
     middleware = AgentDBClaudeMiddleware(
         db=db,
         agent_id="research_agent",
-        profile="budget_optimized",  # or "full_storage"
+        # Profile/config is resolved from db.config_for(agent_id) (memory.yaml).
     )
 
     # Example governed write for durable memory.

@@ -61,3 +61,5 @@ by accident as part of a routine release.
 | `v0.2.0` | Model-agnostic runtime spec |
 | `v0.3.0` | Release 0.3.0 |
 | `v0.4.0` | **Breaking**: `FIREWORKS_CAPABILITIES` → `SERVERLESS_CAPABILITIES`. Adds `ingest_turns()` / `purge_session()`, `memories.session_id`, cache-reload fix |
+| `v0.4.1` | WAL pragma contention fix |
+| `v0.5.0` | **Breaking**: skill management removed from core (moved to `agentskills`); compaction summaries default to `agent_inferred`; hybrid retrieval, derived canonicals, `:memory:` fix. Additive `memories` columns `kind`/`producer`/`derivation` |

@@ -1,19 +1,9 @@
 # Claude Agent SDK — Gateway & Budgeted Retrieval Guide
 
-> **Note (skill extraction):** AgentDB no longer manages or injects skills. The
-> `gateway.propose()/approve()/reject()`, `propose_skill()`, and skill proposal
-> workflow referenced throughout this historical guide have been **removed**.
-> What remains accurate here is the `memory_budget_tokens`, conflict-queue
-> (`pending_conflicts()`), and `GatewayAdapter.agent_id` material. Treat the
-> proposal/skill sections as historical context; the skill feature now lives in
-> a separate package (see `migration-handoff/skill-extraction/`).
-
-This captures lessons from a real production integration (a Telegram/Slack
-assistant) of the Claude SDK adapter's `memory_budget_tokens` and `db.gateway`
-wiring (conflict queue, proposal workflow) — the pieces added on top of the
-base adapter covered in `model-and-runtime-wiring.md` section A.1. Read that
-one first for basic setup; this one is about what broke or needed a judgment
-call the first time these specific capabilities got used for real.
+Lessons from a real production integration (a Telegram/Slack assistant) of the
+Claude SDK adapter's `memory_budget_tokens` and `db.gateway` conflict-queue
+wiring — the pieces added on top of the base adapter covered in
+`model-and-runtime-wiring.md` section A.1. Read that first for basic setup.
 
 ## `memory_budget_tokens`: start loose, tighten from data
 
@@ -35,76 +25,29 @@ Tighten later based on observed values, not a guess — same philosophy as the
 `full_storage` → `budget_optimized` migration path already documented in
 `model-and-runtime-wiring.md`.
 
-## Permission note: `proposal/` write access
+## `agent_id` is a public property on `GatewayAdapter`
 
-`gateway.propose()` writes to `proposal/<id>` through the normal `write()`
-path. As of 2026-07-14, `proposal/` is a framework-managed prefix
-(`FRAMEWORK_MANAGED_WRITE_PREFIXES` in `governance/permission_router.py`) and
-is **writable by default for any agent** — no explicit `permissions.yaml`
-grant needed. An explicit `cannot_write: ["proposal/"]` still blocks it for
-deployments that want to lock it down.
+`GatewayAdapter` (and therefore both `AgentDBClaudeMiddleware` and
+`AgentDBHermesProvider`) exposes `adapter.agent_id` directly, so a downstream
+app can scope its own gateway calls without reaching into `_agent_id` or
+duplicating the id in a module-level global.
 
-If you are running an older version of AgentDB without this fix, you will need
-an explicit `proposal/` entry under `can_write` for any agent that calls
-`propose_skill()`. See "Friction points — resolved 2026-07-14" below.
+## Conflict queue
 
-## `agent_id` is the natural default scope for chat-originated proposals
+`db.gateway.conflict_queue(resolved=False)` returns pending conflict records;
+`adapter.pending_conflicts()` is the adapter-scoped convenience wrapper. Route
+these to whichever review surface your deployment uses (Slack/Telegram, a
+dashboard, etc.) — the gateway dispatcher is in-process and not durable.
 
-Chat commands don't have a natural user-facing "scope" concept to expose —
-asking "what scope should this proposal have?" in a Telegram/Slack command
-is not a good UX. **Recommendation:** default `scope=[adapter.agent_id]`
-rather than exposing scope as a parameter, and use the new public `agent_id`
-property (below) rather than threading the agent_id through your own
-parallel global.
+## Test double
 
-## New: `agent_id` is now a public property on `GatewayAdapter`
-
-Previously only `_agent_id` (private) existed. A downstream app needing to
-scope its own gateway calls had to either reach into the underscore-prefixed
-attribute or duplicate the agent_id in its own module-level global — which is
-what the reference integration did before this was added. `GatewayAdapter`
-(and therefore both `AgentDBClaudeMiddleware` and `AgentDBHermesProvider`)
-now expose `adapter.agent_id` directly; no workaround needed.
-
-## Authorization tiers: propose vs. approve/reject are not the same risk
-
-`propose_skill()` only drafts — reversible, no effect on what the agent
-actually sees until approved. `approve_proposal()` promotes a draft into a
-skill the agent will be served on every future turn; `reject_proposal()`
-discards it. These are not the same risk tier.
-
-**Recommendation:** gate `approve`/`reject` behind a separate, fail-closed
-allowlist distinct from whatever general access control already gates chat
-access to the bot — general chat access implies "can talk to the agent," not
-"can promote arbitrary content into what the agent is told to do." Read-only
-listing (`pending_conflicts()`, `list_proposals()`) and drafting
-(`propose_skill()`) can reasonably stay on the general allowlist; committing
-a change to the skill corpus should not.
-
-## Friction points — resolved 2026-07-14
-
-1. **`gateway.propose()`'s internal write no longer requires a manual
-   permission grant.** `proposal/` is now a framework-managed prefix
-   (`governance/permission_router.py`'s `FRAMEWORK_MANAGED_WRITE_PREFIXES`) —
-   writable by default for any agent, checked after `cannot_write` (still a
-   valid escape hatch for a deployment that wants to lock it down) and before
-   `can_write`/`default_policy`. This is a default, not an unconditional
-   bypass: unlike Hermes's `on_memory_write`, which skips permission checking
-   entirely because it's mirroring a write that already happened elsewhere,
-   `propose()` is the *actual* write — an explicit `cannot_write: ["proposal/"]`
-   still blocks it. Regression guard: `tests/unit/test_gateway.py` now
-   includes a test with a real `permissions_path` configured and zero
-   explicit grant — the existing gateway tests use no permissions file at
-   all, which is exactly why this class of bug wasn't caught earlier.
-2. **`agentdb.testing.FakeAgentDBClaudeMiddleware` now ships with the
-   package.** Covers the curated params relevant to gateway/proposal testing
-   (`db`, `agent_id`, `profile`, `memory_budget_tokens`) — not
-   `retrieve_limit`/`memory_budget_chars`/`conversation_started_callback`,
-   which only matter for turn behavior the fake doesn't implement (use a real
-   tmp-path-backed `AgentDBClaudeMiddleware` for that instead).
-   `tests/unit/test_testing_fakes.py` asserts those curated params still
-   exist on the real class via `inspect.signature`, so a future signature
-   change fails in *this* repo's suite, not silently downstream.
+`agentdb.testing.FakeAgentDBClaudeMiddleware` ships with the package for
+downstream apps testing their own wiring. It covers the curated constructor
+params (`db`, `agent_id`) — not turn behavior, which needs a real
+tmp-path-backed `AgentDBClaudeMiddleware`.
+`tests/unit/test_testing_fakes.py` asserts those curated params still exist on
+the real class via `inspect.signature`, so a signature change fails in *this*
+repo's suite, not silently downstream.
 
 ## Related
 

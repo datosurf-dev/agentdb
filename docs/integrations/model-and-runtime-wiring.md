@@ -325,14 +325,6 @@ For strong behavior, use this loop:
 
 This enables memory governance and gradual confidence calibration over time.
 
-## C.1) Skill Management — Moved Out of AgentDB
-
-Skill drift management (registry, versioning, staleness, proposals, evolution)
-has been **removed from AgentDB** and extracted to an independent package. AgentDB
-is now memory-only and does not manage or inject skills. See
-`migration-handoff/skill-extraction/` for the preserved implementation, data
-export tooling, and restoration notes.
-
 ## D) Two Operating Modes: Full Storage vs Budget Optimized
 
 Use one explicit profile per runtime to avoid overlap and token spikes.

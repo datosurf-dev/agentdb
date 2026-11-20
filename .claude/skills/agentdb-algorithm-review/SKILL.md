@@ -51,18 +51,12 @@ Run through every item before accepting the change. A "no" is not a blocker - it
 - [ ] Are the BOOST (0.05) and DECAY (0.02) constants asymmetric? Decay is smaller than boost by design - false negatives (forgetting useful memories) are more costly than false positives (retaining marginally useful ones). If changing either, justify the new asymmetry explicitly.
 - [ ] Does neutral outcome (0.3 < value < 0.7) produce zero confidence change?
 
-### 3. Skill health integrity
-
-- [ ] Is the staleness half-life still 30 days? (`exp(-log(2) * days / 30)`)
-- [ ] Are `health_score` and `health_score_reasons` computed at read time, never stored?
-- [ ] Does a score below 0.6 surface a `staleness_warning` in the retrieval result?
-
-### 4. Corpus quality metrics
+### 3. Corpus quality metrics
 
 - [ ] Does `agentdb_stats()` include `avg_confidence`, `low_confidence_count`, `conflict_pending_count`, `outcome_positive_rate`, `retrieval_count_total`?
 - [ ] Is `outcome_positive_rate` returned as `None` when fewer than 10 outcomes are recorded? (Avoid misleading rates from small samples.)
 
-### 5. Safety ordering in `retrieve()`
+### 4. Safety ordering in `retrieve()`
 
 - [ ] Are conflict flags assembled **before** memory content? The agent must know a memory is contested before receiving it - not after.
 - [ ] Is a `memory_retrieve` audit event logged after assembling the result, with `record_ids` and `signal_scores` in the payload?
@@ -79,7 +73,6 @@ These are known weak points worth addressing when nearby code is already being t
 |---|---|---|
 | Causal score | Approximated via `retrieval_count * recency_weight` | Full WAL correlation: scan `memory_retrieve` -> `memory_outcome` chains per record (Phase 4) |
 | Semantic weight | 0.0 until embeddings active | When activating, redistribute: provenance 0.30, recency 0.20, confidence 0.20, causal 0.10, semantic 0.20 |
-| Skill entity drift | Keyword-based detection only | Semantic entity matching - a skill using a synonym for a deprecated entity won't be flagged until Phase 6 |
 | Reinforcement granularity | All retrieved records in a session get the same boost/decay | Weight by signal_score at retrieval time - records that ranked higher contributed more to the outcome |
 | Outcome linking | Links to most recent `memory_retrieve` in session | Could link to specific retrieval sequence if `retrieval_sequence` is passed explicitly |
 
@@ -93,7 +86,6 @@ If the change being reviewed is adjacent to one of these, propose the improvemen
 - `HUMAN_APPROVED` records are modified by any outcome-based path
 - `outcome_positive_rate` computed from fewer than 10 outcomes without the `None` guard
 - Conflict flags assembled after memory content in `retrieve()`
-- `health_score` being stored rather than computed at read time
 - `BOOST > DECAY` asymmetry reversed (would make forgetting cheaper than learning)
 - Max delta cap removed or raised above 0.1
 
@@ -124,9 +116,6 @@ CONFIDENCE_DECAY_RATE = 0.05  # per lifecycle cycle (time-based, not outcome-bas
 ARCHIVAL_THRESHOLD = 0.10
 STALENESS_DAYS     = 90
 
-# SkillStore - agentdb/skills/skill_store.py
-STALE_HALF_LIFE_DAYS = 30
-WARN_THRESHOLD       = 0.6
 ```
 
 ---

@@ -77,16 +77,25 @@ Note the trust model: `origin` decides `trust_level` (`human_approved`,
   **`created_at <= now - since_hours`** (`since_hours` defaults to **24**).
 - Therefore **records written in the last 24h are invisible to a default
   `consolidate()` call**. Pass `since_hours=0` to include fresh records.
-- Clusters by key-word overlap (`_lc_cluster`), keeps the highest-confidence
-  record as canonical, archives the rest, records `source_record_ids`.
-- With `llm_fn`, synthesises the canonical value.
+- Clusters by key-word overlap (`_lc_cluster`), then a **compatibility gate**:
+  all members must share a key-domain slug and have no temporal/authority
+  conflict, so related-but-distinct or contradictory records are not merged.
+- Creates a **NEW `derived_canonical` record** (`kind=derived_canonical`,
+  `origin=agent_inferred`, `source_record_ids` + per-source digests in
+  `derivation`). Source records are **never overwritten** — only soft-archived.
+- With `llm_fn`, the canonical value is synthesised; otherwise it is a copy of
+  the highest-confidence source value.
+- A canonical is **invalidated** when any source's digest changes; stale
+  canonicals are excluded from selection. `retrieve()` may re-inject a source
+  that holds a query-critical detail the canonical omits (`unique_detail`).
 - `human_approved` records are immune.
 
 **Compaction summary** writes to `memory/compaction/summary/<session_id>` and
-**checkpoint** to `memory/compaction/checkpoint/<session_id>`, both as
-`human_approved`, so they survive lifecycle sweeps and are retrievable by any
-future session for that agent (`client.py`: `write_compaction_summary`,
-`checkpoint`).
+**checkpoint** to `memory/compaction/checkpoint/<session_id>`, both defaulting to
+`origin="agent_inferred"` (machine-produced → lifecycle-decayable). Only an
+explicit `origin="human_approved"` (verified human action) survives all sweeps.
+Retrievable by any future session for that agent (`client.py`:
+`write_compaction_summary`, `checkpoint`).
 
 ### D. Lifecycle and governance — decay, archival, signals
 
@@ -158,4 +167,4 @@ the harness supplies the values.
 - Conversation JSONL is write-only from AgentDB's own retrieval perspective, **but** `AgentDB.ingest_turns()` now provides an explicit ingestion door: the harness normalises its own turns into `ConversationTurn` objects and `ingest_turns()` validates, dedupes (via `ingest_ledger`) and writes them. There is still no parser that reads the raw JSONL back into memory automatically — see [`ingest-turns-design.md`](ingest-turns-design.md) for the design that landed.
 - `delete(key)` is a **soft** delete (`archived = 1`); session content also lives in `conversations/`, embeddings, outcomes, `external_retrieves` and the audit log. `AgentDB.purge_session(agent_id, session_id, require_confirmation=False)` is the implemented **hard** removal that clears all of those for one session (keeping a content-free `session_purged` audit event). See [`ingest-turns-design.md`](ingest-turns-design.md).
 - Injection covers memory records, workspace and current-session work
-  context — **not** prior-session transcripts, and never skills.
+  context — **not** prior-session transcripts.

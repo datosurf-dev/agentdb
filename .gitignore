@@ -21,7 +21,7 @@ ENV/
 # Runtime workspace created by AgentDB() defaults / tests
 agentdb-workspace/
 
-# Agent specs
+# Agent specs (untracked local working docs, handoff notes, alignment reports)
 docs/spec
 
 # Accidental literal ":memory:" path from ad-hoc scripts
