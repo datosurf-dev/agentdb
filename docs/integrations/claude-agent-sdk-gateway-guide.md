@@ -6,7 +6,7 @@
 > What remains accurate here is the `memory_budget_tokens`, conflict-queue
 > (`pending_conflicts()`), and `GatewayAdapter.agent_id` material. Treat the
 > proposal/skill sections as historical context; the skill feature now lives in
-> a separate package (see `migration-handoff/skill-extraction/`).
+> a separate package.
 
 This captures lessons from a real production integration (a Telegram/Slack
 assistant) of the Claude SDK adapter's `memory_budget_tokens` and `db.gateway`

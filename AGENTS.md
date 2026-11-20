@@ -7,15 +7,13 @@ These instructions are repository-level and apply to all agent work in this repo
 ## Canonical Context Sources
 
 1. Repository instructions: `AGENTS.md`
-2. Product contract and target boundary (skills are out of scope): `docs/spec/PRODUCT_CONTRACT.md`, `docs/spec/DECISIONS_AND_TRACEABILITY.md`, `docs/spec/TECHNICAL_SPEC.md`
-2a. Core-alignment implementation report, benchmarks, and remaining decisions: `docs/spec/implementation/` (AGENTDB_ALIGNMENT_REPORT, RETRIEVAL_BENCHMARKS, CONSOLIDATION_VALIDATION, MIGRATION_AND_ROLLBACK, REMAINING_DECISIONS)
-3. Architecture & design principles: `docs/context/architecture-principles.md`
-4. Capabilities by type: `docs/context/capabilities.md`
-5. Database schema and memory assets: `docs/context/database-schema.md` (verify details against source)
-6. Mechanism reference (what runs when, and where it is declared): `docs/context/mechanisms.md`
-7. Testing strategy: `docs/context/testing-strategy.md`
-8. Integration guides: `docs/integrations/README.md`
-9. Algorithm review skill (when touching ranking/reinforcement surfaces): `.claude/skills/agentdb-algorithm-review/SKILL.md`
+2. Architecture & design principles: `docs/context/architecture-principles.md`
+3. Capabilities by type: `docs/context/capabilities.md`
+4. Database schema and memory assets: `docs/context/database-schema.md` (verify details against source)
+5. Mechanism reference (what runs when, and where it is declared): `docs/context/mechanisms.md`
+6. Testing strategy: `docs/context/testing-strategy.md`
+7. Integration guides: `docs/integrations/README.md`
+8. Algorithm review skill (when touching ranking/reinforcement surfaces): `.claude/skills/agentdb-algorithm-review/SKILL.md`
 
 If documentation and implementation disagree, use the current source and tests as the authority.
 

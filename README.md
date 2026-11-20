@@ -17,7 +17,7 @@ The package currently provides:
 - **Runtime integration:** a generic `AgentDBBackend`, model-agnostic middleware, a Claude runtime wrapper, and a Hermes `MemoryProvider` adapter.
 - **Optional integrations:** stdio MCP server, Anthropic message ingestor, and email/Slack notifications.
 
-> **Scope:** AgentDB is a memory and context-selection library. It does **not** manage or inject skills — skill registration, versioning, staleness, proposals and evolution were removed and now belong to a separate package (see `docs/spec/migration-handoff/`).
+> **Scope:** AgentDB is a memory and context-selection library. It does **not** manage or inject skills — skill registration, versioning, staleness, proposals and evolution were removed and now belong to a separate package.
 
 The current storage implementation is embedded SQLite. There is no Postgres/cloud backend or HTTP MCP transport. The gateway dispatcher is in-memory; the audit log is stored separately in SQLite.
 

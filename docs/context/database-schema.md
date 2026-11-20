@@ -20,7 +20,7 @@ AgentDB writes to **up to three separate SQLite files** (the third, `embeddings.
 └── logs/                              # created on first run, unused
 ```
 
-Two SQLite files are in play: `agentdb.sqlite` (memories + governance bookkeeping) and — only when an embedding provider is configured — `embeddings.db` (vectors). `embeddings.db` lives next to `agentdb.sqlite` (`self._path.parent / "embeddings.db"`, `interface/client.py`). (Skill storage moved to a separate package; see `docs/spec/migration-handoff/`.)
+Two SQLite files are in play: `agentdb.sqlite` (memories + governance bookkeeping) and — only when an embedding provider is configured — `embeddings.db` (vectors). `embeddings.db` lives next to `agentdb.sqlite` (`self._path.parent / "embeddings.db"`, `interface/client.py`). (Skill storage moved to a separate package.)
 
 If `AgentDB(path=...)` is used directly (no `memory_dir`), `agentdb.sqlite` and (when embeddings are active) `embeddings.db` still end up as sibling files (`path.parent / "embeddings.db"`) — the file split holds regardless of which construction style is used.
 
@@ -282,7 +282,7 @@ Claude adapter finalize_turn(...)
 
 The embedding purge reuses the live `self._embedding_store` (correct path `database/embeddings.db`, correct model/dimensions) rather than reconstructing a store; when no embedding provider is active there is nothing to purge. The `ingest_ledger` delete creates the table if absent, so a purge never fails on a DB populated only via `write()`.
 
-Skill management (registry, versioning, staleness, proposals, injection) is no longer part of AgentDB — it was extracted to an independent package. See `docs/spec/migration-handoff/`.
+Skill management (registry, versioning, staleness, proposals, injection) is no longer part of AgentDB — it was extracted to an independent package.
 
 ---
 

@@ -27,7 +27,7 @@ policy in `RELEASING.md`.
 - **Reliability (ADB-12):** `AgentDB(path=":memory:")` uses a working in-memory
   DB (no bogus `./:memory:` file).
 - **Schema:** additive, idempotent columns `kind`, `producer`, `derivation` on
-  `memories`; legacy rows unaffected. See `docs/spec/implementation/MIGRATION_AND_ROLLBACK.md`.
+  `memories`; legacy rows unaffected.
 
 ### Changed — BREAKING
 - **Skill management removed from AgentDB core.** Skill registration, versioning,
@@ -45,12 +45,10 @@ policy in `RELEASING.md`.
     `conflict_detected`.
   - Removed `total_skills` / `stale_skill_count` from `db.system.agentdb_stats()`.
   - Removed optional extras `wikiskill`, `skillopt`, `evolution`.
-  - Removed the `src/agentdb/skills/` package (archived under
-    `migration-handoff/skill-extraction/`).
+  - Removed the `src/agentdb/skills/` package (archived in a separate skill package).
 - Skill data is **not deleted**: existing `skills.sqlite` files are left intact.
-  Use `migration-handoff/skill-extraction/export_skills.py` to export and
-  `DATA_MIGRATION.md` to restore into a future skill package. Skill records are
-  never converted to memories.
+  Use the standalone exporter to export and restore into a future skill package.
+  Skill records are never converted to memories.
 
 ### Unchanged
 - Memory ranking, retrieval, consolidation (minus skill-candidate dispatch),
