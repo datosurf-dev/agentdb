@@ -288,52 +288,6 @@ def test_pending_conflicts_returns_gateway_conflict_queue(tmp_path):
     assert middleware.pending_conflicts() == db.gateway.conflict_queue(resolved=False)
 
 
-def test_propose_skill_creates_pending_proposal(tmp_path):
-    db = AgentDB(path=tmp_path / "test.db", permissions_path=PERMS)
-    middleware = AgentDBClaudeMiddleware(db=db, agent_id="research_agent")
-
-    proposal_id = middleware.propose_skill(
-        name="dbt-style",
-        content="Use concise bullet points.",
-        scope=["research_agent"],
-    )
-
-    pending = middleware.list_proposals(status="pending")
-    assert any(p["proposal_id"] == proposal_id for p in pending)
-
-
-def test_approve_proposal_creates_skill(tmp_path):
-    db = AgentDB(path=tmp_path / "test.db", permissions_path=PERMS)
-    middleware = AgentDBClaudeMiddleware(db=db, agent_id="research_agent")
-    proposal_id = middleware.propose_skill(
-        name="dbt-style",
-        content="Use concise bullet points.",
-        scope=["research_agent"],
-    )
-
-    middleware.approve_proposal(proposal_id)
-
-    skills = db.skills.get_for_agent("research_agent")
-    assert any(s.id == proposal_id for s in skills)
-
-
-def test_reject_proposal_does_not_create_skill(tmp_path):
-    db = AgentDB(path=tmp_path / "test.db", permissions_path=PERMS)
-    middleware = AgentDBClaudeMiddleware(db=db, agent_id="research_agent")
-    proposal_id = middleware.propose_skill(
-        name="dbt-style",
-        content="Use concise bullet points.",
-        scope=["research_agent"],
-    )
-
-    middleware.reject_proposal(proposal_id, reason="not needed")
-
-    skills = db.skills.get_for_agent("research_agent")
-    assert not any(s.id == proposal_id for s in skills)
-    rejected = middleware.list_proposals(status="rejected")
-    assert any(p["proposal_id"] == proposal_id for p in rejected)
-
-
 def test_budget_optimized_no_auto_persist_without_explicit_writes(tmp_path):
     db = AgentDB(path=tmp_path / "test.db", permissions_path=PERMS)
     middleware = AgentDBClaudeMiddleware(db=db, agent_id="research_agent")

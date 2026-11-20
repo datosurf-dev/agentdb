@@ -112,22 +112,12 @@ class AgentDBHermesProvider(MemoryProvider, GatewayAdapter):
 
     def system_prompt_block(self) -> str:
         """
-        Inject governed skills into Hermes's system prompt.
+        Return an AgentDB memory system-prompt section for Hermes.
 
-        Returns a '## Governed Skills' section if any skills exist for this
-        agent; empty string otherwise.
+        AgentDB injects memory context via retrieval; skills are no longer
+        managed or injected by AgentDB, so this returns an empty string.
         """
-        skills = self._db.skills.get_for_agent(self._agent_id)
-        if not skills:
-            return ""
-        lines = ["## Governed Skills"]
-        for skill in skills:
-            warning = ""
-            if skill.health_score < 0.6:
-                warning = f" [STALE — health_score={skill.health_score:.2f}]"
-            lines.append(f"### {skill.name}{warning}")
-            lines.append(skill.content)
-        return "\n".join(lines)
+        return ""
 
     # ------------------------------------------------------------------
     # Remaining hooks

@@ -354,27 +354,6 @@ class AgentDBMiddleware(GatewayAdapter):
             return content
         return content[: token_budget * 4] + "…"
 
-    def _build_skills_block(self, session_id: str, user_query: str) -> str:
-        """Return a formatted markdown block of relevant skills, or '' if none qualify."""
-        try:
-            if user_query.strip():
-                skills = self._db.skills.search(query=user_query, agent_id=self._agent_id)
-            else:
-                skills = self._db.skills.get_for_agent(self._agent_id)
-
-            skills = sorted(
-                (s for s in skills if s.health_score >= 0.5 and not s.archived),
-                key=lambda s: s.health_score,
-                reverse=True,
-            )[:5]
-
-            if not skills:
-                return ""
-
-            return "\n\n".join(f"### {s.name}\n{s.content}" for s in skills)
-        except Exception:
-            return ""
-
     _WORKSPACE_EXCLUDED_DIRS = {"__pycache__", "node_modules", "dist", ".venv", "venv", "env"}
 
     def _build_workspace_block(self, session_id: str, working_dirs: list[str]) -> str:
@@ -472,16 +451,8 @@ class AgentDBMiddleware(GatewayAdapter):
 
         new_blocks: list[dict[str, str]] = []
 
-        skills_budget = int(self._capabilities.max_injection_tokens * 0.4)
-        workspace_budget = int(self._capabilities.max_injection_tokens * 0.3)
-        work_context_budget = int(self._capabilities.max_injection_tokens * 0.3)
-
-        if self._capabilities.inject_skills:
-            block = self._build_skills_block(session_id, user_query)
-            if block:
-                block = self._trim_to_budget(block, skills_budget)
-            if block:
-                new_blocks.append({"role": "system", "content": f"## Skills\n{block}"})
+        workspace_budget = int(self._capabilities.max_injection_tokens * 0.5)
+        work_context_budget = int(self._capabilities.max_injection_tokens * 0.5)
 
         if self._capabilities.inject_workspace:
             ws = self._build_workspace_block(session_id, working_dirs or [])
@@ -653,36 +624,6 @@ class AgentDBMiddleware(GatewayAdapter):
     def pending_conflicts(self, resolved: bool = False) -> list:
         """Read-only view into db.gateway's conflict queue."""
         return self.gateway.conflict_queue(resolved=resolved)
-
-    def propose_skill(
-        self,
-        name: str,
-        content: str,
-        scope: list[str],
-        entities: Optional[list[str]] = None,
-        session_id: Optional[str] = None,
-    ) -> str:
-        """Draft a skill proposal via db.gateway.propose(), scoped to this adapter's agent_id."""
-        return self.gateway.propose(
-            name=name,
-            content=content,
-            scope=scope,
-            agent_id=self._agent_id,
-            entities=entities,
-            session_id=session_id,
-        )
-
-    def approve_proposal(self, proposal_id: str, resolution: Optional[str] = None) -> None:
-        """Approve a pending proposal via db.gateway.approve()."""
-        self.gateway.approve(proposal_id, resolution=resolution)
-
-    def reject_proposal(self, proposal_id: str, reason: Optional[str] = None) -> None:
-        """Reject a pending proposal via db.gateway.reject()."""
-        self.gateway.reject(proposal_id, reason=reason)
-
-    def list_proposals(self, status: str = "pending") -> list[dict]:
-        """List proposals by status via db.gateway.list_proposals()."""
-        return self.gateway.list_proposals(status=status)
 
     def _response_key(self, session_id: str) -> str:
         ts = _utcnow().strftime("%Y%m%dT%H%M%S%f")
