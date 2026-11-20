@@ -92,7 +92,7 @@ class ClaudeSdkApp:
             db=self.db,
             agent_id=self.agent_id,
             sdk_client_factory=self.get_or_create_client,
-            profile="budget_optimized",
+            # Profile/config is resolved from db.config_for(agent_id) (memory.yaml).
             system_prompt="You are the engineering Slack assistant.",
         )
 
