@@ -51,6 +51,7 @@ class CaptureSettings:
     conversation_jsonl: bool
     tracking_max_files_per_directory: int
     auto_persist_response: bool
+    track_directories: bool = False  # write per-turn directory snapshots (default OFF)
 
 
 @dataclass(frozen=True)

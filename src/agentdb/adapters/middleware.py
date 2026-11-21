@@ -265,29 +265,35 @@ class AgentDBMiddleware(GatewayAdapter):
                         f.write(entry + "\n")
 
         normalized_snapshots = list(directory_snapshots or [])
-        effective_tracked_directories = (
-            tracked_directories
-            if tracked_directories is not None
-            else getattr(self._db, "tracking_directories", [])
-        )
-        effective_tracking_base_dir = (
-            tracking_base_dir
-            if tracking_base_dir is not None
-            else str(getattr(self._db, "tracking_root", "."))
-        )
-        effective_max_files = (
-            max_files_per_directory
-            if max_files_per_directory is not None
-            else int(getattr(self._db, "tracking_max_files_per_directory", 200))
-        )
-        if effective_tracked_directories:
-            normalized_snapshots.extend(
-                collect_directory_snapshots(
-                    effective_tracked_directories,
-                    base_dir=effective_tracking_base_dir,
-                    max_files_per_directory=effective_max_files,
-                )
+        # (spec §6) Directory snapshots are write-only operational breadcrumbs —
+        # not read by retrieval/ranking/consolidation. They are captured only
+        # when capture.track_directories is enabled (default OFF); explicit
+        # directory_snapshots the caller passes are still honoured.
+        _track_dirs = bool(self._resolved["capture"].get("track_directories", False))
+        if _track_dirs:
+            effective_tracked_directories = (
+                tracked_directories
+                if tracked_directories is not None
+                else getattr(self._db, "tracking_directories", [])
             )
+            effective_tracking_base_dir = (
+                tracking_base_dir
+                if tracking_base_dir is not None
+                else str(getattr(self._db, "tracking_root", "."))
+            )
+            effective_max_files = (
+                max_files_per_directory
+                if max_files_per_directory is not None
+                else int(getattr(self._db, "tracking_max_files_per_directory", 200))
+            )
+            if effective_tracked_directories:
+                normalized_snapshots.extend(
+                    collect_directory_snapshots(
+                        effective_tracked_directories,
+                        base_dir=effective_tracking_base_dir,
+                        max_files_per_directory=effective_max_files,
+                    )
+                )
         if normalized_snapshots:
             ts = _utcnow().strftime("%Y%m%dT%H%M%S%f")
             for idx, snapshot in enumerate(normalized_snapshots):

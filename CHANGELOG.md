@@ -50,6 +50,13 @@ policy in `RELEASING.md`.
   Previously these were hardcoded defaults; defaults are unchanged, so behavior
   is identical unless overridden. `enabled: false` disables auto-consolidation.
 
+### Changed — directory tracking is now opt-in (default OFF)
+- Per-turn `directory_tracking` snapshot capture (write-only, never read by
+  retrieval/ranking/consolidation) now requires `capture.track_directories: true`
+  in `memory.yaml`. The default is OFF, so integrators no longer accumulate
+  snapshot rows or the semantic conflicts they caused. Explicit
+  `directory_snapshots` passed to `finalize_turn` are still honoured.
+
 ## [0.6.0] — 2026-11-21
 
 Contextual correctness and final hardening: trustworthy, relevant, efficiently
