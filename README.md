@@ -12,6 +12,7 @@ The package currently provides:
 - **Provenance:** records are marked `human_approved`, `agent_inferred`, or `provider_ingested`; provider data is not promoted to human-approved data.
 - **Optional write authorization:** a YAML `PermissionRouter` can authorize writes and deletes. It is only active when `permissions_path` is supplied.
 - **Ranked retrieval:** provenance, recency, confidence, retrieval-frequency approximation, optional workspace overlap, and optional embedding similarity. Retrieval supports record limits and token budgets.
+- **Context applicability:** `retrieve(scope=...)` accepts optional `workspace_id`, `repository_id`, `environment`, `task_type`, and `as_of`. Explicit workspace/repository/environment mismatch is inapplicable; missing scope is unknown (not a match); exact scope is a deterministic tie-break that does not change ranking weights. `as_of` gates records outside their explicit validity window (`effective_from`/`effective_until`/`expiry_time`).
 - **Conflict and governance signals:** write-time conflicts, external-context overlap checks, a conflict queue, and a live in-process gateway dispatcher.
 - **Lifecycle:** outcomes and reinforcement, manual lifecycle sweeps, TTL/staleness archival, and memory consolidation. On conversation start, automatic consolidation requires at least seven days and ten sessions since the previous run.
 - **Runtime integration:** a generic `AgentDBBackend`, model-agnostic middleware, a Claude runtime wrapper, and a Hermes `MemoryProvider` adapter.
@@ -90,10 +91,10 @@ agents:
       - "memory/org/"
 ```
 
-Important current limits:
+Important behavior and limits:
 
-- Without `permissions_path`, the permission router is not active.
-- `read()` and `retrieve()` do not enforce `can_read`; do not treat that field as a read-access boundary.
+- Without `permissions_path` (default trusted mode), the permission router is not active — no read/write authorization is enforced and the host owns its security boundary.
+- With `permissions_path` (isolation mode), `read()`, `retrieve()`, and `retrieve_by_entities()` **enforce `can_read`**. Reads without a caller identity fail closed, and a derived canonical is disclosed only if **all** of its sources are readable. Authorization is evaluated independently of workspace/repository identity (those are applicability metadata, never credentials).
 - Agent-scoped retrieval is enabled for agents configured under `profile.agents` in `memory.yaml`; otherwise retrieval is not filtered by `agent_id`.
 - The router governs calls through the client API; direct access to internal storage is outside that control path.
 - The no-argument `AgentDB()` constructor uses a workspace (`AGENTDB_MEMORY_DIR` / `AGENTDB_HOME` / `agentdb-workspace/`) or SQLite `:memory:`. `AgentDB(path=":memory:")` uses a process-wide in-memory database (no file created); two in-memory instances in one process share it.
@@ -129,7 +130,9 @@ Embeddings can also be enabled with `AgentDB(local_embed=True)` or a custom `emb
 
 Retrieval returns `RetrievalResult` with records, conflicts, authority override instructions, a token estimate, a truncation flag, and an optional `trace` (pass `trace=True`) exposing candidate sources, exclusions, and per-candidate ranking evidence. Candidates are the **union of lexical and (optional) semantic matches**, ranked by the existing multi-signal ranker and packed within a rendered-token budget that skips oversized records rather than stopping. `retrieve_by_entities()` uses the same eligibility filters, ranking, and budget policy. Semantic matching requires embeddings; without them, retrieval uses the lexical path and the other non-semantic signals. Set `embeddings.semantic_candidates: false` to force lexical-only retrieval even when embeddings are configured.
 
-Consolidation produces a **derived `derived_canonical` record** with full source lineage; the original source records are never overwritten (only archived from default selection), and a canonical is invalidated when its sources change. Compaction summaries and checkpoints default to `agent_inferred` provenance — pass `origin="human_approved"` only for a verified human action.
+Consolidation produces a **derived `derived_canonical` record** with full source lineage; the original source records are never overwritten (only archived from default selection), and a canonical is invalidated when its sources change. Only equivalent or compatible-complementary values are merged — contradictory values (including negations and mutually-exclusive values) and scope-incompatible facts stay separate. `validate_canonicals()` reports invalid canonicals non-destructively. Concurrent/repeated consolidation is idempotent (a stable source fingerprint prevents duplicate active canonicals).
+
+Compaction summaries and checkpoints default to `agent_inferred` provenance. A bare `origin="human_approved"` is **asserted** (not verified) authority. **Verified** human authority requires a host-configured `authority_verifier` and an affirmative decision through `approve_authority()`; it is bound to a versioned content/scope fingerprint (edits invalidate it) and can be removed via `revoke_authority()` with an audit trail. AgentDB does not defend against a malicious host process with full code/DB access — the enforceable boundary is between ordinary agent APIs and the host-configured trusted approval pathway.
 
 ## Runtime integrations
 

@@ -4,39 +4,85 @@ All notable changes to AgentDB are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions follow the pre-1.0
 policy in `RELEASING.md`.
 
-## [Unreleased]
+## [0.6.0] — 2026-11-21
 
-### Fixed — retrieval determinism (contract §5D)
-- **`MultiSignalRanker` tie-break:** equal-composite-score records are now
-  ordered by record `id` instead of leaking candidate-arrival order. Previously,
-  tied records could return in a different order across runs or entry points
-  (dict/SQLite row iteration order), violating "stable ordering for identical
-  inputs". Ranking weights are unchanged — only the secondary sort key was added.
-  Backed by deterministic adversarial tests (`tests/unit/test_adversarial_retrieval.py`).
+Contextual correctness and final hardening: trustworthy, relevant, efficiently
+distilled context across tasks/workspaces, with verifiable authority boundaries,
+safe consolidation, and concurrent consistency. All schema changes are additive
+and idempotent; legacy records remain readable.
+
+### Added — context applicability & identity
+- Optional `scope=` on `retrieve()`/`retrieve_by_entities()`: `workspace_id`,
+  `repository_id`, `environment`, `task_type`, `as_of`. Explicit identity/scope
+  mismatch is inapplicable; missing scope is unknown (not a match); exact scope
+  is a deterministic tie-break that does **not** change ranking weights.
+- Host-supplied `workspace_id` / `repository_id` (independent, never credentials)
+  plus `write()` kwargs `environment`, `task_type`, `observed_at`,
+  `effective_from`, `effective_until`. Legacy `working_dirs` retained; basename is
+  only a soft hint that never overrides explicit identity.
+- Explicit temporal applicability: `scope={"as_of": t}` excludes records outside
+  their `effective_from`/`effective_until`/`expiry_time` window. `created_at` is
+  never substituted for `effective_from`.
+- `render_context(result)`: concise canonical rendering with optional Scope/
+  Evidence qualifiers and an explicit "Unresolved disagreement" block for
+  material conflicts.
+
+### Added — consolidation hardening (OD-1 / Workstream C)
+- Only **equivalent** or **compatible-complementary** values merge. Negation
+  ("required" vs "not required"), mutually-exclusive values (PostgreSQL 15 vs
+  16), and explicit scope conflicts never merge; unknown compatibility → no merge.
+- `validate_canonicals(agent_id)`: non-destructive maintenance reporting invalid
+  canonicals (source revised/missing, no lineage, now-incompatible source set).
+  Invalid canonicals are excluded from retrieval; sources remain reachable.
+
+### Fixed — concurrent consolidation (OD-6)
+- `consolidate()` is now transactional and idempotent: a stable canonical
+  fingerprint + a single `BEGIN IMMEDIATE` transaction + partial unique index
+  prevent duplicate active canonicals under concurrency. A failure rolls back, so
+  sources are never archived without a valid replacement canonical. The former
+  OD-6 expected-failure test now passes.
+
+### Fixed — retrieval determinism
+- `MultiSignalRanker` breaks equal-score ties by record `id` (was candidate-
+  arrival order). Ranking weights unchanged — secondary sort key only.
+
+### Changed — verified human authority (OD-2 / Workstream B) — SECURITY
+- A bare `origin="human_approved"` is now **asserted**, not verified, authority.
+  **Verified** authority requires a host-configured `authority_verifier` and an
+  affirmative decision via `approve_authority()`; it is bound to a versioned
+  content/scope fingerprint (edits invalidate it). `revoke_authority()` removes
+  it with an audit trail. `write(approval=...)` stores unverified metadata only.
+  Without a verifier, verified-authority requests fail closed.
+- Legacy `human_approved` records (and old value-digest approvals) are preserved
+  as **asserted**; never silently promoted. Promotion requires re-verification.
+
+### Changed — read authorization (OD-3) — SECURITY
+- With `permissions_path` (isolation mode), `read()`, `retrieve()`, and
+  `retrieve_by_entities()` enforce `can_read`; reads without identity fail
+  closed; a canonical is disclosed only if all its sources are readable. Default
+  trusted mode (no `permissions_path`) is unchanged.
 
 ### Changed — final skill-coupling removal
-- **`LifecycleManager.consolidate()`** no longer declares the dead,
-  skill-specific `skill_candidate_threshold` parameter. It reactivated nothing.
-- **`AgentDB.consolidate()`** still *accepts* `skill_candidate_threshold` for
-  backward compatibility, now emitting a `DeprecationWarning` and ignoring it,
-  so existing callers do not hard-fail. Removed in a future release.
-- Corrected stale `consolidate()` docstring (canonical is a NEW derived record;
-  sources are soft-archived, not overwritten).
+- `LifecycleManager.consolidate()` drops the dead skill-specific
+  `skill_candidate_threshold` parameter; `AgentDB.consolidate()` still accepts it
+  with a `DeprecationWarning` (ignored) for backward compatibility.
 
-### Added — adversarial correctness suite (offline, deterministic)
-- `tests/unit/test_adversarial_retrieval.py` (candidate discovery, eligibility,
-  ranking determinism, token budgets), `test_adversarial_canonical.py`
-  (D1–D10 canonical invariants; two documented `xfail` gaps: OD-1 cross-key
-  contradictory merge, OD-6 concurrent-consolidation duplication),
-  `test_provenance_regression.py` (trust boundary + in-memory lifecycle),
-  `test_migration_regression.py` (additive schema migration/rollback),
-  `test_skill_cleanup_compat.py` (no exported skill surface),
-  and reusable fixtures in `tests/fixtures/adversarial.py`.
+### Schema (additive, idempotent)
+- New nullable/defaulted `memories` columns: `environment`, `task_type`,
+  `workspace_id`, `repository_id`, `observed_at`, `effective_from`,
+  `effective_until`, `canonical_fingerprint`, `approval`. Best-effort partial
+  unique index `ux_memories_canonical_fp` (skipped if legacy duplicates exist).
 
-### Recommendation
-- Backward-compatible (bug fix + dead-param removal with shim) → **PATCH**
-  (`0.5.0` → `0.5.1`) per the pre-1.0 version policy. Final version to be set by
-  the release manager.
+### Tests
+- New deterministic, offline suites: adversarial retrieval/canonical (D1–D10),
+  OD-1 consolidation, OD-2 authority, OD-3 read isolation, OD-6 concurrency,
+  context relevance/rendering, temporal applicability, workspace identity,
+  30-scenario golden retrieval (Recall@5 = 1.0, mean nDCG@5 ≈ 0.87), and a
+  lineage-authorization benchmark. Full run: **614 passed, 4 skipped, 0 xfailed**.
+
+### Notes
+- No new runtime dependencies (SQLite + stdlib only). No knowledge graph, skills,
+  orchestration, or autonomous-memory framework introduced.
 
 ## [0.5.0] — 2026-11-20
 
