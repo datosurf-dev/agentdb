@@ -36,6 +36,7 @@ mcp = ["mcp>=1.0,<2.0"]
 local-embed = ["sentence-transformers>=2.7,<4.0"]
 notifications = ["slack-sdk>=3.0"]
 providers = ["anthropic>=0.20"]
+llm = ["openai>=1.0"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

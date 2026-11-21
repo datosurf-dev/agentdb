@@ -83,13 +83,30 @@ Example policy:
 default_policy: deny
 human_zone_prefixes:
   - "memory/org/"
+# All bots registered by default: any agent_id not listed under `agents:`
+# gets this scope. Remove it for strict deny-by-default.
+default_agent_scope:
+  can_write:
+    - "memory/working/"
+    - "memory/episodic/"
+  cannot_write:
+    - "memory/org/"
+  can_read:
+    - "memory/working/"
+    - "memory/episodic/"
 agents:
+  # Disable a specific bot (deny all its memory writes/reads):
+  retired_bot:
+    disabled: true
+  # An explicit entry overrides the default scope for one agent:
   assistant:
     can_write:
       - "memory/working/"
     cannot_write:
       - "memory/org/"
 ```
+
+`default_agent_scope` makes **all bot identities registered by default** — an unlisted `agent_id` is granted that scope, so a new bot works without a manual per-bot entry. Disable a bot with an explicit `agents: <id>: { disabled: true }`. Omit `default_agent_scope` for strict deny-by-default (every identity must be listed).
 
 Important behavior and limits:
 
@@ -131,6 +148,51 @@ Embeddings can also be enabled with `AgentDB(local_embed=True)` or a custom `emb
 Retrieval returns `RetrievalResult` with records, conflicts, authority override instructions, a token estimate, a truncation flag, and an optional `trace` (pass `trace=True`) exposing candidate sources, exclusions, and per-candidate ranking evidence. Candidates are the **union of lexical and (optional) semantic matches**, ranked by the existing multi-signal ranker and packed within a rendered-token budget that skips oversized records rather than stopping. `retrieve_by_entities()` uses the same eligibility filters, ranking, and budget policy. Semantic matching requires embeddings; without them, retrieval uses the lexical path and the other non-semantic signals. Set `embeddings.semantic_candidates: false` to force lexical-only retrieval even when embeddings are configured.
 
 Consolidation produces a **derived `derived_canonical` record** with full source lineage; the original source records are never overwritten (only archived from default selection), and a canonical is invalidated when its sources change. Only equivalent or compatible-complementary values are merged — contradictory values (including negations and mutually-exclusive values) and scope-incompatible facts stay separate. `validate_canonicals()` reports invalid canonicals non-destructively. Concurrent/repeated consolidation is idempotent (a stable source fingerprint prevents duplicate active canonicals).
+
+### Consolidation synthesis (`llm_fn`)
+
+By default consolidation is **dedup-only** (`cluster_copy`): the canonical value
+is a verbatim copy of the highest-confidence source in a cluster. To synthesize a
+new summary instead (`cluster_synthesis`), pass an `llm_fn` to `consolidate()` /
+`end_session(run_consolidation=True, ...)`:
+
+```python
+db.consolidate(agent_id="my-agent", llm_fn=my_llm_fn)
+```
+
+- **Signature:** `llm_fn(prompt: str) -> str` — receives one synthesis prompt,
+  returns the synthesized text. It is a **plain callable / API argument only**
+  (not settable in `memory.yaml`).
+- **Optional:** when `llm_fn` is `None`, consolidation still runs and produces
+  `cluster_copy` (verbatim copy of the top source), **not** a synthesized
+  summary. Model-call errors are caught and fall back to `cluster_copy`.
+- **Helper (recommended):** instead of hand-rolling the chat-completions call,
+  use `build_llm_fn`, which constructs an OpenAI-compatible client from a model
+  id + connection params and returns a ready `llm_fn`:
+
+  ```python
+  from agentdb.providers.consolidation import build_llm_fn
+
+  llm_fn = build_llm_fn(
+      model="meta-llama/Meta-Llama-3.1-8B-Instruct",
+      base_url="https://api.deepinfra.com/v1/openai",
+      api_key="...",              # placeholder ok for local servers
+      # max_tokens=..., temperature=..., timeout=...  (all optional)
+  )
+  db.consolidate(agent_id="my-agent", llm_fn=llm_fn)
+  ```
+
+  `build_llm_fn` needs the `openai` package: install it with
+  `pip install 'agentdatabase[llm]'`.
+- **Structured know-how:** when `llm_fn` is supplied, the package asks the model
+  for a JSON object — `{"know_how", "workspace_id", "repository_id",
+  "task_type", "environment", "confidence"}` — so the canonical is reusable,
+  workspace-scoped know-how (not a session narrative) and carries metadata used
+  for scoped retrieval. A plain-text answer is still accepted (treated as
+  `know_how`). Metadata the model omits is inherited from the top source. After
+  consolidation, retrieval returns the distilled canonical in place of its
+  archived raw sources (raw is re-surfaced only when it holds a query detail the
+  canonical dropped).
 
 Compaction summaries and checkpoints default to `agent_inferred` provenance. A bare `origin="human_approved"` is **asserted** (not verified) authority. **Verified** human authority requires a host-configured `authority_verifier` and an affirmative decision through `approve_authority()`; it is bound to a versioned content/scope fingerprint (edits invalidate it) and can be removed via `revoke_authority()` with an audit trail. AgentDB does not defend against a malicious host process with full code/DB access — the enforceable boundary is between ordinary agent APIs and the host-configured trusted approval pathway.
 

@@ -206,7 +206,7 @@ class ConfigurationError(Exception):
     silently substituted for a default."""
 
 
-_OVERRIDE_SECTIONS = ("retrieval", "injection", "lifecycle", "capture")
+_OVERRIDE_SECTIONS = ("retrieval", "injection", "lifecycle", "capture", "consolidation")
 
 
 def _builtin_profile_dict(name: str) -> dict:
@@ -401,8 +401,17 @@ class AgentDB:
         self.memory_config: dict = {}
 
         if resolved_memory_dir is not None:
-            # Create workspace layout
-            for subdir in ("config", "database", "conversations", "embeddings", "reconciliation", "logs"):
+            # Create workspace layout. ``config/`` and ``database/`` are needed
+            # immediately (config file + SQLite). The other dirs are created
+            # lazily by their writers, so we only pre-create them when
+            # ``workspace.eager_dirs`` is enabled. This avoids leaving empty
+            # ``logs/`` / ``embeddings/`` / ``reconciliation/`` / ``conversations/``
+            # dirs in every integrator's memory dir. (§5)
+            eager = self._workspace_eager_dirs()
+            subdirs = ["config", "database"]
+            if eager:
+                subdirs += ["conversations", "embeddings", "reconciliation", "logs"]
+            for subdir in subdirs:
                 (resolved_memory_dir / subdir).mkdir(parents=True, exist_ok=True)
 
             config_path = resolved_memory_dir / "config" / "memory.yaml"
@@ -555,6 +564,34 @@ class AgentDB:
         # Notifications — wired last so all gateway subscribers are already registered
         self._setup_notifications()
 
+    @staticmethod
+    def _workspace_eager_dirs() -> bool:
+        """Whether to pre-create the optional workspace subdirs at init (§5).
+
+        Default: False (lazy) — only ``config/`` and ``database/`` are created
+        eagerly; ``conversations/``, ``embeddings/``, ``reconciliation/`` and
+        ``logs/`` are created on first use by their writers. Set
+        ``workspace.eager_dirs: true`` in memory.yaml (or env
+        ``AGENTDB_WORKSPACE_EAGER_DIRS=true``) to restore eager creation.
+        Read from the raw memory.yaml via AGENTDB_MEMORY_DIR, independent of the
+        already-parsed config (this runs before memory_config is parsed).
+        """
+        env = os.environ.get("AGENTDB_WORKSPACE_EAGER_DIRS")
+        if env is not None:
+            return env.strip().lower() in ("true", "1", "yes", "on")
+        try:
+            md = os.environ.get("AGENTDB_MEMORY_DIR") or os.environ.get("AGENTDB_HOME")
+            if md:
+                cfg = Path(md) / "config" / "memory.yaml"
+                if cfg.exists():
+                    data = yaml.safe_load(cfg.read_text(encoding="utf-8")) or {}
+                    ws = data.get("workspace", {}) if isinstance(data, dict) else {}
+                    if isinstance(ws, dict):
+                        return bool(ws.get("eager_dirs", False))
+        except Exception:
+            pass
+        return False
+
     def _setup_notifications(self) -> None:
         """Build and attach NotificationDispatcher from memory.yaml notifications: block."""
         cfg = (self.memory_config or {}).get("notifications")
@@ -650,12 +687,23 @@ class AgentDB:
             profile.repos.add(repo)
         profile.request_types.add(rt)
         self._session_profiles[session_id] = profile
-        # Auto-consolidation: increment session count; trigger if threshold reached
+        # Auto-consolidation: increment session count; trigger if threshold reached.
+        # Thresholds come from profile.consolidation (spec §3).
         if agent_id:
             try:
-                self.lifecycle._increment_session_count(agent_id)
-                if self.lifecycle._should_auto_consolidate(agent_id):
-                    self.consolidate(agent_id, since_hours=0)
+                cfg = self.config_for(agent_id).get("consolidation", {})
+                if cfg.get("enabled", True):
+                    self.lifecycle._increment_session_count(agent_id)
+                    if self.lifecycle._should_auto_consolidate(
+                        agent_id,
+                        days=int(cfg.get("days", 7)),
+                        min_sessions=int(cfg.get("min_sessions", 10)),
+                    ):
+                        self.consolidate(
+                            agent_id,
+                            since_hours=0,
+                            min_cluster_size=int(cfg.get("min_cluster_size", 2)),
+                        )
             except Exception:
                 pass
 
@@ -1420,6 +1468,11 @@ class AgentDB:
                 DeprecationWarning,
                 stacklevel=2,
             )
+        # Fill consolidation thresholds from profile.consolidation when the
+        # caller didn't pass them explicitly (spec §3).
+        cfg = self.config_for(agent_id).get("consolidation", {})
+        kwargs.setdefault("since_hours", int(cfg.get("since_hours", 24)))
+        kwargs.setdefault("min_cluster_size", int(cfg.get("min_cluster_size", 2)))
         result = self.lifecycle.consolidate(
             agent_id, gateway=self.gateway, llm_fn=llm_fn, **kwargs
         )
@@ -1465,7 +1518,11 @@ class AgentDB:
         return report
 
     def checkpoint(
-        self, agent_id: str, session_id: str, origin: str = "agent_inferred"
+        self,
+        agent_id: str,
+        session_id: str,
+        origin: str = "agent_inferred",
+        working_dirs: Optional[list[str]] = None,
     ) -> None:
         """Write a compaction checkpoint record that survives lifecycle sweeps.
 
@@ -1478,6 +1535,10 @@ class AgentDB:
         ``human_approved`` unless a verified human action explicitly passes
         ``origin="human_approved"``. Agent-originated checkpoints therefore
         remain subject to normal lifecycle decay/archival.
+
+        ``working_dirs`` (CONTEXTUAL-SPEC §7): the session's working directories,
+        forwarded to the record so checkpoints are workspace-scoped rather than
+        always empty.
         """
         self.write(
             key=f"memory/compaction/checkpoint/{session_id}",
@@ -1486,10 +1547,16 @@ class AgentDB:
             agent_id=agent_id,
             session_id=session_id,
             confidence=1.0,
+            working_dirs=working_dirs,
         )
 
     def write_compaction_summary(
-        self, agent_id: str, session_id: str, summary: str, origin: str = "agent_inferred"
+        self,
+        agent_id: str,
+        session_id: str,
+        summary: str,
+        origin: str = "agent_inferred",
+        working_dirs: Optional[list[str]] = None,
     ) -> None:
         """Write a compaction summary so agents survive context truncation.
 
@@ -1501,6 +1568,9 @@ class AgentDB:
         ``human_approved`` implicitly. Only a verified human action may pass
         ``origin="human_approved"`` explicitly. This prevents untrusted
         agent input from being laundered into human authority.
+
+        ``working_dirs`` (CONTEXTUAL-SPEC §7): forwarded to the record so
+        compaction summaries carry the session's workspace scope.
         """
         self.write(
             key=f"memory/compaction/summary/{session_id}",
@@ -1509,6 +1579,7 @@ class AgentDB:
             agent_id=agent_id,
             session_id=session_id,
             confidence=1.0,
+            working_dirs=working_dirs,
         )
 
     # ------------------------------------------------------------------

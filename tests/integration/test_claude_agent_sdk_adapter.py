@@ -362,7 +362,20 @@ def test_finalize_turn_persists_explicit_memory_writes(tmp_path):
 
 
 def test_finalize_turn_persists_directory_tracking_with_message_link(tmp_path):
-    db = AgentDB(path=tmp_path / "test.db", permissions_path=PERMS)
+    # §6: directory snapshots are opt-in (capture.track_directories: true).
+    workspace_root = tmp_path / "memory-home"
+    config_dir = workspace_root / "config"
+    config_dir.mkdir(parents=True)
+    (config_dir / "memory.yaml").write_text(
+        "\n".join([
+            "profile:",
+            "  name: budget_optimized",
+            "  capture:",
+            "    track_directories: true",
+        ]),
+        encoding="utf-8",
+    )
+    db = AgentDB(memory_dir=workspace_root, permissions_path=PERMS)
     middleware = AgentDBClaudeMiddleware(db=db, agent_id="research_agent")
     tracked_dir = tmp_path / "skills"
     tracked_dir.mkdir()
@@ -391,8 +404,22 @@ def test_finalize_turn_uses_agentdb_default_tracking_directories(tmp_path):
     tracked_dir = tmp_path / "skills"
     tracked_dir.mkdir()
     (tracked_dir / "skill.md").write_text("skill", encoding="utf-8")
+    # §6: snapshots are opt-in; enable capture in the memory dir.
+    workspace_root = tmp_path / "memory-home"
+    config_dir = workspace_root / "config"
+    config_dir.mkdir(parents=True)
+    (config_dir / "memory.yaml").write_text(
+        "\n".join([
+            "profile:",
+            "  name: budget_optimized",
+            "  capture:",
+            "    track_directories: true",
+            "    tracking_max_files_per_directory: 50",
+        ]),
+        encoding="utf-8",
+    )
     db = AgentDB(
-        path=tmp_path / "test.db",
+        memory_dir=workspace_root,
         permissions_path=PERMS,
         tracking_directories=["skills"],
         tracking_root=tmp_path,

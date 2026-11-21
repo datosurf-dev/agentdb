@@ -4,6 +4,75 @@ All notable changes to AgentDB are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions follow the pre-1.0
 policy in `RELEASING.md`.
 
+## [Unreleased]
+
+### Fixed — consolidation auto-trigger
+- `AgentDBMiddleware.prepare_turn` and the Hermes adapter now include `agent_id`
+  in the `conversation_started` dispatch. Previously only `session_id` was
+  passed, so `_handle_conversation_started_metadata` saw `agent_id=None`, skipped
+  `_increment_session_count`, and the per-agent session counter in
+  `consolidation_state` never advanced — automatic consolidation could never
+  fire. Per-agent scoping is unchanged (the counter still keys on `agent_id`).
+
+> **Integrators patching around this bug:** `_increment_session_count` is a blind
+> `+1` with no idempotency guard. If you manually incremented the session counter
+> to compensate, remove that workaround (and version-gate it if you must support
+> both) or the counter will advance twice per session once you upgrade.
+
+### Added — consolidation synthesis helper
+- `agentdb.providers.consolidation.build_llm_fn(model, *, base_url, api_key,
+  max_tokens, temperature, timeout)` builds the `llm_fn(prompt)->str` callable
+  `consolidate()` expects, so integrators supply only a model + connection params.
+  Requires the new `[llm]` extra (`openai`).
+
+### Fixed — workspace (`working_dirs`) population
+- `AgentDB.checkpoint()` and `write_compaction_summary()` now accept a
+  `working_dirs` argument and forward it to the record (previously always empty),
+  so compaction checkpoints/summaries carry the session's workspace scope.
+- `AgentDBMiddleware.finalize_turn` / `finalize_turn_async` / `end_session`
+  accept an explicit `working_dirs`; a new `_resolve_working_dirs()` prefers the
+  explicit list (and remembers it for the session) and falls back to the dirs
+  captured by `prepare_turn`. `end_session` forwards dirs to the checkpoint.
+  This restores the workspace linkage that retrieval ranking (`weight_workspace`)
+  and consolidation scoping depend on.
+
+### Changed — lazy workspace directory creation
+- `AgentDB.__init__` now creates only `config/` and `database/` eagerly; the
+  optional `conversations/`, `embeddings/`, `reconciliation/`, `logs/` dirs are
+  created on first use by their writers. Opt back into eager creation with
+  `workspace.eager_dirs: true` (memory.yaml) or `AGENTDB_WORKSPACE_EAGER_DIRS=true`.
+  Reduces empty-dir clutter in every integrator's memory dir; existing
+  workspaces are unaffected.
+
+### Added — configurable consolidation thresholds
+- New `profile.consolidation` section in `memory.yaml`: `enabled` (default true),
+  `min_sessions` (10), `days` (7), `min_cluster_size` (2), `since_hours` (24).
+  Previously these were hardcoded defaults; defaults are unchanged, so behavior
+  is identical unless overridden. `enabled: false` disables auto-consolidation.
+
+### Changed — directory tracking is now opt-in (default OFF)
+- Per-turn `directory_tracking` snapshot capture (write-only, never read by
+  retrieval/ranking/consolidation) now requires `capture.track_directories: true`
+  in `memory.yaml`. The default is OFF, so integrators no longer accumulate
+  snapshot rows or the semantic conflicts they caused. Explicit
+  `directory_snapshots` passed to `finalize_turn` are still honoured.
+
+### Changed — distillation produces scoped know-how (structured synthesis)
+- With `llm_fn`, consolidation now prompts for a structured JSON object
+  (`know_how`, `workspace_id`, `repository_id`, `task_type`, `environment`,
+  `confidence`) so canonicals are reusable, workspace-scoped know-how rather than
+  a session narrative. The canonical carries those metadata fields for scoped
+  retrieval (falling back to the top source's scope when omitted); plain-text
+  answers still work. Distilled canonicals are returned in place of their
+  archived raw sources by default.
+
+### Changed — all bots registered by default (`default_agent_scope`)
+- New top-level `default_agent_scope:` in `permissions.yaml`: any `agent_id` not
+  listed under `agents:` is granted that scope, so a new bot identity works
+  without a manual per-bot entry. Disable a specific bot with
+  `agents: <id>: { disabled: true }`. Omit `default_agent_scope` to keep strict
+  deny-by-default. Backward compatible — existing strict configs are unchanged.
+
 ## [0.6.0] — 2026-11-21
 
 Contextual correctness and final hardening: trustworthy, relevant, efficiently

@@ -80,7 +80,9 @@ class AgentDBHermesProvider(MemoryProvider, GatewayAdapter):
         """Store session_id, wire conflict handler, dispatch conversation_started."""
         self._session_id = session_id
         self.gateway.subscribe("conflict_detected", self._on_conflict)
-        self.gateway.dispatch("conversation_started", session_id=session_id)
+        self.gateway.dispatch(
+            "conversation_started", session_id=session_id, agent_id=self._agent_id
+        )
 
     def prefetch(self, query: str, *, session_id: str) -> list:
         """Return governed records ranked for this query. [12a]"""
@@ -103,6 +105,7 @@ class AgentDBHermesProvider(MemoryProvider, GatewayAdapter):
         self.gateway.dispatch(
             "conversation_started",
             session_id=self._session_id,
+            agent_id=self._agent_id,
             turn=turn,
         )
 

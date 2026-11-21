@@ -28,6 +28,17 @@ class PermissionRouter:
         default_policy: deny
         human_zone_prefixes:
           - "memory/org/"
+        # Optional: scope granted to ANY agent_id not listed under agents:.
+        # When present, "all bots are registered by default" — an unlisted
+        # identity gets this scope. Omit it for strict deny-by-default.
+        default_agent_scope:
+          can_write:
+            - "memory/working/"
+            - "memory/episodic/"
+          cannot_write:
+            - "memory/org/"
+          can_read:
+            - "memory/working/"
         agents:
           agent_id:
             can_write:
@@ -36,6 +47,9 @@ class PermissionRouter:
               - "memory/org/"
             can_read:
               - "memory/working/"
+          # Opt a bot OUT of the default scope (deny everything for it):
+          some_bot:
+            disabled: true
     """
 
     def __init__(self, permissions_path: Any) -> None:
@@ -45,7 +59,30 @@ class PermissionRouter:
 
         self._default_policy: str = self._config.get("default_policy", "deny")
         self._human_zone_prefixes: list[str] = self._config.get("human_zone_prefixes", [])
-        self._agents: dict = self._config.get("agents", {})
+        self._agents: dict = self._config.get("agents", {}) or {}
+        # §4: default scope for agents not otherwise listed. When set, unlisted
+        # bot identities are treated as registered (granted this scope).
+        self._default_agent_scope: dict = self._config.get("default_agent_scope") or {}
+
+    def _resolve_agent(self, agent_id: str) -> tuple[dict, bool]:
+        """Resolve an agent's effective config and whether it is allowed at all.
+
+        Returns ``(config, allowed)``:
+        - Explicit ``agents: <id>:`` entry → that config; ``allowed`` is False
+          only if the entry sets ``disabled: true``.
+        - Not listed, but a ``default_agent_scope:`` exists → the default scope
+          (all bots registered by default); ``allowed`` True.
+        - Not listed, no default scope → ``({}, True)``; normal default_policy
+          applies (backward compatible strict behavior).
+        """
+        if agent_id in self._agents:
+            entry = self._agents.get(agent_id) or {}
+            if entry.get("disabled") is True:
+                return (entry, False)
+            return (entry, True)
+        if self._default_agent_scope:
+            return (self._default_agent_scope, True)
+        return ({}, True)
 
     def _matches_any(self, key: str, patterns: list[str]) -> bool:
         for pattern in patterns:
@@ -80,7 +117,12 @@ class PermissionRouter:
                 f"with trust_zone '{trust_zone}'"
             )
 
-        agent_config = self._agents.get(agent_id, {})
+        agent_config, allowed = self._resolve_agent(agent_id)
+        if not allowed:
+            raise PermissionDenied(
+                f"Agent '{agent_id}' is disabled in the permissions policy "
+                f"and cannot write '{key}'"
+            )
 
         # Check cannot_write first
         cannot_write = agent_config.get("cannot_write", [])
@@ -109,16 +151,24 @@ class PermissionRouter:
     def unconfigured_agents(self, agent_ids: list[str]) -> list[str]:
         """Return the subset of agent_ids that have no entry in this config.
 
-        Useful for pre-flight checks at startup: call with all known bot
-        identities and warn/fail if any are returned.
+        With a ``default_agent_scope`` set, unlisted agents are considered
+        configured (all bots registered by default), so this returns [].
+        Without it, returns ids not present under ``agents:``.
         """
+        if self._default_agent_scope:
+            return []
         return [a for a in agent_ids if a not in self._agents]
 
     def check_read(self, key: str, agent_id: str) -> None:
         """
         Raises PermissionDenied if the agent is not allowed to read the key.
         """
-        agent_config = self._agents.get(agent_id, {})
+        agent_config, allowed = self._resolve_agent(agent_id)
+        if not allowed:
+            raise PermissionDenied(
+                f"Agent '{agent_id}' is disabled in the permissions policy "
+                f"and cannot read '{key}'"
+            )
 
         can_read = agent_config.get("can_read", [])
         if self._matches_any(key, can_read):

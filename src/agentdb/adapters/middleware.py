@@ -108,6 +108,22 @@ class AgentDBMiddleware(GatewayAdapter):
         self._capabilities = capabilities
         self.gateway.subscribe("conflict_detected", self._on_conflict)
 
+    def _resolve_working_dirs(
+        self, session_id: str, explicit: Optional[list[str]] = None
+    ) -> Optional[list[str]]:
+        """Return the session's working dirs for a write.
+
+        Prefers an explicitly supplied list (realpath-normalised, and also
+        remembered for the session so later writes reuse it), else the dirs
+        captured earlier by ``prepare_turn``. Returns ``None`` only when the
+        session genuinely has no known working dirs. (CONTEXTUAL-SPEC §7)
+        """
+        if explicit:
+            resolved = [os.path.realpath(d) for d in explicit]
+            self._session_working_dirs[session_id] = resolved
+            return resolved
+        return self._session_working_dirs.get(session_id)
+
     def prepare_turn(
         self,
         *,
@@ -133,7 +149,9 @@ class AgentDBMiddleware(GatewayAdapter):
                 session_id=session_id,
                 user_query=user_query,
             )
-        self.gateway.dispatch("conversation_started", session_id=session_id)
+        self.gateway.dispatch(
+            "conversation_started", session_id=session_id, agent_id=self._agent_id
+        )
 
         retrieval = self._db.retrieve(
             query=user_query,
@@ -185,11 +203,18 @@ class AgentDBMiddleware(GatewayAdapter):
         outcome_value: Optional[float] = None,
         touched_entities: Optional[list[str]] = None,
         user_query: Optional[str] = None,
+        working_dirs: Optional[list[str]] = None,
     ) -> None:
         """
         Post-response hook: persist memory updates and optional outcome signal.
+
+        ``working_dirs`` (CONTEXTUAL-SPEC §7): explicit session working dirs. When
+        omitted, falls back to the dirs remembered from ``prepare_turn``. Passing
+        it explicitly makes persisted records workspace-scoped even when
+        ``finalize_turn`` runs without a preceding ``prepare_turn`` in this
+        process/session (e.g. after a restart, or from a separate persist path).
         """
-        session_dirs = self._session_working_dirs.get(session_id)
+        session_dirs = self._resolve_working_dirs(session_id, working_dirs)
 
         explicit_writes = list(memory_writes or [])
         for item in explicit_writes:
@@ -240,29 +265,35 @@ class AgentDBMiddleware(GatewayAdapter):
                         f.write(entry + "\n")
 
         normalized_snapshots = list(directory_snapshots or [])
-        effective_tracked_directories = (
-            tracked_directories
-            if tracked_directories is not None
-            else getattr(self._db, "tracking_directories", [])
-        )
-        effective_tracking_base_dir = (
-            tracking_base_dir
-            if tracking_base_dir is not None
-            else str(getattr(self._db, "tracking_root", "."))
-        )
-        effective_max_files = (
-            max_files_per_directory
-            if max_files_per_directory is not None
-            else int(getattr(self._db, "tracking_max_files_per_directory", 200))
-        )
-        if effective_tracked_directories:
-            normalized_snapshots.extend(
-                collect_directory_snapshots(
-                    effective_tracked_directories,
-                    base_dir=effective_tracking_base_dir,
-                    max_files_per_directory=effective_max_files,
-                )
+        # (spec §6) Directory snapshots are write-only operational breadcrumbs —
+        # not read by retrieval/ranking/consolidation. They are captured only
+        # when capture.track_directories is enabled (default OFF); explicit
+        # directory_snapshots the caller passes are still honoured.
+        _track_dirs = bool(self._resolved["capture"].get("track_directories", False))
+        if _track_dirs:
+            effective_tracked_directories = (
+                tracked_directories
+                if tracked_directories is not None
+                else getattr(self._db, "tracking_directories", [])
             )
+            effective_tracking_base_dir = (
+                tracking_base_dir
+                if tracking_base_dir is not None
+                else str(getattr(self._db, "tracking_root", "."))
+            )
+            effective_max_files = (
+                max_files_per_directory
+                if max_files_per_directory is not None
+                else int(getattr(self._db, "tracking_max_files_per_directory", 200))
+            )
+            if effective_tracked_directories:
+                normalized_snapshots.extend(
+                    collect_directory_snapshots(
+                        effective_tracked_directories,
+                        base_dir=effective_tracking_base_dir,
+                        max_files_per_directory=effective_max_files,
+                    )
+                )
         if normalized_snapshots:
             ts = _utcnow().strftime("%Y%m%dT%H%M%S%f")
             for idx, snapshot in enumerate(normalized_snapshots):
@@ -491,6 +522,7 @@ class AgentDBMiddleware(GatewayAdapter):
         outcome_value: Optional[float] = None,
         touched_entities: Optional[list[str]] = None,
         user_query: Optional[str] = None,
+        working_dirs: Optional[list[str]] = None,
     ) -> None:
         self.finalize_turn(
             session_id=session_id,
@@ -505,6 +537,7 @@ class AgentDBMiddleware(GatewayAdapter):
             outcome_value=outcome_value,
             touched_entities=touched_entities,
             user_query=user_query,
+            working_dirs=working_dirs,
         )
 
     async def run_turn_async(
@@ -851,11 +884,19 @@ class AgentDBMiddleware(GatewayAdapter):
         summary: Optional[dict] = None,
         run_consolidation: bool = False,
         llm_fn: Optional[Callable] = None,
+        working_dirs: Optional[list[str]] = None,
     ) -> None:
         """
         Finalize a session: checkpoint, optionally consolidate, write summary, clear state.
+
+        ``working_dirs`` (CONTEXTUAL-SPEC §7): explicit session working dirs for
+        the checkpoint record; falls back to those remembered from ``prepare_turn``.
         """
-        self._db.checkpoint(agent_id=self._agent_id, session_id=session_id)
+        self._db.checkpoint(
+            agent_id=self._agent_id,
+            session_id=session_id,
+            working_dirs=self._resolve_working_dirs(session_id, working_dirs),
+        )
         if run_consolidation:
             self._db.consolidate(agent_id=self._agent_id, llm_fn=llm_fn)
         self.write_session_summary(session_id, jsonl_path)
