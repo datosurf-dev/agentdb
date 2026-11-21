@@ -66,6 +66,13 @@ policy in `RELEASING.md`.
   answers still work. Distilled canonicals are returned in place of their
   archived raw sources by default.
 
+### Changed — all bots registered by default (`default_agent_scope`)
+- New top-level `default_agent_scope:` in `permissions.yaml`: any `agent_id` not
+  listed under `agents:` is granted that scope, so a new bot identity works
+  without a manual per-bot entry. Disable a specific bot with
+  `agents: <id>: { disabled: true }`. Omit `default_agent_scope` to keep strict
+  deny-by-default. Backward compatible — existing strict configs are unchanged.
+
 ## [0.6.0] — 2026-11-21
 
 Contextual correctness and final hardening: trustworthy, relevant, efficiently

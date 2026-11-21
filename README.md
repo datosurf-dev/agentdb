@@ -83,13 +83,30 @@ Example policy:
 default_policy: deny
 human_zone_prefixes:
   - "memory/org/"
+# All bots registered by default: any agent_id not listed under `agents:`
+# gets this scope. Remove it for strict deny-by-default.
+default_agent_scope:
+  can_write:
+    - "memory/working/"
+    - "memory/episodic/"
+  cannot_write:
+    - "memory/org/"
+  can_read:
+    - "memory/working/"
+    - "memory/episodic/"
 agents:
+  # Disable a specific bot (deny all its memory writes/reads):
+  retired_bot:
+    disabled: true
+  # An explicit entry overrides the default scope for one agent:
   assistant:
     can_write:
       - "memory/working/"
     cannot_write:
       - "memory/org/"
 ```
+
+`default_agent_scope` makes **all bot identities registered by default** — an unlisted `agent_id` is granted that scope, so a new bot works without a manual per-bot entry. Disable a bot with an explicit `agents: <id>: { disabled: true }`. Omit `default_agent_scope` for strict deny-by-default (every identity must be listed).
 
 Important behavior and limits:
 
