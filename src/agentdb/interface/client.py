@@ -1465,7 +1465,11 @@ class AgentDB:
         return report
 
     def checkpoint(
-        self, agent_id: str, session_id: str, origin: str = "agent_inferred"
+        self,
+        agent_id: str,
+        session_id: str,
+        origin: str = "agent_inferred",
+        working_dirs: Optional[list[str]] = None,
     ) -> None:
         """Write a compaction checkpoint record that survives lifecycle sweeps.
 
@@ -1478,6 +1482,10 @@ class AgentDB:
         ``human_approved`` unless a verified human action explicitly passes
         ``origin="human_approved"``. Agent-originated checkpoints therefore
         remain subject to normal lifecycle decay/archival.
+
+        ``working_dirs`` (CONTEXTUAL-SPEC §7): the session's working directories,
+        forwarded to the record so checkpoints are workspace-scoped rather than
+        always empty.
         """
         self.write(
             key=f"memory/compaction/checkpoint/{session_id}",
@@ -1486,10 +1494,16 @@ class AgentDB:
             agent_id=agent_id,
             session_id=session_id,
             confidence=1.0,
+            working_dirs=working_dirs,
         )
 
     def write_compaction_summary(
-        self, agent_id: str, session_id: str, summary: str, origin: str = "agent_inferred"
+        self,
+        agent_id: str,
+        session_id: str,
+        summary: str,
+        origin: str = "agent_inferred",
+        working_dirs: Optional[list[str]] = None,
     ) -> None:
         """Write a compaction summary so agents survive context truncation.
 
@@ -1501,6 +1515,9 @@ class AgentDB:
         ``human_approved`` implicitly. Only a verified human action may pass
         ``origin="human_approved"`` explicitly. This prevents untrusted
         agent input from being laundered into human authority.
+
+        ``working_dirs`` (CONTEXTUAL-SPEC §7): forwarded to the record so
+        compaction summaries carry the session's workspace scope.
         """
         self.write(
             key=f"memory/compaction/summary/{session_id}",
@@ -1509,6 +1526,7 @@ class AgentDB:
             agent_id=agent_id,
             session_id=session_id,
             confidence=1.0,
+            working_dirs=working_dirs,
         )
 
     # ------------------------------------------------------------------

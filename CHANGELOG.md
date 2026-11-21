@@ -25,6 +25,17 @@ policy in `RELEASING.md`.
   `consolidate()` expects, so integrators supply only a model + connection params.
   Requires the new `[llm]` extra (`openai`).
 
+### Fixed — workspace (`working_dirs`) population
+- `AgentDB.checkpoint()` and `write_compaction_summary()` now accept a
+  `working_dirs` argument and forward it to the record (previously always empty),
+  so compaction checkpoints/summaries carry the session's workspace scope.
+- `AgentDBMiddleware.finalize_turn` / `finalize_turn_async` / `end_session`
+  accept an explicit `working_dirs`; a new `_resolve_working_dirs()` prefers the
+  explicit list (and remembers it for the session) and falls back to the dirs
+  captured by `prepare_turn`. `end_session` forwards dirs to the checkpoint.
+  This restores the workspace linkage that retrieval ranking (`weight_workspace`)
+  and consolidation scoping depend on.
+
 ## [0.6.0] — 2026-11-21
 
 Contextual correctness and final hardening: trustworthy, relevant, efficiently

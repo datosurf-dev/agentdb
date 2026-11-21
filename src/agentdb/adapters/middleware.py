@@ -108,6 +108,22 @@ class AgentDBMiddleware(GatewayAdapter):
         self._capabilities = capabilities
         self.gateway.subscribe("conflict_detected", self._on_conflict)
 
+    def _resolve_working_dirs(
+        self, session_id: str, explicit: Optional[list[str]] = None
+    ) -> Optional[list[str]]:
+        """Return the session's working dirs for a write.
+
+        Prefers an explicitly supplied list (realpath-normalised, and also
+        remembered for the session so later writes reuse it), else the dirs
+        captured earlier by ``prepare_turn``. Returns ``None`` only when the
+        session genuinely has no known working dirs. (CONTEXTUAL-SPEC §7)
+        """
+        if explicit:
+            resolved = [os.path.realpath(d) for d in explicit]
+            self._session_working_dirs[session_id] = resolved
+            return resolved
+        return self._session_working_dirs.get(session_id)
+
     def prepare_turn(
         self,
         *,
@@ -187,11 +203,18 @@ class AgentDBMiddleware(GatewayAdapter):
         outcome_value: Optional[float] = None,
         touched_entities: Optional[list[str]] = None,
         user_query: Optional[str] = None,
+        working_dirs: Optional[list[str]] = None,
     ) -> None:
         """
         Post-response hook: persist memory updates and optional outcome signal.
+
+        ``working_dirs`` (CONTEXTUAL-SPEC §7): explicit session working dirs. When
+        omitted, falls back to the dirs remembered from ``prepare_turn``. Passing
+        it explicitly makes persisted records workspace-scoped even when
+        ``finalize_turn`` runs without a preceding ``prepare_turn`` in this
+        process/session (e.g. after a restart, or from a separate persist path).
         """
-        session_dirs = self._session_working_dirs.get(session_id)
+        session_dirs = self._resolve_working_dirs(session_id, working_dirs)
 
         explicit_writes = list(memory_writes or [])
         for item in explicit_writes:
@@ -493,6 +516,7 @@ class AgentDBMiddleware(GatewayAdapter):
         outcome_value: Optional[float] = None,
         touched_entities: Optional[list[str]] = None,
         user_query: Optional[str] = None,
+        working_dirs: Optional[list[str]] = None,
     ) -> None:
         self.finalize_turn(
             session_id=session_id,
@@ -507,6 +531,7 @@ class AgentDBMiddleware(GatewayAdapter):
             outcome_value=outcome_value,
             touched_entities=touched_entities,
             user_query=user_query,
+            working_dirs=working_dirs,
         )
 
     async def run_turn_async(
@@ -853,11 +878,19 @@ class AgentDBMiddleware(GatewayAdapter):
         summary: Optional[dict] = None,
         run_consolidation: bool = False,
         llm_fn: Optional[Callable] = None,
+        working_dirs: Optional[list[str]] = None,
     ) -> None:
         """
         Finalize a session: checkpoint, optionally consolidate, write summary, clear state.
+
+        ``working_dirs`` (CONTEXTUAL-SPEC §7): explicit session working dirs for
+        the checkpoint record; falls back to those remembered from ``prepare_turn``.
         """
-        self._db.checkpoint(agent_id=self._agent_id, session_id=session_id)
+        self._db.checkpoint(
+            agent_id=self._agent_id,
+            session_id=session_id,
+            working_dirs=self._resolve_working_dirs(session_id, working_dirs),
+        )
         if run_consolidation:
             self._db.consolidate(agent_id=self._agent_id, llm_fn=llm_fn)
         self.write_session_summary(session_id, jsonl_path)
