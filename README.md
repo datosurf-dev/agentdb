@@ -167,6 +167,15 @@ db.consolidate(agent_id="my-agent", llm_fn=my_llm_fn)
 
   `build_llm_fn` needs the `openai` package: install it with
   `pip install 'agentdatabase[llm]'`.
+- **Structured know-how:** when `llm_fn` is supplied, the package asks the model
+  for a JSON object — `{"know_how", "workspace_id", "repository_id",
+  "task_type", "environment", "confidence"}` — so the canonical is reusable,
+  workspace-scoped know-how (not a session narrative) and carries metadata used
+  for scoped retrieval. A plain-text answer is still accepted (treated as
+  `know_how`). Metadata the model omits is inherited from the top source. After
+  consolidation, retrieval returns the distilled canonical in place of its
+  archived raw sources (raw is re-surfaced only when it holds a query detail the
+  canonical dropped).
 
 Compaction summaries and checkpoints default to `agent_inferred` provenance. A bare `origin="human_approved"` is **asserted** (not verified) authority. **Verified** human authority requires a host-configured `authority_verifier` and an affirmative decision through `approve_authority()`; it is bound to a versioned content/scope fingerprint (edits invalidate it) and can be removed via `revoke_authority()` with an audit trail. AgentDB does not defend against a malicious host process with full code/DB access — the enforceable boundary is between ordinary agent APIs and the host-configured trusted approval pathway.
 

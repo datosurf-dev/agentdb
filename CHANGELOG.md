@@ -57,6 +57,15 @@ policy in `RELEASING.md`.
   snapshot rows or the semantic conflicts they caused. Explicit
   `directory_snapshots` passed to `finalize_turn` are still honoured.
 
+### Changed — distillation produces scoped know-how (structured synthesis)
+- With `llm_fn`, consolidation now prompts for a structured JSON object
+  (`know_how`, `workspace_id`, `repository_id`, `task_type`, `environment`,
+  `confidence`) so canonicals are reusable, workspace-scoped know-how rather than
+  a session narrative. The canonical carries those metadata fields for scoped
+  retrieval (falling back to the top source's scope when omitted); plain-text
+  answers still work. Distilled canonicals are returned in place of their
+  archived raw sources by default.
+
 ## [0.6.0] — 2026-11-21
 
 Contextual correctness and final hardening: trustworthy, relevant, efficiently

@@ -103,6 +103,108 @@ class ConsolidationResult:
     synthesized_record_ids: list = field(default_factory=list)
 
 
+# ---------------------------------------------------------------------------
+# Distillation synthesis (spec §8)
+# ---------------------------------------------------------------------------
+# The synthesis prompt asks the model for a STRUCTURED JSON object so the
+# canonical carries (a) reusable, workspace-scoped know-how as its value and
+# (b) retrieval metadata (workspace_id/repository_id/task_type/environment).
+# The parser tolerates plain-text answers (treated as know_how) so a model that
+# ignores the JSON instruction still yields usable values.
+_SYNTHESIS_INSTRUCTIONS = (
+    "You are distilling reusable, SCOPED KNOW-HOW from several related memory\n"
+    "records. Produce knowledge that helps NEXT TIME in this workspace — not a\n"
+    "narrative of what happened.\n"
+    "\n"
+    "Rules:\n"
+    "- Extract the durable rule/procedure/fact (how to do X, gotchas, root\n"
+    "  causes, reusable commands, decisions). DROP: timestamps, first-person\n"
+    "  narration ('I ran…', 'let me check…'), transient status, and one-off\n"
+    "  detail that won't help next time.\n"
+    "- Keep it concise and imperative where possible.\n"
+    "- Scope it: state the workspace/repo it applies to when evident.\n"
+    "- If the records disagree, keep the most recent/confident and note the\n"
+    "  conflict.\n"
+    "\n"
+    "Return ONLY a JSON object (no prose, no code fences) with this shape:\n"
+    '{\n'
+    '  "know_how": "the distilled, reusable knowledge (1-4 sentences)",\n'
+    '  "workspace_id": "workspace/repo this applies to, or null",\n'
+    '  "repository_id": "repository identifier, or null",\n'
+    '  "task_type": "debug|ops|spec|review|code_generation|research|planning|general or null",\n'
+    '  "environment": "production|staging|dev or null",\n'
+    '  "confidence": 0.0\n'
+    '}\n'
+    "Use null for any field you cannot determine from the records."
+)
+
+
+def _extract_json_object(text: str) -> "dict | None":
+    """Best-effort parse of a JSON object from a model answer.
+
+    Handles the common cases: raw JSON, JSON wrapped in ```json fences```, or
+    JSON embedded in surrounding prose (first {...} block). Returns a dict or
+    None if no parseable object is found.
+    """
+    if not isinstance(text, str):
+        return None
+    s = text.strip()
+    # Strip a fenced code block if present.
+    if s.startswith("```"):
+        # remove leading fence line and trailing fence
+        lines = s.splitlines()
+        if lines and lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip().startswith("```"):
+            lines = lines[:-1]
+        s = "\n".join(lines).strip()
+    try:
+        obj = json.loads(s)
+        return obj if isinstance(obj, dict) else None
+    except (json.JSONDecodeError, TypeError):
+        pass
+    # Fall back to the first balanced {...} substring.
+    start = s.find("{")
+    end = s.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        try:
+            obj = json.loads(s[start:end + 1])
+            return obj if isinstance(obj, dict) else None
+        except (json.JSONDecodeError, TypeError):
+            return None
+    return None
+
+
+def _parse_synthesis(raw, fallback_value):
+    """Normalize an ``llm_fn`` result into (value, metadata) for a canonical.
+
+    - If ``raw`` parses to a JSON object with ``know_how``, use it as the value
+      and pull workspace_id/repository_id/task_type/environment/confidence from
+      it (only non-empty string / valid values; nulls ignored).
+    - Otherwise treat ``raw`` (stripped) as the value (plain-text fallback).
+    Returns (value, meta_dict).
+    """
+    obj = _extract_json_object(raw) if isinstance(raw, str) else None
+    if obj is None:
+        text = raw.strip() if isinstance(raw, str) else fallback_value
+        return (text or fallback_value), {}
+
+    know_how = obj.get("know_how")
+    if not isinstance(know_how, str) or not know_how.strip():
+        # JSON but no usable know_how — keep the raw text as the value.
+        return (raw.strip() or fallback_value), {}
+
+    meta: dict = {}
+    for field in ("workspace_id", "repository_id", "task_type", "environment"):
+        val = obj.get(field)
+        if isinstance(val, str) and val.strip() and val.strip().lower() not in ("null", "none", "n/a"):
+            meta[field] = val.strip()
+    conf = obj.get("confidence")
+    if isinstance(conf, (int, float)) and not isinstance(conf, bool):
+        meta["confidence"] = max(0.0, min(1.0, float(conf)))
+    return know_how.strip(), meta
+
+
 _LC_STOP_WORDS = frozenset({
     "with", "from", "this", "that", "have", "been", "will",
     "your", "into", "they", "them", "then", "when", "what",
@@ -445,21 +547,48 @@ class LifecycleManager:
             for r in cluster_sorted
         ]
 
-        # Canonical value: synthesized when an llm_fn is supplied and succeeds;
-        # otherwise the highest-confidence source value (unchanged copy).
+        # Canonical value + metadata: synthesized (structured) when an llm_fn is
+        # supplied and succeeds; otherwise copy the highest-confidence source.
         canonical_value = cluster_sorted[0].value
+        synth_meta: dict = {}
+        strategy = "cluster_copy"
         if llm_fn is not None:
             try:
+                records_block = "\n".join(
+                    f"- key={r.key} | scope(workspace_id={getattr(r, 'workspace_id', None)}, "
+                    f"repository_id={getattr(r, 'repository_id', None)}, "
+                    f"task_type={getattr(r, 'task_type', None)}, "
+                    f"environment={getattr(r, 'environment', None)}) | {r.value}"
+                    for r in cluster_sorted
+                )
                 prompt = (
-                    f"Synthesize one canonical memory from these {len(cluster)} records:\n"
-                    + "\n".join(f"- {r.key}: {r.value}" for r in cluster_sorted)
-                    + "\nReturn only the synthesized content, no explanation."
+                    _SYNTHESIS_INSTRUCTIONS
+                    + f"\n\nRecords to distill ({len(cluster)}):\n"
+                    + records_block
                 )
                 synthesized = llm_fn(prompt)
                 if synthesized:
-                    canonical_value = synthesized
+                    canonical_value, synth_meta = _parse_synthesis(
+                        synthesized, cluster_sorted[0].value
+                    )
+                    strategy = "cluster_synthesis"
             except Exception:
-                pass  # fall back to the top source value; never block on LLM
+                # Fall back to the top source value; never block on LLM.
+                canonical_value = cluster_sorted[0].value
+                synth_meta = {}
+                strategy = "cluster_copy"
+
+        # Metadata precedence: synthesized value (if the model inferred it) FIRST,
+        # else inherit the top source's explicit scope so the canonical stays
+        # scoped even without a model. (spec §8)
+        top = cluster_sorted[0]
+
+        def _pick(field):
+            if synth_meta.get(field):
+                return synth_meta[field]
+            return getattr(top, field, None)
+
+        canonical_confidence = synth_meta.get("confidence", top_conf)
 
         canonical = MemoryRecord(
             key=f"memory/canonical/{_key_slug(cluster_sorted[0].key)}/{uuid.uuid4()}",
@@ -467,7 +596,7 @@ class LifecycleManager:
             origin="agent_inferred",  # derived; never implicitly human_approved
             trust_level="agent",
             agent_id=agent_id,
-            confidence=top_conf,
+            confidence=canonical_confidence,
             consolidated=True,
             source_record_ids=[r.id for r in cluster_sorted],
             kind="derived_canonical",
@@ -475,11 +604,16 @@ class LifecycleManager:
             derivation={
                 "version": self.DERIVATION_VERSION,
                 "created_at": _utcnow().isoformat(),
-                "strategy": "cluster_synthesis" if llm_fn is not None else "cluster_copy",
+                "strategy": strategy,
                 "sources": sources,
             },
             entities=list(cluster_sorted[0].entities or []),
             working_dirs=list(cluster_sorted[0].working_dirs or []),
+            # Retrieval metadata (spec §8): scoped know-how.
+            workspace_id=_pick("workspace_id"),
+            repository_id=_pick("repository_id"),
+            task_type=_pick("task_type"),
+            environment=_pick("environment"),
             canonical_fingerprint=_canonical_fingerprint(cluster_sorted, agent_id),
         )
         return canonical
