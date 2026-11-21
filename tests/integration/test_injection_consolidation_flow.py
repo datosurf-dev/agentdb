@@ -99,8 +99,8 @@ def test_include_consolidated_controls_injection(tmp_path):
     from the raw signal rather than the merged summary.
     """
     db = AgentDB(path=tmp_path / "test.db")
-    db.write("memory/analytics-schema-note", "v1", origin="agent_inferred", agent_id="a1")
-    db.write("memory/analytics-schema-update", "v2", origin="agent_inferred", agent_id="a1")
+    db.write("memory/analytics-schema-note", "analytics schema columnar layout", origin="agent_inferred", agent_id="a1")
+    db.write("memory/analytics-schema-update", "analytics schema columnar layout confirmed", origin="agent_inferred", agent_id="a1")
     db.consolidate("a1", since_hours=0, min_cluster_size=2)
 
     with_consolidated = db.retrieve("analytics schema", agent_id="a1")

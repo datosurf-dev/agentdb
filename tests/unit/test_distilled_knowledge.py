@@ -41,8 +41,8 @@ def test_consolidation_does_not_mutate_source_values(tmp_path):
 
 def test_canonical_is_a_distinct_derived_record(tmp_path):
     db = _db(tmp_path)
-    r1 = db.write("memory/analytics-schema-note", "v1", origin="agent_inferred", agent_id="a1")
-    r2 = db.write("memory/analytics-schema-update", "v2", origin="agent_inferred", agent_id="a1")
+    r1 = db.write("memory/analytics-schema-note", "analytics schema columnar layout", origin="agent_inferred", agent_id="a1")
+    r2 = db.write("memory/analytics-schema-update", "analytics schema columnar layout confirmed", origin="agent_inferred", agent_id="a1")
     db.consolidate("a1", since_hours=0, min_cluster_size=2)
     canon = _canonicals(db, "a1")
     assert len(canon) == 1
@@ -63,13 +63,13 @@ def test_canonical_is_a_distinct_derived_record(tmp_path):
 
 def test_canonical_invalidated_when_source_revised(tmp_path):
     db = _db(tmp_path)
-    r1 = db.write("memory/analytics-schema-note", "v1", origin="agent_inferred", agent_id="a1")
-    r2 = db.write("memory/analytics-schema-update", "v2", origin="agent_inferred", agent_id="a1")
+    r1 = db.write("memory/analytics-schema-note", "analytics schema columnar layout", origin="agent_inferred", agent_id="a1")
+    r2 = db.write("memory/analytics-schema-update", "analytics schema columnar layout confirmed", origin="agent_inferred", agent_id="a1")
     db.consolidate("a1", since_hours=0, min_cluster_size=2)
 
     # Revise one source out-of-band (simulate correction).
     src = db._store.get_by_id(r1.id)
-    src.value = "v1 CORRECTED"
+    src.value = "analytics schema columnar layout CORRECTED"
     db._store.write(src)
 
     canon = _canonicals(db, "a1")[0]
@@ -85,8 +85,8 @@ def test_canonical_invalidated_when_source_revised(tmp_path):
 
 def test_valid_canonical_is_selected(tmp_path):
     db = _db(tmp_path)
-    db.write("memory/analytics-schema-note", "v1", origin="agent_inferred", agent_id="a1")
-    db.write("memory/analytics-schema-update", "v2", origin="agent_inferred", agent_id="a1")
+    db.write("memory/analytics-schema-note", "analytics schema columnar layout", origin="agent_inferred", agent_id="a1")
+    db.write("memory/analytics-schema-update", "analytics schema columnar layout confirmed", origin="agent_inferred", agent_id="a1")
     db.consolidate("a1", since_hours=0, min_cluster_size=2)
     canon = _canonicals(db, "a1")[0]
     assert db._canonical_invalidation_reason(canon) is None
@@ -158,8 +158,8 @@ def test_retrieval_returns_canonical_not_its_archived_sources(tmp_path):
 
 def test_include_consolidated_false_returns_no_canonical(tmp_path):
     db = _db(tmp_path)
-    db.write("memory/analytics-schema-note", "v1", origin="agent_inferred", agent_id="a1")
-    db.write("memory/analytics-schema-update", "v2", origin="agent_inferred", agent_id="a1")
+    db.write("memory/analytics-schema-note", "analytics schema columnar layout", origin="agent_inferred", agent_id="a1")
+    db.write("memory/analytics-schema-update", "analytics schema columnar layout confirmed", origin="agent_inferred", agent_id="a1")
     db.consolidate("a1", since_hours=0, min_cluster_size=2)
     res = db.retrieve("analytics schema", agent_id="a1", include_consolidated=False)
     assert all(getattr(r, "kind", "source") != "derived_canonical" for r in res.records)
@@ -167,8 +167,8 @@ def test_include_consolidated_false_returns_no_canonical(tmp_path):
 
 def test_canonical_ids_explainable_in_trace(tmp_path):
     db = _db(tmp_path)
-    db.write("memory/analytics-schema-note", "v1", origin="agent_inferred", agent_id="a1")
-    db.write("memory/analytics-schema-update", "v2", origin="agent_inferred", agent_id="a1")
+    db.write("memory/analytics-schema-note", "analytics schema columnar layout", origin="agent_inferred", agent_id="a1")
+    db.write("memory/analytics-schema-update", "analytics schema columnar layout confirmed", origin="agent_inferred", agent_id="a1")
     db.consolidate("a1", since_hours=0, min_cluster_size=2)
     canon = _canonicals(db, "a1")[0]
     res = db.retrieve("analytics schema", agent_id="a1", trace=True)

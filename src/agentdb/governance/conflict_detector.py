@@ -20,12 +20,57 @@ from agentdb.core.models import ConflictRecord, MemoryRecord
 # Origins that are considered "agent-tier" (lower authority than human_approved)
 _AGENT_TIER_ORIGINS = {"agent_inferred", "provider_ingested"}
 
-# Value-compatibility classifications (see CONTEXTUAL-SPEC §4).
-COMPATIBLE = "compatible"
+# Value-compatibility classifications (see CONTEXTUAL-SPEC §4 and
+# FINAL-HARDENING §5). Only EQUIVALENT and COMPATIBLE_COMPLEMENT may merge.
+COMPATIBLE = "compatible"           # kept for backward-compat callers
 CONTEXT_SPECIFIC_DIFFERENCE = "context_specific_difference"
 VERIFIED_SUPERSESSION = "verified_supersession"
 UNRESOLVED_CONTRADICTION = "unresolved_contradiction"
 INSUFFICIENT_EVIDENCE = "insufficient_evidence"
+# FINAL-HARDENING §5 consolidation-policy outcomes (aliases / additions):
+EQUIVALENT = "equivalent"
+COMPATIBLE_COMPLEMENT = "compatible_complement"
+CONFLICTING = "conflicting"
+SCOPE_INCOMPATIBLE = "scope_incompatible"
+
+# Only these outcomes permit consolidation (FINAL-HARDENING §5).
+MERGEABLE_OUTCOMES = frozenset({EQUIVALENT, COMPATIBLE_COMPLEMENT})
+
+# Negation / modality markers. A value and its negation are never compatible.
+_NEGATIONS = frozenset({"not", "no", "never", "without", "nor", "none", "cannot", "mustnt", "dont", "doesnt", "isnt", "wont"})
+_NEG_CONTRACTIONS = re.compile(r"(?:n't|n’t)$", re.IGNORECASE)
+
+
+def _negated(tokens: list[str]) -> bool:
+    """True if the token list contains a negation marker (incl. contractions)."""
+    for t in tokens:
+        if t in _NEGATIONS:
+            return True
+        if _NEG_CONTRACTIONS.search(t):
+            return True
+    return False
+
+
+def _strip_negation(tokens: list[str]) -> list[str]:
+    return [t for t in tokens if t not in _NEGATIONS and not _NEG_CONTRACTIONS.search(t)]
+
+
+# Tiny stop-word set so subject overlap is measured on content words.
+_STOP = frozenset({"the", "a", "an", "is", "are", "be", "to", "of", "in", "on",
+                   "for", "and", "or", "with", "as", "at", "by", "it", "this",
+                   "that", "uses", "use", "using"})
+
+
+def _content_tokens(tokens: list[str]) -> set:
+    return {t for t in tokens if t not in _STOP and not _is_value_token(t)}
+
+
+def _shares_subject(ta: list[str], tb: list[str]) -> bool:
+    """True if two token lists share at least two non-trivial content tokens
+    (evidence they describe the same subject), so a prose-only difference is a
+    compatible complement rather than novel unrelated content."""
+    ca, cb = _content_tokens(ta), _content_tokens(tb)
+    return len(ca & cb) >= 2
 
 # Tokens that denote a *value* (a version, number, or hyphenated enum/identifier
 # such as "us-east", "eu-west", "port-8080") rather than prose. A single
@@ -135,6 +180,20 @@ class ConflictDetector:
         if sorted(ta) == sorted(tb):
             return COMPATIBLE
 
+        # Negation / modality mismatch: "X is required" vs "X is not required",
+        # "always request approval" vs "deploy without approval". If, after
+        # removing negation markers, the two are the same assertion but exactly
+        # one side is negated → CONFLICTING (never merge). FINAL-HARDENING §5.
+        neg_a, neg_b = _negated(ta), _negated(tb)
+        if neg_a != neg_b:
+            if sorted(_strip_negation(ta)) == sorted(_strip_negation(tb)):
+                return CONFLICTING
+            # Even when wording differs, opposite polarity on an otherwise
+            # similar assertion is not safe to merge.
+            sa, sb = _strip_negation(ta), _strip_negation(tb)
+            if sa and sb and len(set(sa) & set(sb)) >= max(1, min(len(sa), len(sb)) - 1):
+                return CONFLICTING
+
         # Aligned comparison: only meaningful when token counts match so a
         # single position can be identified as the discriminating value.
         if len(ta) == len(tb):
@@ -165,16 +224,19 @@ class ConflictDetector:
             )
             if value_bearing:
                 return UNRESOLVED_CONTRADICTION
-            return INSUFFICIENT_EVIDENCE
+            # Prose-only differences: safe complement iff they share subject
+            # context (novel prose alone is not evidence of equivalence).
+            return COMPATIBLE if _shares_subject(ta, tb) else INSUFFICIENT_EVIDENCE
 
         # Different lengths: a value token appearing/disappearing is a real
-        # distinction; a purely additive prose tail is compatible.
+        # distinction; a purely additive/dropped prose token that still shares
+        # subject context is a compatible complement.
         value_diff = {t for t in ta if _is_value_token(t)} ^ {
             t for t in tb if _is_value_token(t)
         }
         if value_diff:
             return UNRESOLVED_CONTRADICTION
-        return INSUFFICIENT_EVIDENCE
+        return COMPATIBLE if _shares_subject(ta, tb) else INSUFFICIENT_EVIDENCE
 
     @staticmethod
     def check_semantic_batch(

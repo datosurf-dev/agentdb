@@ -1429,6 +1429,41 @@ class AgentDB:
             pass
         return result
 
+    def validate_canonicals(self, agent_id: Optional[str] = None) -> list[dict]:
+        """Validate existing derived canonicals against current evidence (§5).
+
+        Repeatable, non-destructive: reports each canonical's validity and a
+        reason, WITHOUT rewriting or deleting anything. Invalid canonicals are
+        already excluded from retrieval by ``_canonical_invalidation_reason``
+        (source revised/missing) and are re-checked here against the tightened
+        value/scope compatibility rules (a canonical whose sources are now
+        incompatible is flagged ``canonical_sources_incompatible``).
+
+        Returns a list of ``{canonical_id, valid, reason}`` dicts.
+        """
+        report: list[dict] = []
+        for rec in list(self._store._by_id.values()):
+            if getattr(rec, "kind", "source") != "derived_canonical":
+                continue
+            if agent_id is not None and rec.agent_id != agent_id:
+                continue
+            # Existing invalidation: source revised / missing / no lineage.
+            reason = self._canonical_invalidation_reason(rec)
+            if reason is None:
+                # Re-check value/scope compatibility across the live sources.
+                sources = [
+                    self._store.get_by_id(sid) for sid in (rec.source_record_ids or [])
+                ]
+                sources = [s for s in sources if s is not None]
+                if len(sources) >= 2 and not self.lifecycle._merge_compatible(sources):
+                    reason = "canonical_sources_incompatible"
+            report.append({
+                "canonical_id": rec.id,
+                "valid": reason is None,
+                "reason": reason,
+            })
+        return report
+
     def checkpoint(
         self, agent_id: str, session_id: str, origin: str = "agent_inferred"
     ) -> None:

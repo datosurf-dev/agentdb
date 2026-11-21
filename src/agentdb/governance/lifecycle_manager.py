@@ -48,6 +48,21 @@ def _key_slug(key: str) -> str:
     return "-".join(tokens).lower() if tokens else seg.lower()
 
 
+def _scope_incompatible(a, b) -> bool:
+    """True if two records carry *explicit* but *conflicting* scope identity.
+
+    Evaluated independently for workspace/repository/environment: if both sides
+    set a value and they differ, the facts are scope-incompatible and must not
+    be merged into a universal canonical. Missing scope on either side is unknown
+    (not a conflict). FINAL-HARDENING §5.
+    """
+    for field in ("workspace_id", "repository_id", "environment"):
+        va, vb = getattr(a, field, None), getattr(b, field, None)
+        if va and vb and va != vb:
+            return True
+    return False
+
+
 def _origin_value(origin) -> str:
     """Return the string value of an origin, whether it's an Origin enum or a raw string."""
     if isinstance(origin, Origin):
@@ -363,22 +378,30 @@ class LifecycleManager:
             return False
         from agentdb.governance.conflict_detector import (
             ConflictDetector,
-            UNRESOLVED_CONTRADICTION,
+            MERGEABLE_OUTCOMES,
+            COMPATIBLE,
+            EQUIVALENT,
         )
         det = ConflictDetector()
+        mergeable = set(MERGEABLE_OUTCOMES) | {COMPATIBLE, EQUIVALENT}
         for i in range(len(group)):
             for j in range(i + 1, len(group)):
                 a, b = group[i], group[j]
-                # Same-key temporal/authority conflicts remain disqualifying.
+                # (b) Same-key temporal/authority conflicts remain disqualifying.
                 if det.check(a, b) is not None or det.check(b, a) is not None:
                     return False
-                # Value-level contradiction gate (works across different keys in
-                # a shared domain). We ONLY block merges that are a demonstrable
-                # value contradiction — parallel assertions differing solely by a
-                # value token (e.g. "postgres 15" vs "postgres 16"). Other value
-                # relationships (prose near-duplicates, missing scope) retain the
-                # prior conservative behavior rather than blocking every merge.
-                if det.classify_value_compatibility(a.value, b.value) == UNRESOLVED_CONTRADICTION:
+                # (d) Explicit scope incompatibility: same-subject facts bound to
+                # conflicting explicit workspace/repository/environment must not
+                # become a universal canonical. Missing scope on either side is
+                # unknown (not a conflict). FINAL-HARDENING §5.
+                if _scope_incompatible(a, b):
+                    return False
+                # (c) Value compatibility: merge ONLY when provably equivalent or
+                # a compatible complement. Conflicting/contradictory, scope-
+                # specific difference, or insufficient evidence → no merge
+                # (unknown compatibility means no merge). §5.
+                verdict = det.classify_value_compatibility(a.value, b.value)
+                if verdict not in mergeable:
                     return False
         return True
 
