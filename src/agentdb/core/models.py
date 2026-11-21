@@ -77,6 +77,11 @@ class MemoryRecord:
     # cannot set this by passing an origin string alone — only the trusted-host
     # approval pathway (AgentDB.approve_authority) populates it.
     approval: dict = field(default_factory=dict)
+    # Optional explicit context (CONTEXTUAL-SPEC §7). These support applicability
+    # decisions across workspaces/repos/environments/tasks. All are optional;
+    # missing context is NOT treated as a match (see eligibility rules).
+    environment: Optional[str] = None  # e.g. "production", "staging", "dev"
+    task_type: Optional[str] = None    # soft label; never authorizes/excludes alone
 
     # -- authority helpers (OD-2) ------------------------------------------
     def has_verified_approval(self) -> bool:

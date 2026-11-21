@@ -720,6 +720,8 @@ class AgentDB:
         expiry_time: Optional["datetime"] = None,
         working_dirs: Optional[list[str]] = None,
         approval: Optional[dict] = None,
+        environment: Optional[str] = None,
+        task_type: Optional[str] = None,
     ) -> MemoryRecord:
         """Write a memory record.
 
@@ -768,6 +770,8 @@ class AgentDB:
             inferred=infer,
             working_dirs=[os.path.realpath(d) for d in (working_dirs or [])],
             session_id=session_id,
+            environment=environment,
+            task_type=task_type,
         )
 
         # OD-2: only accept approval evidence whose digest binds to this value.
@@ -1322,7 +1326,8 @@ class AgentDB:
     _EPISODIC_PREFIX = "memory/episodic/"
 
     def _eligibility_reason(self, record: MemoryRecord, *, agent_id: str, isolate_by_agent: bool,
-                            session_id: Optional[str], include_consolidated: bool) -> Optional[str]:
+                            session_id: Optional[str], include_consolidated: bool,
+                            scope: Optional[dict] = None) -> Optional[str]:
         """Return a human-readable exclusion reason, or None if the record is eligible.
 
         Applies the SAME rules regardless of which candidate branch (lexical vs
@@ -1338,6 +1343,14 @@ class AgentDB:
             return "read_denied"
         if isolate_by_agent and record.agent_id != agent_id:
             return "agent_scope"
+        # CONTEXTUAL-SPEC §7: explicit environment mismatch is inapplicable.
+        # Missing scope on EITHER side is not a mismatch (never excluded here),
+        # and task_type is deliberately NOT an exclusion criterion.
+        if scope:
+            want_env = scope.get("environment")
+            rec_env = getattr(record, "environment", None)
+            if want_env and rec_env and want_env != rec_env:
+                return "environment_mismatch"
         # Episodic records are session-local; cross-session episodic is excluded.
         if session_id is not None and self._EPISODIC_PREFIX in record.key \
                 and f"/{session_id}/" not in record.key:
@@ -1365,6 +1378,28 @@ class AgentDB:
             if exp <= _utcnow():
                 return "expired"
         return None
+
+    @staticmethod
+    def _applicability_match(record: MemoryRecord, scope: Optional[dict]) -> int:
+        """Score how specifically a record matches the query scope (0 or more).
+
+        Used only as a ranking tie-break (never changes composite weights, never
+        grants authorization, never justifies consolidation). Missing scope on
+        either side contributes 0 (an unscoped record gets NO exact-scope bonus).
+        """
+        if not scope:
+            return 0
+        score = 0
+        rec_env = getattr(record, "environment", None)
+        want_env = scope.get("environment")
+        if want_env and rec_env and want_env == rec_env:
+            score += 1
+        # workspace/repo: exact repo basename match via working_dirs.
+        want_repo = scope.get("repo")
+        if want_repo and getattr(record, "working_dirs", None):
+            if _extract_repo(record.working_dirs) == want_repo:
+                score += 1
+        return score
 
     def _canonical_invalidation_reason(self, canonical: MemoryRecord) -> Optional[str]:
         """Return a reason string if a derived canonical is invalidated, else None.
@@ -1543,7 +1578,17 @@ class AgentDB:
         working_dirs: Optional[list[str]] = None,
         include_consolidated: bool = True,
         trace: bool = False,
+        scope: Optional[dict] = None,
     ) -> RetrievalResult:
+        """Retrieve relevant memory for a query.
+
+        ``scope`` (CONTEXTUAL-SPEC §7) optionally supplies explicit context:
+        ``{"environment": str, "workspace": str, "repo": str, "task_type": str,
+        "effective_time": datetime}``. Only ``environment`` is used as a hard
+        applicability filter (explicit mismatch excludes a record); ``task_type``
+        is a soft label and never excludes on its own. Missing scope is not a
+        match. Existing ranking weights are unchanged.
+        """
         agent_config = self.config_for(agent_id)
         isolate_by_agent = agent_config["isolate_by_agent"]
         resolved_limit = limit if limit is not None else agent_config["retrieval"]["retrieve_limit"]
@@ -1586,6 +1631,7 @@ class AgentDB:
             reason = self._eligibility_reason(
                 rec, agent_id=agent_id, isolate_by_agent=isolate_by_agent,
                 session_id=session_id, include_consolidated=include_consolidated,
+                scope=scope,
             )
             if reason is None:
                 eligible.append(rec)
@@ -1620,6 +1666,18 @@ class AgentDB:
             query, eligible, agent_id=agent_id,
             query_embedding=query_embedding,
             session_working_dirs=working_dirs,
+        )
+
+        # CONTEXTUAL-SPEC §7: exact scope matches improve *applicability* as a
+        # deterministic tie-break, WITHOUT altering the weighted composite score
+        # (weights preserved). Order: composite desc, exact-scope match first,
+        # then record id for determinism.
+        ranked_all.sort(
+            key=lambda rr: (
+                -rr.composite_score,
+                -self._applicability_match(rr.record, scope),
+                rr.record.id,
+            )
         )
 
         # Drop records that don't meet the minimum relevance threshold.
@@ -1789,6 +1847,7 @@ class AgentDB:
         budget_tokens: Optional[int] = None,
         include_consolidated: bool = True,
         trace: bool = False,
+        scope: Optional[dict] = None,
     ) -> RetrievalResult:
         """Entity-driven retrieval.
 
@@ -1816,6 +1875,7 @@ class AgentDB:
             reason = self._eligibility_reason(
                 rec, agent_id=agent_id, isolate_by_agent=isolate_by_agent,
                 session_id=session_id, include_consolidated=include_consolidated,
+                scope=scope,
             )
             if reason is None:
                 eligible.append(rec)

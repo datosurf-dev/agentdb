@@ -51,6 +51,8 @@ _MEMORIES_MIGRATION_COLUMNS = (
     ("producer", "TEXT"),
     ("derivation", "TEXT NOT NULL DEFAULT '{}'"),
     ("approval", "TEXT NOT NULL DEFAULT '{}'"),
+    ("environment", "TEXT"),
+    ("task_type", "TEXT"),
 )
 
 _CREATE_CONFLICTS = """
@@ -144,6 +146,8 @@ class MemoryStore:
             approval=json.loads(
                 row["approval"] if "approval" in row.keys() and row["approval"] else "{}"
             ),
+            environment=(row["environment"] if "environment" in row.keys() else None),
+            task_type=(row["task_type"] if "task_type" in row.keys() else None),
         )
 
     def write(self, record: MemoryRecord) -> MemoryRecord:
@@ -155,8 +159,8 @@ class MemoryStore:
                      version, archived, retrieval_count, created_at, entities,
                      last_retrieved, conflict_id, expiry_time, inferred, working_dirs,
                      consolidated, source_record_ids, session_id, kind, producer, derivation,
-                     approval)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     approval, environment, task_type)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     record.id,
@@ -183,6 +187,8 @@ class MemoryStore:
                     getattr(record, "producer", None),
                     json.dumps(getattr(record, "derivation", {}) or {}),
                     json.dumps(getattr(record, "approval", {}) or {}),
+                    getattr(record, "environment", None),
+                    getattr(record, "task_type", None),
                 ),
             )
         self._by_id[record.id] = record
