@@ -6,6 +6,12 @@ policy in `RELEASING.md`.
 
 ## [Unreleased]
 
+## [0.7.0] — 2026-11-21
+
+Consolidation/distillation quality, workspace scoping, and a simpler permission
+model. Backward compatible by default except where noted (directory tracking is
+now opt-in).
+
 ### Fixed — consolidation auto-trigger
 - `AgentDBMiddleware.prepare_turn` and the Hermes adapter now include `agent_id`
   in the `conversation_started` dispatch. Previously only `session_id` was
