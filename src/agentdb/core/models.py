@@ -82,6 +82,20 @@ class MemoryRecord:
     # missing context is NOT treated as a match (see eligibility rules).
     environment: Optional[str] = None  # e.g. "production", "staging", "dev"
     task_type: Optional[str] = None    # soft label; never authorizes/excludes alone
+    # Stable, host-supplied execution context identities (FINAL-HARDENING §3).
+    # Independent of each other and of directory basenames. Applicability
+    # metadata only — never credentials / never grant authorization.
+    workspace_id: Optional[str] = None
+    repository_id: Optional[str] = None
+    # Explicit temporal validity (FINAL-HARDENING §7). Distinct from created_at
+    # and expiry_time; missing effective_from is NOT substituted with created_at.
+    observed_at: Optional[datetime] = None
+    effective_from: Optional[datetime] = None
+    effective_until: Optional[datetime] = None
+    # Stable identity of a derived canonical over its normalized source set +
+    # scope (FINAL-HARDENING §6, OD-6). Enables atomic idempotency so concurrent
+    # consolidations cannot create duplicate active canonicals.
+    canonical_fingerprint: Optional[str] = None
 
     # -- authority helpers (OD-2) ------------------------------------------
     def has_verified_approval(self) -> bool:

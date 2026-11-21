@@ -136,6 +136,18 @@ def _extract_repo(working_dirs) -> "Optional[str]":
     return segment or None
 
 
+def _parse_as_of(value):
+    """Coerce an as_of spec value (datetime or ISO string) to datetime or None."""
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value
+    try:
+        return datetime.fromisoformat(str(value))
+    except (ValueError, TypeError):
+        return None
+
+
 def _classify_request_type(text: str) -> str:
     text_lower = text.lower()
     for keywords, request_type in _REQUEST_TYPE_RULES:
@@ -722,6 +734,11 @@ class AgentDB:
         approval: Optional[dict] = None,
         environment: Optional[str] = None,
         task_type: Optional[str] = None,
+        workspace_id: Optional[str] = None,
+        repository_id: Optional[str] = None,
+        observed_at: Optional["datetime"] = None,
+        effective_from: Optional["datetime"] = None,
+        effective_until: Optional["datetime"] = None,
     ) -> MemoryRecord:
         """Write a memory record.
 
@@ -772,6 +789,11 @@ class AgentDB:
             session_id=session_id,
             environment=environment,
             task_type=task_type,
+            workspace_id=workspace_id,
+            repository_id=repository_id,
+            observed_at=observed_at,
+            effective_from=effective_from,
+            effective_until=effective_until,
         )
 
         # OD-2: only accept approval evidence whose digest binds to this value.
@@ -1351,6 +1373,24 @@ class AgentDB:
             rec_env = getattr(record, "environment", None)
             if want_env and rec_env and want_env != rec_env:
                 return "environment_mismatch"
+            # FINAL-HARDENING §3: explicit stable-identity mismatch is
+            # inapplicable. Missing identity on either side is unknown (not a
+            # mismatch). Workspace and repository are evaluated independently:
+            # if EITHER explicitly conflicts, it is not an exact-context match.
+            want_ws = scope.get("workspace_id")
+            if want_ws and getattr(record, "workspace_id", None) and want_ws != record.workspace_id:
+                return "workspace_mismatch"
+            want_repo_id = scope.get("repository_id")
+            if want_repo_id and getattr(record, "repository_id", None) and want_repo_id != record.repository_id:
+                return "repository_mismatch"
+            # FINAL-HARDENING §7: explicit temporal applicability. When an as_of
+            # time is supplied, records explicitly outside their validity window
+            # are inapplicable for current queries. Unknown validity stays
+            # eligible (no exclusion, no bonus). created_at is never used as a
+            # substitute for effective_from.
+            as_of = scope.get("as_of")
+            if as_of is not None and self._temporal_inapplicable(record, as_of):
+                return "temporal_inapplicable"
         # Episodic records are session-local; cross-session episodic is excluded.
         if session_id is not None and self._EPISODIC_PREFIX in record.key \
                 and f"/{session_id}/" not in record.key:
@@ -1394,12 +1434,55 @@ class AgentDB:
         want_env = scope.get("environment")
         if want_env and rec_env and want_env == rec_env:
             score += 1
-        # workspace/repo: exact repo basename match via working_dirs.
+        # Explicit stable identities (FINAL-HARDENING §3): exact match counts;
+        # missing identity contributes 0 (unknown != match).
+        want_ws = scope.get("workspace_id")
+        if want_ws and getattr(record, "workspace_id", None) and want_ws == record.workspace_id:
+            score += 1
+        want_repo_id = scope.get("repository_id")
+        if want_repo_id and getattr(record, "repository_id", None) and want_repo_id == record.repository_id:
+            score += 1
+        # Legacy soft hint: directory basename match via working_dirs. NEVER
+        # overrides an explicit identity mismatch (handled in eligibility), and
+        # only when no explicit repository_id is set on the record.
         want_repo = scope.get("repo")
-        if want_repo and getattr(record, "working_dirs", None):
+        if (want_repo and not getattr(record, "repository_id", None)
+                and not want_repo_id and getattr(record, "working_dirs", None)):
             if _extract_repo(record.working_dirs) == want_repo:
                 score += 1
         return score
+
+    @staticmethod
+    def _temporal_inapplicable(record: MemoryRecord, as_of) -> bool:
+        """True if *record* is explicitly outside its validity window at *as_of*.
+
+        Uses explicit effective_from / effective_until / expiry_time only.
+        Unknown bounds are treated as open (eligible), and created_at is never
+        substituted for effective_from. Timezone-safe comparison.
+        """
+        def _aware(dt):
+            if dt is None:
+                return None
+            if dt.tzinfo is None:
+                return dt.replace(tzinfo=timezone.utc)
+            return dt
+
+        ref = _aware(as_of if isinstance(as_of, datetime) else _parse_as_of(as_of))
+        if ref is None:
+            return False
+        ef = _aware(getattr(record, "effective_from", None))
+        eu = _aware(getattr(record, "effective_until", None))
+        ex = _aware(record.expiry_time)
+        # Explicitly not-yet-effective.
+        if ef is not None and ref < ef:
+            return True
+        # Explicitly past its effective-until.
+        if eu is not None and ref > eu:
+            return True
+        # Explicitly expired.
+        if ex is not None and ref > ex:
+            return True
+        return False
 
     def _canonical_invalidation_reason(self, canonical: MemoryRecord) -> Optional[str]:
         """Return a reason string if a derived canonical is invalidated, else None.

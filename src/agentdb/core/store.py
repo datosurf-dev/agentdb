@@ -53,6 +53,12 @@ _MEMORIES_MIGRATION_COLUMNS = (
     ("approval", "TEXT NOT NULL DEFAULT '{}'"),
     ("environment", "TEXT"),
     ("task_type", "TEXT"),
+    ("workspace_id", "TEXT"),
+    ("repository_id", "TEXT"),
+    ("observed_at", "TEXT"),
+    ("effective_from", "TEXT"),
+    ("effective_until", "TEXT"),
+    ("canonical_fingerprint", "TEXT"),
 )
 
 _CREATE_CONFLICTS = """
@@ -70,6 +76,18 @@ CREATE TABLE IF NOT EXISTS conflicts (
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _parse_dt(value) -> Optional[datetime]:
+    """Parse an ISO datetime string, tolerating None and already-parsed values."""
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value
+    try:
+        return datetime.fromisoformat(value)
+    except (ValueError, TypeError):
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -148,6 +166,12 @@ class MemoryStore:
             ),
             environment=(row["environment"] if "environment" in row.keys() else None),
             task_type=(row["task_type"] if "task_type" in row.keys() else None),
+            workspace_id=(row["workspace_id"] if "workspace_id" in row.keys() else None),
+            repository_id=(row["repository_id"] if "repository_id" in row.keys() else None),
+            observed_at=(_parse_dt(row["observed_at"]) if "observed_at" in row.keys() else None),
+            effective_from=(_parse_dt(row["effective_from"]) if "effective_from" in row.keys() else None),
+            effective_until=(_parse_dt(row["effective_until"]) if "effective_until" in row.keys() else None),
+            canonical_fingerprint=(row["canonical_fingerprint"] if "canonical_fingerprint" in row.keys() else None),
         )
 
     def write(self, record: MemoryRecord) -> MemoryRecord:
@@ -159,8 +183,9 @@ class MemoryStore:
                      version, archived, retrieval_count, created_at, entities,
                      last_retrieved, conflict_id, expiry_time, inferred, working_dirs,
                      consolidated, source_record_ids, session_id, kind, producer, derivation,
-                     approval, environment, task_type)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     approval, environment, task_type, workspace_id, repository_id,
+                     observed_at, effective_from, effective_until, canonical_fingerprint)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     record.id,
@@ -189,6 +214,12 @@ class MemoryStore:
                     json.dumps(getattr(record, "approval", {}) or {}),
                     getattr(record, "environment", None),
                     getattr(record, "task_type", None),
+                    getattr(record, "workspace_id", None),
+                    getattr(record, "repository_id", None),
+                    (record.observed_at.isoformat() if getattr(record, "observed_at", None) else None),
+                    (record.effective_from.isoformat() if getattr(record, "effective_from", None) else None),
+                    (record.effective_until.isoformat() if getattr(record, "effective_until", None) else None),
+                    getattr(record, "canonical_fingerprint", None),
                 ),
             )
         self._by_id[record.id] = record
