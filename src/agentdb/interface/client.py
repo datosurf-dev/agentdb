@@ -206,7 +206,7 @@ class ConfigurationError(Exception):
     silently substituted for a default."""
 
 
-_OVERRIDE_SECTIONS = ("retrieval", "injection", "lifecycle", "capture")
+_OVERRIDE_SECTIONS = ("retrieval", "injection", "lifecycle", "capture", "consolidation")
 
 
 def _builtin_profile_dict(name: str) -> dict:
@@ -687,12 +687,23 @@ class AgentDB:
             profile.repos.add(repo)
         profile.request_types.add(rt)
         self._session_profiles[session_id] = profile
-        # Auto-consolidation: increment session count; trigger if threshold reached
+        # Auto-consolidation: increment session count; trigger if threshold reached.
+        # Thresholds come from profile.consolidation (spec §3).
         if agent_id:
             try:
-                self.lifecycle._increment_session_count(agent_id)
-                if self.lifecycle._should_auto_consolidate(agent_id):
-                    self.consolidate(agent_id, since_hours=0)
+                cfg = self.config_for(agent_id).get("consolidation", {})
+                if cfg.get("enabled", True):
+                    self.lifecycle._increment_session_count(agent_id)
+                    if self.lifecycle._should_auto_consolidate(
+                        agent_id,
+                        days=int(cfg.get("days", 7)),
+                        min_sessions=int(cfg.get("min_sessions", 10)),
+                    ):
+                        self.consolidate(
+                            agent_id,
+                            since_hours=0,
+                            min_cluster_size=int(cfg.get("min_cluster_size", 2)),
+                        )
             except Exception:
                 pass
 
@@ -1457,6 +1468,11 @@ class AgentDB:
                 DeprecationWarning,
                 stacklevel=2,
             )
+        # Fill consolidation thresholds from profile.consolidation when the
+        # caller didn't pass them explicitly (spec §3).
+        cfg = self.config_for(agent_id).get("consolidation", {})
+        kwargs.setdefault("since_hours", int(cfg.get("since_hours", 24)))
+        kwargs.setdefault("min_cluster_size", int(cfg.get("min_cluster_size", 2)))
         result = self.lifecycle.consolidate(
             agent_id, gateway=self.gateway, llm_fn=llm_fn, **kwargs
         )

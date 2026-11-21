@@ -44,6 +44,12 @@ policy in `RELEASING.md`.
   Reduces empty-dir clutter in every integrator's memory dir; existing
   workspaces are unaffected.
 
+### Added — configurable consolidation thresholds
+- New `profile.consolidation` section in `memory.yaml`: `enabled` (default true),
+  `min_sessions` (10), `days` (7), `min_cluster_size` (2), `since_hours` (24).
+  Previously these were hardcoded defaults; defaults are unchanged, so behavior
+  is identical unless overridden. `enabled: false` disables auto-consolidation.
+
 ## [0.6.0] — 2026-11-21
 
 Contextual correctness and final hardening: trustworthy, relevant, efficiently

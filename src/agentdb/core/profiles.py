@@ -54,12 +54,28 @@ class CaptureSettings:
 
 
 @dataclass(frozen=True)
+class ConsolidationSettings:
+    """Consolidation thresholds (spec §3).
+
+    These were previously hardcoded defaults in code; exposing them under
+    ``profile.consolidation`` lets operators tune when auto-consolidation fires
+    and how clusters are formed.
+    """
+    enabled: bool = True          # master switch for auto-consolidation
+    min_sessions: int = 10        # sessions per agent before auto-consolidation runs
+    days: int = 7                 # minimum age of last run before it may run again
+    min_cluster_size: int = 2     # records required to form a canonical
+    since_hours: int = 24         # window for manual consolidation() (auto uses 0)
+
+
+@dataclass(frozen=True)
 class Profile:
     name: str
     lifecycle: LifecycleSettings
     retrieval: RetrievalSettings
     injection: InjectionSettings
     capture: CaptureSettings
+    consolidation: ConsolidationSettings = ConsolidationSettings()
 
 
 _SHARED_INJECTION_TEXT = dict(
