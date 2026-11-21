@@ -24,6 +24,31 @@ def _record_digest(record) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+def _canonical_fingerprint(cluster_sorted: list, agent_id: str) -> str:
+    """Stable canonical identity from the normalized source set + scope (OD-6).
+
+    Derived from sorted (source id, content digest) pairs + agent + the
+    cluster's explicit scope (workspace/repository/environment). Two
+    consolidations over the same unchanged sources yield the same fingerprint,
+    so concurrent/repeated runs are idempotent. A change to any source's content
+    changes the fingerprint (a distinguishable canonical).
+    """
+    entries = sorted(
+        (r.id, _record_digest(r)) for r in cluster_sorted
+    )
+    scope = {
+        "agent_id": agent_id,
+        "workspace_id": getattr(cluster_sorted[0], "workspace_id", None),
+        "repository_id": getattr(cluster_sorted[0], "repository_id", None),
+        "environment": getattr(cluster_sorted[0], "environment", None),
+        "version": LifecycleManager.DERIVATION_VERSION,
+    }
+    payload = {"sources": entries, "scope": scope}
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
+    ).hexdigest()
+
+
 def _key_slug(key: str) -> str:
     """Return a normalized domain slug for a record key.
 
@@ -455,6 +480,7 @@ class LifecycleManager:
             },
             entities=list(cluster_sorted[0].entities or []),
             working_dirs=list(cluster_sorted[0].working_dirs or []),
+            canonical_fingerprint=_canonical_fingerprint(cluster_sorted, agent_id),
         )
         return canonical
 
@@ -506,19 +532,23 @@ class LifecycleManager:
             if llm_fn is not None:
                 result.synthesized_record_ids.append(canonical.id)
 
+            # OD-6: atomically insert the canonical AND archive its sources in
+            # one transaction. Concurrent/repeated runs over the same source set
+            # are idempotent (return the existing canonical without re-archiving
+            # or duplicating). A failure rolls back, so sources are never left
+            # archived without a valid replacement canonical.
+            source_ids = [r.id for r in cluster]
             try:
-                self._store.write(canonical)
+                effective = self._store.write_canonical_atomic(canonical, source_ids)
             except Exception:
                 continue
 
-            for rec in cluster:
-                try:
-                    # Soft-archive the source from default selection; its value
-                    # and lineage remain intact and audit-recoverable.
-                    self._store.archive_record(rec.id)
-                    result.records_archived += 1
-                except Exception:
-                    pass
-            result.records_merged += len(cluster)
+            if getattr(effective, "id", None) == canonical.id:
+                # This run created the canonical; sources were archived by the
+                # atomic operation.
+                result.records_merged += len(cluster)
+                result.records_archived += len(cluster)
+            # If effective is a pre-existing canonical (idempotent retry), do not
+            # double-count archival — the prior run already archived the sources.
 
         return result

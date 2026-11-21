@@ -289,21 +289,11 @@ def test_d8_missing_source_invalidates_canonical(tmp_path):
 
 
 # D10b — concurrent consolidation does not double-archive or duplicate canonicals
-@pytest.mark.xfail(
-    strict=True,
-    reason="KNOWN GAP: concurrent consolidate() calls each create a canonical "
-           "because there is no idempotency guard/lock; a proper fix is a "
-           "storage/concurrency design decision (tracked separately; see "
-           "docs/spec/implementation/MIGRATION_REPORT.md). "
-           "Remove xfail when a guard is approved and implemented.",
-)
 def test_d10_concurrent_consolidation_no_duplicates(tmp_path):
     """Two consolidation runs racing over the same cluster must not produce more
     than one canonical nor double-count archived sources (idempotence under
-    concurrency). Deterministic single-process simulation using threads.
-
-    KNOWN GAP (xfail): without a guard, N concurrent runs create N canonicals for
-    the same source set. Sources themselves are never destroyed. See OD-6."""
+    concurrency). OD-6 FIXED: a BEGIN IMMEDIATE transaction + canonical
+    fingerprint uniqueness makes concurrent consolidation idempotent."""
     import threading
 
     db = _db(tmp_path)

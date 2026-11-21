@@ -109,6 +109,20 @@ class MemoryStore:
                     conn.execute(f"ALTER TABLE memories ADD COLUMN {column} {coltype}")
                 except sqlite3.OperationalError:
                     pass  # column already exists (pre-existing database)
+            # OD-6: a uniqueness guard for active derived canonicals by fingerprint.
+            # Partial unique index (only active, fingerprinted canonicals). Creation
+            # is best-effort: if legacy duplicate canonicals already exist the
+            # index cannot be built, so we skip it and rely on the atomic
+            # check-and-insert path (which is still race-safe via BEGIN IMMEDIATE).
+            try:
+                conn.execute(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS ux_memories_canonical_fp "
+                    "ON memories(canonical_fingerprint) "
+                    "WHERE kind = 'derived_canonical' AND archived = 0 "
+                    "AND canonical_fingerprint IS NOT NULL"
+                )
+            except sqlite3.OperationalError:
+                pass  # pre-existing duplicates or unsupported; atomic path still applies
         # Load existing records into memory
         self._reload()
 
@@ -224,6 +238,115 @@ class MemoryStore:
             )
         self._by_id[record.id] = record
         return record
+
+    _INSERT_SQL = """
+        INSERT OR REPLACE INTO memories
+            (id, key, value, origin, trust_level, agent_id, confidence,
+             version, archived, retrieval_count, created_at, entities,
+             last_retrieved, conflict_id, expiry_time, inferred, working_dirs,
+             consolidated, source_record_ids, session_id, kind, producer, derivation,
+             approval, environment, task_type, workspace_id, repository_id,
+             observed_at, effective_from, effective_until, canonical_fingerprint)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """
+
+    @staticmethod
+    def _record_params(record: "MemoryRecord") -> tuple:
+        return (
+            record.id, record.key, json.dumps(record.value), str(record.origin),
+            str(record.trust_level), record.agent_id, record.confidence, record.version,
+            int(record.archived), record.retrieval_count, record.created_at.isoformat(),
+            json.dumps(record.entities),
+            record.last_retrieved.isoformat() if record.last_retrieved else None,
+            record.conflict_id,
+            record.expiry_time.isoformat() if record.expiry_time else None,
+            int(record.inferred), json.dumps(record.working_dirs), int(record.consolidated),
+            json.dumps(record.source_record_ids), getattr(record, "session_id", None),
+            getattr(record, "kind", "source"), getattr(record, "producer", None),
+            json.dumps(getattr(record, "derivation", {}) or {}),
+            json.dumps(getattr(record, "approval", {}) or {}),
+            getattr(record, "environment", None), getattr(record, "task_type", None),
+            getattr(record, "workspace_id", None), getattr(record, "repository_id", None),
+            (record.observed_at.isoformat() if getattr(record, "observed_at", None) else None),
+            (record.effective_from.isoformat() if getattr(record, "effective_from", None) else None),
+            (record.effective_until.isoformat() if getattr(record, "effective_until", None) else None),
+            getattr(record, "canonical_fingerprint", None),
+        )
+
+    def write_canonical_atomic(self, canonical: "MemoryRecord", source_ids: list[str]) -> "MemoryRecord":
+        """Atomically create a derived canonical AND archive its source records.
+
+        OD-6 / FINAL-HARDENING §6. Uses a single ``BEGIN IMMEDIATE`` transaction
+        (write lock) so concurrent consolidations cannot create duplicate active
+        canonicals for the same fingerprint:
+
+        1. Inside the transaction, look for an existing active canonical with the
+           same ``canonical_fingerprint`` (idempotency). If found, return it and
+           do NOT archive anything (the prior run already did).
+        2. Otherwise insert the canonical and soft-archive the sources in the
+           same transaction. If the partial unique index rejects the insert (a
+           concurrent writer won the race), roll back and return the winner.
+
+        On any failure the transaction rolls back, so sources are NEVER left
+        archived without a valid replacement canonical.
+
+        Returns the effective canonical (new or the existing/winning one).
+        """
+        import sqlite3 as _sqlite3
+        from .sqlite_connection import connect as _connect
+
+        fp = getattr(canonical, "canonical_fingerprint", None)
+        conn = _connect(self._db_path, timeout=30.0)
+        try:
+            conn.isolation_level = None
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                # (1) Idempotency: existing active canonical for this fingerprint.
+                if fp:
+                    row = conn.execute(
+                        "SELECT * FROM memories WHERE canonical_fingerprint = ? "
+                        "AND kind = 'derived_canonical' AND archived = 0 LIMIT 1",
+                        (fp,),
+                    ).fetchone()
+                    if row is not None:
+                        conn.execute("COMMIT")
+                        existing = self._row_to_record(row)
+                        self._by_id[existing.id] = existing
+                        return existing
+                # (2) Insert canonical + archive sources atomically.
+                conn.execute(self._INSERT_SQL, self._record_params(canonical))
+                conn.executemany(
+                    "UPDATE memories SET archived = 1 WHERE id = ?",
+                    [(sid,) for sid in source_ids],
+                )
+                conn.execute("COMMIT")
+            except _sqlite3.IntegrityError:
+                # A concurrent writer inserted the same fingerprint; return theirs.
+                conn.execute("ROLLBACK")
+                if fp:
+                    row = conn.execute(
+                        "SELECT * FROM memories WHERE canonical_fingerprint = ? "
+                        "AND kind = 'derived_canonical' AND archived = 0 LIMIT 1",
+                        (fp,),
+                    ).fetchone()
+                    if row is not None:
+                        existing = self._row_to_record(row)
+                        self._by_id[existing.id] = existing
+                        return existing
+                raise
+            except Exception:
+                conn.execute("ROLLBACK")
+                raise
+        finally:
+            conn.close()
+
+        # Reflect committed changes in the in-memory cache.
+        self._by_id[canonical.id] = canonical
+        for sid in source_ids:
+            rec = self._by_id.get(sid)
+            if rec is not None:
+                rec.archived = True
+        return canonical
 
     def get_by_key(self, key: str) -> Optional[MemoryRecord]:
         for record in self._by_id.values():
