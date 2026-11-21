@@ -92,6 +92,12 @@ def make_record_spec(
     working_dirs: Optional[list] = None,
     entities: Optional[list] = None,
     expiry_time: Optional[datetime] = None,
+    environment: Optional[str] = None,
+    task_type: Optional[str] = None,
+    workspace_id: Optional[str] = None,
+    repository_id: Optional[str] = None,
+    effective_from: Optional[datetime] = None,
+    effective_until: Optional[datetime] = None,
 ) -> dict:
     """A declarative record spec consumed by :func:`write_specs`.
 
@@ -115,6 +121,12 @@ def make_record_spec(
         working_dirs=working_dirs or [],
         entities=entities or [],
         expiry_time=expiry_time,
+        environment=environment,
+        task_type=task_type,
+        workspace_id=workspace_id,
+        repository_id=repository_id,
+        effective_from=effective_from,
+        effective_until=effective_until,
     )
     if kind == "derived_canonical":
         from agentdb.governance.lifecycle_manager import _record_digest
@@ -156,6 +168,12 @@ def write_specs(db, specs: list[dict]) -> None:
             working_dirs=spec.get("working_dirs", []),
             entities=spec.get("entities", []),
             expiry_time=spec.get("expiry_time"),
+            environment=spec.get("environment"),
+            task_type=spec.get("task_type"),
+            workspace_id=spec.get("workspace_id"),
+            repository_id=spec.get("repository_id"),
+            effective_from=spec.get("effective_from"),
+            effective_until=spec.get("effective_until"),
         )
         db._store.write(rec)
 
