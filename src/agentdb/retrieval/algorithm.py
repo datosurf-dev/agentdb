@@ -144,7 +144,12 @@ class MultiSignalRanker:
                 staleness_warning=days_since > self._staleness_days,
             ))
 
-        results.sort(key=lambda x: x.composite_score, reverse=True)
+        # Deterministic ordering: sort by composite score (desc) and break ties
+        # by record id (asc). Without the secondary key, equal-score records
+        # would be ordered by candidate-arrival order, which depends on dict /
+        # SQLite row iteration and is not stable across runs or entry points
+        # (Product Contract §5D "stable ordering for identical inputs").
+        results.sort(key=lambda x: (-x.composite_score, x.record.id))
         return results
 
     def _reference_time(self, record: MemoryRecord) -> datetime:
@@ -152,6 +157,16 @@ class MultiSignalRanker:
         return _aware(ref)
 
     def _provenance_score(self, record: MemoryRecord) -> float:
+        # OD-2: score by *effective* authority, not the raw origin string. A
+        # legacy/asserted human_approved record (no verified approval evidence)
+        # ranks above agent/provider but below a verified human record, so a bare
+        # origin string cannot claim full human authority.
+        authority = record.authority() if hasattr(record, "authority") else None
+        if authority == "verified_human":
+            return self._provenance.get(Origin.HUMAN_APPROVED, 1.0)
+        if authority == "asserted_human":
+            # Above provider (0.6), below verified human (1.0).
+            return 0.75
         return self._provenance.get(record.origin, 0.3)
 
     def _recency_score(self, record: MemoryRecord, now: datetime) -> float:

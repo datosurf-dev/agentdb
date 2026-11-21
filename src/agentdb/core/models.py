@@ -71,6 +71,89 @@ class MemoryRecord:
     kind: str = "source"  # "source" | "derived_canonical"
     producer: Optional[str] = None
     derivation: dict = field(default_factory=dict)
+    # Verified approval evidence (OD-2). When present and well-formed this
+    # upgrades an origin="human_approved" record from *asserted* to *verified*
+    # human authority. Shape: {principal, mechanism, timestamp, digest}. A caller
+    # cannot set this by passing an origin string alone — only the trusted-host
+    # approval pathway (AgentDB.approve_authority) populates it.
+    approval: dict = field(default_factory=dict)
+    # Optional explicit context (CONTEXTUAL-SPEC §7). These support applicability
+    # decisions across workspaces/repos/environments/tasks. All are optional;
+    # missing context is NOT treated as a match (see eligibility rules).
+    environment: Optional[str] = None  # e.g. "production", "staging", "dev"
+    task_type: Optional[str] = None    # soft label; never authorizes/excludes alone
+    # Stable, host-supplied execution context identities (FINAL-HARDENING §3).
+    # Independent of each other and of directory basenames. Applicability
+    # metadata only — never credentials / never grant authorization.
+    workspace_id: Optional[str] = None
+    repository_id: Optional[str] = None
+    # Explicit temporal validity (FINAL-HARDENING §7). Distinct from created_at
+    # and expiry_time; missing effective_from is NOT substituted with created_at.
+    observed_at: Optional[datetime] = None
+    effective_from: Optional[datetime] = None
+    effective_until: Optional[datetime] = None
+    # Stable identity of a derived canonical over its normalized source set +
+    # scope (FINAL-HARDENING §6, OD-6). Enables atomic idempotency so concurrent
+    # consolidations cannot create duplicate active canonicals.
+    canonical_fingerprint: Optional[str] = None
+
+    # -- authority helpers (OD-2) ------------------------------------------
+    APPROVAL_DIGEST_VERSION = "2"
+
+    def approval_fingerprint(self) -> str:
+        """Versioned canonical fingerprint of approval-relevant content.
+
+        Binds: record id, key, value, agent/source identity, workspace,
+        repository, environment, and any approval-relevant content metadata.
+        Excludes volatile fields (retrieval counters, last-access timestamps).
+        FINAL-HARDENING §4.
+        """
+        import hashlib
+        import json as _json
+        payload = {
+            "v": self.APPROVAL_DIGEST_VERSION,
+            "id": self.id,
+            "key": self.key,
+            "value": self.value,
+            "agent_id": self.agent_id,
+            "workspace_id": self.workspace_id,
+            "repository_id": self.repository_id,
+            "environment": self.environment,
+        }
+        return hashlib.sha256(
+            _json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
+        ).hexdigest()
+
+    def has_verified_approval(self) -> bool:
+        """True only when this record carries a *host-verified* approval that is
+        still current. Requires: origin human_approved; approved==True; the
+        versioned canonical fingerprint matches the current content; and the
+        approval has not been revoked. Legacy/summary approvals (no verified
+        flag or a different digest version) are NOT verified. FINAL-HARDENING §4.
+        """
+        if str(self.origin) != "human_approved":
+            return False
+        ap = self.approval or {}
+        if ap.get("revoked"):
+            return False
+        if not ap.get("verified"):
+            return False
+        if ap.get("version") != self.APPROVAL_DIGEST_VERSION:
+            return False
+        if not (ap.get("principal") and ap.get("mechanism") and ap.get("timestamp")):
+            return False
+        return ap.get("fingerprint") == self.approval_fingerprint()
+
+    def authority(self) -> str:
+        """Effective authority class: 'verified_human' | 'asserted_human' |
+        'provider' | 'agent'. Legacy origin='human_approved' without a current
+        host-verified approval is 'asserted_human' (not silently verified)."""
+        origin = str(self.origin)
+        if origin == "human_approved":
+            return "verified_human" if self.has_verified_approval() else "asserted_human"
+        if origin == "provider_ingested":
+            return "provider"
+        return "agent"
 
 
 @dataclass

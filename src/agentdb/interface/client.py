@@ -136,6 +136,18 @@ def _extract_repo(working_dirs) -> "Optional[str]":
     return segment or None
 
 
+def _parse_as_of(value):
+    """Coerce an as_of spec value (datetime or ISO string) to datetime or None."""
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value
+    try:
+        return datetime.fromisoformat(str(value))
+    except (ValueError, TypeError):
+        return None
+
+
 def _classify_request_type(text: str) -> str:
     text_lower = text.lower()
     for keywords, request_type in _REQUEST_TYPE_RULES:
@@ -358,11 +370,17 @@ class AgentDB:
         infer_fn: Optional[Callable] = None,
         embed_fn: Optional[Callable] = None,
         local_embed: bool = False,
+        authority_verifier: Optional[Callable] = None,
     ) -> None:
         # db_path is an alias for path (used by adapter tests)
         if db_path is not None and path is None:
             path = db_path
         self._summarizer = summarizer
+        # FINAL-HARDENING §4: trusted-host authority verifier. Configured by the
+        # host at init (NOT passed by the requesting agent). Receives an approval
+        # claim dict and returns an affirmative allow/deny decision. Without it,
+        # verified authority cannot be created (fail closed).
+        self._authority_verifier = authority_verifier
         self._infer_fn = infer_fn
         # Resolve memory_dir from args or env vars
         resolved_memory_dir: Optional[Path] = None
@@ -719,7 +737,24 @@ class AgentDB:
         infer: bool = False,
         expiry_time: Optional["datetime"] = None,
         working_dirs: Optional[list[str]] = None,
+        approval: Optional[dict] = None,
+        environment: Optional[str] = None,
+        task_type: Optional[str] = None,
+        workspace_id: Optional[str] = None,
+        repository_id: Optional[str] = None,
+        observed_at: Optional["datetime"] = None,
+        effective_from: Optional["datetime"] = None,
+        effective_until: Optional["datetime"] = None,
     ) -> MemoryRecord:
+        """Write a memory record.
+
+        ``approval`` (OD-2): a trusted host may submit verified approval evidence
+        as ``{principal, mechanism, timestamp, digest}``. If present and its
+        ``digest`` matches the value being written, the record gains *verified*
+        human authority. Without it, ``origin="human_approved"`` is only
+        *asserted* authority. A caller cannot escalate to verified authority by
+        passing an origin string alone.
+        """
         if infer:
             if self._infer_fn is None:
                 raise ValueError(
@@ -758,7 +793,28 @@ class AgentDB:
             inferred=infer,
             working_dirs=[os.path.realpath(d) for d in (working_dirs or [])],
             session_id=session_id,
+            environment=environment,
+            task_type=task_type,
+            workspace_id=workspace_id,
+            repository_id=repository_id,
+            observed_at=observed_at,
+            effective_from=effective_from,
+            effective_until=effective_until,
         )
+
+        # FINAL-HARDENING §4: caller-supplied approval metadata is stored as
+        # *unverified* evidence only. Ordinary writes can NEVER create verified
+        # authority — any verified/version/fingerprint claims are stripped and
+        # the record is marked unverified. Verified authority is granted solely
+        # through approve_authority() + the trusted-host verifier.
+        if approval:
+            ap = dict(approval)
+            ap.pop("verified", None)
+            ap.pop("version", None)
+            ap.pop("fingerprint", None)
+            ap.pop("revoked", None)
+            ap["verified"] = False
+            record.approval = ap
 
         # Conflict detection: check before persisting
         existing = self._store.get_by_key(key)
@@ -842,8 +898,269 @@ class AgentDB:
         return record
 
     def read(self, key: str, agent_id: Optional[str] = None) -> Optional[MemoryRecord]:
-        """Raw read by key, no permission check."""
-        return self._store.get_by_key(key)
+        """Read a record by key.
+
+        OD-3: when a permissions policy is configured (isolation mode), read
+        authorization is enforced. A caller without identity, or whose identity
+        may not read ``key``, gets ``PermissionDenied`` (fail-closed). In the
+        default trusted mode (no ``permissions_path``) behavior is unchanged.
+        """
+        record = self._store.get_by_key(key)
+        if self._permissions is not None:
+            if record is not None:
+                # Authorize against the actual record (handles canonical
+                # source-visibility, not just the key prefix).
+                if not self._can_read_record(record, agent_id):
+                    # Audit + raise, mirroring key-based denial.
+                    self._authorize_read_key(key, agent_id)
+                    raise PermissionDenied(f"read denied for '{key}'")
+            else:
+                # No record: still enforce identity/key policy so a denied key
+                # fails closed (and audits) even when absent.
+                self._authorize_read_key(key, agent_id)
+        return record
+
+    def _authorize_read_key(self, key: str, agent_id: Optional[str]) -> None:
+        """Enforce configured read authorization for a single key (OD-3).
+
+        No-op in the default trusted mode. In isolation mode (a permissions
+        policy is present) a missing caller identity or a denied key raises
+        :class:`PermissionDenied`.
+        """
+        if self._permissions is None:
+            return
+        if not agent_id:
+            raise PermissionDenied(
+                "read authorization requires a caller identity (agent_id) when a "
+                "permissions policy is configured"
+            )
+        try:
+            self._permissions.check_read(key, agent_id)
+        except PermissionDenied as e:
+            self.audit_log.append(
+                EVENT_PERMISSION_DENIED,
+                {"action": "read", "key": key, "agent_id": agent_id, "reason": str(e)},
+            )
+            raise
+
+    def _can_read_record(self, record: MemoryRecord, agent_id: Optional[str]) -> bool:
+        """Return True if *agent_id* may read *record* under the configured policy.
+
+        Trusted mode (no policy) → always True. Isolation mode → False when the
+        caller has no identity or the key is denied. A derived canonical is only
+        readable if ALL of its sources are readable (no leak through summaries).
+        """
+        if self._permissions is None:
+            return True
+        if not agent_id:
+            return False
+        # Derived canonicals live under memory/canonical/... rather than an
+        # agent scope. Their visibility is defined by their *sources*: a caller
+        # may see a canonical iff it may read every contributing source. (OD-3
+        # critical rule — no leak of unreadable source content via a summary.)
+        if getattr(record, "kind", "source") == "derived_canonical":
+            sources = record.source_record_ids or []
+            if not sources:
+                # No lineage → cannot verify source visibility → deny.
+                return False
+            for sid in sources:
+                src = self._store.get_by_id(sid)
+                if src is None:
+                    continue
+                if not self._can_read_key_simple(src.key, agent_id):
+                    return False
+            return True
+        try:
+            self._permissions.check_read(record.key, agent_id)
+        except PermissionDenied:
+            return False
+        return True
+
+    def _can_read_key_simple(self, key: str, agent_id: str) -> bool:
+        try:
+            self._permissions.check_read(key, agent_id)
+            return True
+        except PermissionDenied:
+            return False
+
+    # ------------------------------------------------------------------
+    # OD-2 — trusted-host approval pathway
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _content_digest(value) -> str:
+        import hashlib
+        payload = json.dumps(value, sort_keys=True, default=str)
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+    def _require_verifier(self, action: str) -> None:
+        """Fail closed when no trusted-host authority verifier is configured."""
+        if self._authority_verifier is None:
+            raise PermissionDenied(
+                f"{action} requires a trusted-host authority_verifier configured "
+                "at AgentDB initialization; verified authority cannot be created "
+                "or revoked without one (fail closed)."
+            )
+
+    def _verify_claim(self, claim: dict) -> bool:
+        """Ask the host verifier for an affirmative allow/deny decision.
+
+        The verifier receives the claim (record identity, scope, content
+        fingerprint, requested action, principal, mechanism) and must return a
+        truthy value to ALLOW. Any exception or falsy value is a deny.
+        """
+        try:
+            decision = self._authority_verifier(claim)
+        except Exception:
+            return False
+        return bool(decision)
+
+    def approve_authority(
+        self,
+        record_id: str,
+        *,
+        principal: str,
+        mechanism: str,
+        approved_at: Optional["datetime"] = None,
+    ) -> MemoryRecord:
+        """Create **verified** human authority via the trusted-host verifier.
+
+        FINAL-HARDENING §4: a valid digest proves content consistency, not human
+        authorization. Verified authority is granted ONLY when a host-configured
+        ``authority_verifier`` returns an affirmative decision for this claim.
+        Without a verifier, or on denial, this raises :class:`PermissionDenied`
+        (fail closed). Callers cannot manufacture verified authority by passing
+        metadata.
+
+        Returns the updated record.
+        """
+        self._require_verifier("approve_authority")
+        record = self._store.get_by_id(record_id)
+        if record is None:
+            raise ValueError(f"no record with id {record_id!r}")
+
+        fingerprint = record.approval_fingerprint()
+        claim = {
+            "action": "approve",
+            "record_id": record.id,
+            "key": record.key,
+            "agent_id": record.agent_id,
+            "workspace_id": record.workspace_id,
+            "repository_id": record.repository_id,
+            "environment": record.environment,
+            "fingerprint": fingerprint,
+            "principal": str(principal),
+            "mechanism": str(mechanism),
+        }
+        if not self._verify_claim(claim):
+            self.audit_log.append(
+                EVENT_PERMISSION_DENIED,
+                {"action": "approve_authority", "record_id": record_id,
+                 "principal": principal, "reason": "verifier_denied"},
+            )
+            raise PermissionDenied(
+                f"authority verifier denied approval for record {record_id!r}"
+            )
+
+        ts = approved_at or _utcnow()
+        prev = record.approval or {}
+        history = list(prev.get("history", []))
+        history.append({
+            "action": "approved",
+            "principal": str(principal),
+            "mechanism": str(mechanism),
+            "timestamp": ts.isoformat() if hasattr(ts, "isoformat") else str(ts),
+            "fingerprint": fingerprint,
+        })
+        record.approval = {
+            "verified": True,
+            "version": record.APPROVAL_DIGEST_VERSION,
+            "principal": str(principal),
+            "mechanism": str(mechanism),
+            "timestamp": ts.isoformat() if hasattr(ts, "isoformat") else str(ts),
+            "fingerprint": fingerprint,
+            "history": history,
+        }
+        record.origin = "human_approved"
+        record.trust_level = "human"
+        self._store.write(record)
+        self.audit_log.append(
+            EVENT_MEMORY_WRITE,
+            {
+                "action": "approve_authority",
+                "record_id": record_id,
+                "principal": principal,
+                "mechanism": mechanism,
+                "agent_id": record.agent_id,
+                "fingerprint": fingerprint,
+            },
+        )
+        return record
+
+    def revoke_authority(
+        self,
+        record_id: str,
+        *,
+        principal: str,
+        mechanism: str,
+        revoked_at: Optional["datetime"] = None,
+    ) -> MemoryRecord:
+        """Revoke verified authority through the trusted-host verifier (§4).
+
+        Requires an affirmative verifier decision. Removes effective verified
+        authority (origin reverts to asserted), preserves the memory and an
+        auditable revocation history. Does not delete the record.
+        """
+        self._require_verifier("revoke_authority")
+        record = self._store.get_by_id(record_id)
+        if record is None:
+            raise ValueError(f"no record with id {record_id!r}")
+        claim = {
+            "action": "revoke",
+            "record_id": record.id,
+            "key": record.key,
+            "agent_id": record.agent_id,
+            "workspace_id": record.workspace_id,
+            "repository_id": record.repository_id,
+            "environment": record.environment,
+            "fingerprint": record.approval_fingerprint(),
+            "principal": str(principal),
+            "mechanism": str(mechanism),
+        }
+        if not self._verify_claim(claim):
+            self.audit_log.append(
+                EVENT_PERMISSION_DENIED,
+                {"action": "revoke_authority", "record_id": record_id,
+                 "principal": principal, "reason": "verifier_denied"},
+            )
+            raise PermissionDenied(
+                f"authority verifier denied revocation for record {record_id!r}"
+            )
+
+        ts = revoked_at or _utcnow()
+        ap = dict(record.approval or {})
+        history = list(ap.get("history", []))
+        history.append({
+            "action": "revoked",
+            "principal": str(principal),
+            "mechanism": str(mechanism),
+            "timestamp": ts.isoformat() if hasattr(ts, "isoformat") else str(ts),
+        })
+        ap["verified"] = False
+        ap["revoked"] = True
+        ap["revoked_at"] = ts.isoformat() if hasattr(ts, "isoformat") else str(ts)
+        ap["history"] = history
+        record.approval = ap
+        # Effective authority removed: revert asserted human origin.
+        record.origin = "agent_inferred"
+        record.trust_level = "agent"
+        self._store.write(record)
+        self.audit_log.append(
+            EVENT_MEMORY_WRITE,
+            {"action": "revoke_authority", "record_id": record_id,
+             "principal": principal, "mechanism": mechanism, "agent_id": record.agent_id},
+        )
+        return record
 
     def delete(self, key: str, agent_id: str, trust_zone: str) -> None:
         """Archive a record by key. Raises PermissionDenied if not allowed."""
@@ -1083,9 +1400,26 @@ class AgentDB:
             return []
 
     def consolidate(self, agent_id: str, llm_fn=None, **kwargs) -> "ConsolidationResult":
-        """Cluster near-duplicate records, archive lower-confidence copies, mark the
-        surviving canonical as consolidated=True with source_record_ids provenance.
-        If llm_fn is provided, synthesizes the canonical value."""
+        """Cluster near-duplicate records into a NEW derived canonical record.
+
+        Source records are never overwritten; they are soft-archived (still
+        recoverable) and their lineage is recorded on the canonical via
+        ``source_record_ids`` and ``derivation``. A valid canonical may be
+        selected in place of its archived sources. If ``llm_fn`` is provided it
+        synthesizes the canonical value; otherwise the highest-confidence source
+        value is copied. Unrelated or contradictory records are not merged."""
+        # Obsolete skill-era keyword, retained as a no-op for backward
+        # compatibility: it no longer selects or ranks anything (skill
+        # management was removed from AgentDB). Accept it, warn, and drop it so
+        # callers that still pass it do not hard-fail.
+        if "skill_candidate_threshold" in kwargs:
+            kwargs.pop("skill_candidate_threshold")
+            warnings.warn(
+                "consolidate(skill_candidate_threshold=...) is obsolete and ignored: "
+                "AgentDB no longer manages skills.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
         result = self.lifecycle.consolidate(
             agent_id, gateway=self.gateway, llm_fn=llm_fn, **kwargs
         )
@@ -1094,6 +1428,41 @@ class AgentDB:
         except Exception:
             pass
         return result
+
+    def validate_canonicals(self, agent_id: Optional[str] = None) -> list[dict]:
+        """Validate existing derived canonicals against current evidence (§5).
+
+        Repeatable, non-destructive: reports each canonical's validity and a
+        reason, WITHOUT rewriting or deleting anything. Invalid canonicals are
+        already excluded from retrieval by ``_canonical_invalidation_reason``
+        (source revised/missing) and are re-checked here against the tightened
+        value/scope compatibility rules (a canonical whose sources are now
+        incompatible is flagged ``canonical_sources_incompatible``).
+
+        Returns a list of ``{canonical_id, valid, reason}`` dicts.
+        """
+        report: list[dict] = []
+        for rec in list(self._store._by_id.values()):
+            if getattr(rec, "kind", "source") != "derived_canonical":
+                continue
+            if agent_id is not None and rec.agent_id != agent_id:
+                continue
+            # Existing invalidation: source revised / missing / no lineage.
+            reason = self._canonical_invalidation_reason(rec)
+            if reason is None:
+                # Re-check value/scope compatibility across the live sources.
+                sources = [
+                    self._store.get_by_id(sid) for sid in (rec.source_record_ids or [])
+                ]
+                sources = [s for s in sources if s is not None]
+                if len(sources) >= 2 and not self.lifecycle._merge_compatible(sources):
+                    reason = "canonical_sources_incompatible"
+            report.append({
+                "canonical_id": rec.id,
+                "valid": reason is None,
+                "reason": reason,
+            })
+        return report
 
     def checkpoint(
         self, agent_id: str, session_id: str, origin: str = "agent_inferred"
@@ -1149,7 +1518,8 @@ class AgentDB:
     _EPISODIC_PREFIX = "memory/episodic/"
 
     def _eligibility_reason(self, record: MemoryRecord, *, agent_id: str, isolate_by_agent: bool,
-                            session_id: Optional[str], include_consolidated: bool) -> Optional[str]:
+                            session_id: Optional[str], include_consolidated: bool,
+                            scope: Optional[dict] = None) -> Optional[str]:
         """Return a human-readable exclusion reason, or None if the record is eligible.
 
         Applies the SAME rules regardless of which candidate branch (lexical vs
@@ -1158,8 +1528,39 @@ class AgentDB:
         """
         if record.archived:
             return "archived"
+        # OD-3: read authorization (isolation mode only; no-op in trusted mode).
+        # Applied before ranking so unauthorized records never surface, and a
+        # canonical is excluded if any of its sources is unreadable.
+        if not self._can_read_record(record, agent_id):
+            return "read_denied"
         if isolate_by_agent and record.agent_id != agent_id:
             return "agent_scope"
+        # CONTEXTUAL-SPEC §7: explicit environment mismatch is inapplicable.
+        # Missing scope on EITHER side is not a mismatch (never excluded here),
+        # and task_type is deliberately NOT an exclusion criterion.
+        if scope:
+            want_env = scope.get("environment")
+            rec_env = getattr(record, "environment", None)
+            if want_env and rec_env and want_env != rec_env:
+                return "environment_mismatch"
+            # FINAL-HARDENING §3: explicit stable-identity mismatch is
+            # inapplicable. Missing identity on either side is unknown (not a
+            # mismatch). Workspace and repository are evaluated independently:
+            # if EITHER explicitly conflicts, it is not an exact-context match.
+            want_ws = scope.get("workspace_id")
+            if want_ws and getattr(record, "workspace_id", None) and want_ws != record.workspace_id:
+                return "workspace_mismatch"
+            want_repo_id = scope.get("repository_id")
+            if want_repo_id and getattr(record, "repository_id", None) and want_repo_id != record.repository_id:
+                return "repository_mismatch"
+            # FINAL-HARDENING §7: explicit temporal applicability. When an as_of
+            # time is supplied, records explicitly outside their validity window
+            # are inapplicable for current queries. Unknown validity stays
+            # eligible (no exclusion, no bonus). created_at is never used as a
+            # substitute for effective_from.
+            as_of = scope.get("as_of")
+            if as_of is not None and self._temporal_inapplicable(record, as_of):
+                return "temporal_inapplicable"
         # Episodic records are session-local; cross-session episodic is excluded.
         if session_id is not None and self._EPISODIC_PREFIX in record.key \
                 and f"/{session_id}/" not in record.key:
@@ -1187,6 +1588,71 @@ class AgentDB:
             if exp <= _utcnow():
                 return "expired"
         return None
+
+    @staticmethod
+    def _applicability_match(record: MemoryRecord, scope: Optional[dict]) -> int:
+        """Score how specifically a record matches the query scope (0 or more).
+
+        Used only as a ranking tie-break (never changes composite weights, never
+        grants authorization, never justifies consolidation). Missing scope on
+        either side contributes 0 (an unscoped record gets NO exact-scope bonus).
+        """
+        if not scope:
+            return 0
+        score = 0
+        rec_env = getattr(record, "environment", None)
+        want_env = scope.get("environment")
+        if want_env and rec_env and want_env == rec_env:
+            score += 1
+        # Explicit stable identities (FINAL-HARDENING §3): exact match counts;
+        # missing identity contributes 0 (unknown != match).
+        want_ws = scope.get("workspace_id")
+        if want_ws and getattr(record, "workspace_id", None) and want_ws == record.workspace_id:
+            score += 1
+        want_repo_id = scope.get("repository_id")
+        if want_repo_id and getattr(record, "repository_id", None) and want_repo_id == record.repository_id:
+            score += 1
+        # Legacy soft hint: directory basename match via working_dirs. NEVER
+        # overrides an explicit identity mismatch (handled in eligibility), and
+        # only when no explicit repository_id is set on the record.
+        want_repo = scope.get("repo")
+        if (want_repo and not getattr(record, "repository_id", None)
+                and not want_repo_id and getattr(record, "working_dirs", None)):
+            if _extract_repo(record.working_dirs) == want_repo:
+                score += 1
+        return score
+
+    @staticmethod
+    def _temporal_inapplicable(record: MemoryRecord, as_of) -> bool:
+        """True if *record* is explicitly outside its validity window at *as_of*.
+
+        Uses explicit effective_from / effective_until / expiry_time only.
+        Unknown bounds are treated as open (eligible), and created_at is never
+        substituted for effective_from. Timezone-safe comparison.
+        """
+        def _aware(dt):
+            if dt is None:
+                return None
+            if dt.tzinfo is None:
+                return dt.replace(tzinfo=timezone.utc)
+            return dt
+
+        ref = _aware(as_of if isinstance(as_of, datetime) else _parse_as_of(as_of))
+        if ref is None:
+            return False
+        ef = _aware(getattr(record, "effective_from", None))
+        eu = _aware(getattr(record, "effective_until", None))
+        ex = _aware(record.expiry_time)
+        # Explicitly not-yet-effective.
+        if ef is not None and ref < ef:
+            return True
+        # Explicitly past its effective-until.
+        if eu is not None and ref > eu:
+            return True
+        # Explicitly expired.
+        if ex is not None and ref > ex:
+            return True
+        return False
 
     def _canonical_invalidation_reason(self, canonical: MemoryRecord) -> Optional[str]:
         """Return a reason string if a derived canonical is invalidated, else None.
@@ -1365,7 +1831,17 @@ class AgentDB:
         working_dirs: Optional[list[str]] = None,
         include_consolidated: bool = True,
         trace: bool = False,
+        scope: Optional[dict] = None,
     ) -> RetrievalResult:
+        """Retrieve relevant memory for a query.
+
+        ``scope`` (CONTEXTUAL-SPEC §7) optionally supplies explicit context:
+        ``{"environment": str, "workspace": str, "repo": str, "task_type": str,
+        "effective_time": datetime}``. Only ``environment`` is used as a hard
+        applicability filter (explicit mismatch excludes a record); ``task_type``
+        is a soft label and never excludes on its own. Missing scope is not a
+        match. Existing ranking weights are unchanged.
+        """
         agent_config = self.config_for(agent_id)
         isolate_by_agent = agent_config["isolate_by_agent"]
         resolved_limit = limit if limit is not None else agent_config["retrieval"]["retrieve_limit"]
@@ -1408,6 +1884,7 @@ class AgentDB:
             reason = self._eligibility_reason(
                 rec, agent_id=agent_id, isolate_by_agent=isolate_by_agent,
                 session_id=session_id, include_consolidated=include_consolidated,
+                scope=scope,
             )
             if reason is None:
                 eligible.append(rec)
@@ -1442,6 +1919,18 @@ class AgentDB:
             query, eligible, agent_id=agent_id,
             query_embedding=query_embedding,
             session_working_dirs=working_dirs,
+        )
+
+        # CONTEXTUAL-SPEC §7: exact scope matches improve *applicability* as a
+        # deterministic tie-break, WITHOUT altering the weighted composite score
+        # (weights preserved). Order: composite desc, exact-scope match first,
+        # then record id for determinism.
+        ranked_all.sort(
+            key=lambda rr: (
+                -rr.composite_score,
+                -self._applicability_match(rr.record, scope),
+                rr.record.id,
+            )
         )
 
         # Drop records that don't meet the minimum relevance threshold.
@@ -1611,6 +2100,7 @@ class AgentDB:
         budget_tokens: Optional[int] = None,
         include_consolidated: bool = True,
         trace: bool = False,
+        scope: Optional[dict] = None,
     ) -> RetrievalResult:
         """Entity-driven retrieval.
 
@@ -1638,6 +2128,7 @@ class AgentDB:
             reason = self._eligibility_reason(
                 rec, agent_id=agent_id, isolate_by_agent=isolate_by_agent,
                 session_id=session_id, include_consolidated=include_consolidated,
+                scope=scope,
             )
             if reason is None:
                 eligible.append(rec)
@@ -1717,6 +2208,72 @@ class AgentDB:
             truncated=truncated,
             trace=trace_out,
         )
+
+    # ------------------------------------------------------------------
+    # Context rendering (CONTEXTUAL-SPEC §8)
+    # ------------------------------------------------------------------
+
+    def render_context(self, result: RetrievalResult, *, max_records: Optional[int] = None) -> str:
+        """Render a retrieval result as concise, model-facing context.
+
+        Default: one concise natural-language line per selected record. A
+        derived canonical line includes a compact ``Scope:`` qualifier only when
+        it has one, and an ``Evidence:`` source-id list. If selected records carry
+        a material (unresolved) conflict, a short disagreement block is appended
+        instead of silently merging the claims. Verbose metadata is not emitted
+        unless it is present and relevant. (Does not exceed what was already
+        budgeted in ``result``.)
+        """
+        records = list(result.records)
+        if max_records is not None:
+            records = records[:max_records]
+        lines: list[str] = []
+        for r in records:
+            value = r.value
+            text = json.dumps(value, ensure_ascii=False) if isinstance(value, (dict, list)) else str(value)
+            line = text.strip()
+            if getattr(r, "kind", "source") == "derived_canonical":
+                quals = []
+                env = getattr(r, "environment", None)
+                repo = _extract_repo(getattr(r, "working_dirs", None) or [])
+                scope_bits = [b for b in (repo, env) if b]
+                if scope_bits:
+                    quals.append("Scope: " + " / ".join(scope_bits) + ".")
+                src_ids = getattr(r, "source_record_ids", []) or []
+                if src_ids:
+                    quals.append("Evidence: " + ", ".join(str(s) for s in src_ids) + ".")
+                if quals:
+                    line = line + " " + " ".join(quals)
+            lines.append(line)
+
+        block = self._render_conflict_block(result, records)
+        if block:
+            lines.append(block)
+        return "\n".join(lines)
+
+    def _render_conflict_block(self, result: RetrievalResult, records: list) -> str:
+        """Render a compact "unresolved disagreement" block for material conflicts
+        among the selected records, if any. Returns '' when none."""
+        sel = {r.id for r in records}
+        by_id = {r.id: r for r in records}
+        material = []
+        for c in (result.conflicts or []):
+            if c.record_a_id in sel and c.record_b_id in sel:
+                material.append(c)
+        if not material:
+            return ""
+        out = ["Unresolved disagreement:"]
+        def _val(rid):
+            r = by_id.get(rid)
+            if r is None:
+                return "?"
+            v = r.value
+            return json.dumps(v, ensure_ascii=False) if isinstance(v, (dict, list)) else str(v)
+        for c in material:
+            out.append(f"- {_val(c.record_a_id)}: {c.record_a_id}")
+            out.append(f"- {_val(c.record_b_id)}: {c.record_b_id}")
+        out.append("No verified supersession found.")
+        return "\n".join(out)
 
     def record_outcome(
         self,

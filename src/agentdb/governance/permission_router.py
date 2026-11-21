@@ -124,6 +124,17 @@ class PermissionRouter:
         if self._matches_any(key, can_read):
             return  # allowed
 
+        # Framework-managed prefixes are readable by default (symmetric with
+        # write); the gateway writes proposals and must read them back. An
+        # explicit cannot_read entry still overrides this.
+        cannot_read = agent_config.get("cannot_read", [])
+        if self._matches_any(key, cannot_read):
+            raise PermissionDenied(
+                f"Agent '{agent_id}' is explicitly denied read access to '{key}'"
+            )
+        if self._matches_any(key, FRAMEWORK_MANAGED_WRITE_PREFIXES):
+            return  # allowed
+
         if self._default_policy == "deny":
             raise PermissionDenied(
                 f"Agent '{agent_id}' has no explicit read permission for '{key}' "

@@ -11,8 +11,8 @@ def _db(tmp_path):
 
 def test_consolidate_merges_near_duplicate_records(tmp_path):
     db = _db(tmp_path)
-    db.write("memory/analytics-schema-note", "v1", origin="agent_inferred", agent_id="a1")
-    db.write("memory/analytics-schema-update", "v2", origin="agent_inferred", agent_id="a1")
+    db.write("memory/analytics-schema-note", "analytics schema columnar layout", origin="agent_inferred", agent_id="a1")
+    db.write("memory/analytics-schema-update", "analytics schema columnar layout confirmed", origin="agent_inferred", agent_id="a1")
     result = db.consolidate("a1", since_hours=0, min_cluster_size=2)
     assert result.clusters_found >= 1
     assert result.records_archived >= 1
@@ -32,8 +32,8 @@ def test_consolidate_archives_lower_confidence_records(tmp_path):
 
 def test_canonical_marked_consolidated(tmp_path):
     db = _db(tmp_path)
-    db.write("memory/analytics-schema-note", "v1", origin="agent_inferred", agent_id="a1")
-    db.write("memory/analytics-schema-update", "v2", origin="agent_inferred", agent_id="a1")
+    db.write("memory/analytics-schema-note", "analytics schema columnar layout", origin="agent_inferred", agent_id="a1")
+    db.write("memory/analytics-schema-update", "analytics schema columnar layout confirmed", origin="agent_inferred", agent_id="a1")
     db.consolidate("a1", since_hours=0, min_cluster_size=2)
     active = [r for r in db._store.list_all() if r.agent_id == "a1"]
     assert len(active) == 1
@@ -42,8 +42,8 @@ def test_canonical_marked_consolidated(tmp_path):
 
 def test_source_record_ids_traced_on_canonical(tmp_path):
     db = _db(tmp_path)
-    r1 = db.write("memory/analytics-schema-note", "v1", origin="agent_inferred", agent_id="a1")
-    r2 = db.write("memory/analytics-schema-update", "v2", origin="agent_inferred", agent_id="a1")
+    r1 = db.write("memory/analytics-schema-note", "analytics schema columnar layout", origin="agent_inferred", agent_id="a1")
+    r2 = db.write("memory/analytics-schema-update", "analytics schema columnar layout confirmed", origin="agent_inferred", agent_id="a1")
     db.consolidate("a1", since_hours=0, min_cluster_size=2)
     active = [r for r in db._store.list_all() if r.agent_id == "a1"]
     assert len(active) == 1
@@ -54,8 +54,8 @@ def test_source_record_ids_traced_on_canonical(tmp_path):
 
 def test_include_consolidated_false_excludes_canonical(tmp_path):
     db = _db(tmp_path)
-    db.write("memory/analytics-schema-note", "v1", origin="agent_inferred", agent_id="a1")
-    db.write("memory/analytics-schema-update", "v2", origin="agent_inferred", agent_id="a1")
+    db.write("memory/analytics-schema-note", "analytics schema columnar layout", origin="agent_inferred", agent_id="a1")
+    db.write("memory/analytics-schema-update", "analytics schema columnar layout confirmed", origin="agent_inferred", agent_id="a1")
     db.consolidate("a1", since_hours=0, min_cluster_size=2)
     result = db.retrieve("analytics schema", agent_id="a1", include_consolidated=False)
     assert all(not r.consolidated for r in result.records)
@@ -63,8 +63,8 @@ def test_include_consolidated_false_excludes_canonical(tmp_path):
 
 def test_include_consolidated_true_returns_canonical_by_default(tmp_path):
     db = _db(tmp_path)
-    db.write("memory/analytics-schema-note", "v1", origin="agent_inferred", agent_id="a1")
-    db.write("memory/analytics-schema-update", "v2", origin="agent_inferred", agent_id="a1")
+    db.write("memory/analytics-schema-note", "analytics schema columnar layout", origin="agent_inferred", agent_id="a1")
+    db.write("memory/analytics-schema-update", "analytics schema columnar layout confirmed", origin="agent_inferred", agent_id="a1")
     db.consolidate("a1", since_hours=0, min_cluster_size=2)
     result = db.retrieve("analytics schema", agent_id="a1")
     assert any(r.consolidated for r in result.records)
@@ -87,8 +87,8 @@ def test_consolidate_human_approved_immune(tmp_path):
 
 def test_consolidate_only_touches_agent_records(tmp_path):
     db = _db(tmp_path)
-    db.write("memory/orders-model-note", "v1", origin="agent_inferred", agent_id="a1")
-    db.write("memory/orders-model-update", "v2", origin="agent_inferred", agent_id="other")
+    db.write("memory/orders-model-note", "analytics schema columnar layout", origin="agent_inferred", agent_id="a1")
+    db.write("memory/orders-model-update", "analytics schema columnar layout confirmed", origin="agent_inferred", agent_id="other")
     db.consolidate("a1", since_hours=0, min_cluster_size=2)
     other = [r for r in db._store.list_all() if r.agent_id == "other"]
     assert len(other) == 1
@@ -96,8 +96,8 @@ def test_consolidate_only_touches_agent_records(tmp_path):
 
 def test_consolidate_idempotent(tmp_path):
     db = _db(tmp_path)
-    db.write("memory/analytics-schema-note", "v1", origin="agent_inferred", agent_id="a1")
-    db.write("memory/analytics-schema-update", "v2", origin="agent_inferred", agent_id="a1")
+    db.write("memory/analytics-schema-note", "analytics schema columnar layout", origin="agent_inferred", agent_id="a1")
+    db.write("memory/analytics-schema-update", "analytics schema columnar layout confirmed", origin="agent_inferred", agent_id="a1")
     db.consolidate("a1", since_hours=0, min_cluster_size=2)
     r2 = db.consolidate("a1", since_hours=0, min_cluster_size=2)
     assert r2.records_archived == 0
@@ -119,8 +119,8 @@ def test_consolidate_with_llm_fn_synthesizes_value(tmp_path):
 
 def test_auto_trigger_fires_after_threshold(tmp_path):
     db = _db(tmp_path)
-    db.write("memory/analytics-schema-note", "v1", origin="agent_inferred", agent_id="a1")
-    db.write("memory/analytics-schema-update", "v2", origin="agent_inferred", agent_id="a1")
+    db.write("memory/analytics-schema-note", "analytics schema columnar layout", origin="agent_inferred", agent_id="a1")
+    db.write("memory/analytics-schema-update", "analytics schema columnar layout confirmed", origin="agent_inferred", agent_id="a1")
     old_ts = (datetime.now(timezone.utc) - timedelta(days=8)).isoformat()
     with db._store._connect() as conn:
         conn.execute(
@@ -136,8 +136,8 @@ def test_auto_trigger_fires_after_threshold(tmp_path):
 
 def test_auto_trigger_does_not_fire_before_session_threshold(tmp_path):
     db = _db(tmp_path)
-    db.write("memory/analytics-schema-note", "v1", origin="agent_inferred", agent_id="a1")
-    db.write("memory/analytics-schema-update", "v2", origin="agent_inferred", agent_id="a1")
+    db.write("memory/analytics-schema-note", "analytics schema columnar layout", origin="agent_inferred", agent_id="a1")
+    db.write("memory/analytics-schema-update", "analytics schema columnar layout confirmed", origin="agent_inferred", agent_id="a1")
     old_ts = (datetime.now(timezone.utc) - timedelta(days=8)).isoformat()
     with db._store._connect() as conn:
         conn.execute(
@@ -152,8 +152,8 @@ def test_auto_trigger_does_not_fire_before_session_threshold(tmp_path):
 
 def test_auto_trigger_resets_session_count(tmp_path):
     db = _db(tmp_path)
-    db.write("memory/analytics-schema-note", "v1", origin="agent_inferred", agent_id="a1")
-    db.write("memory/analytics-schema-update", "v2", origin="agent_inferred", agent_id="a1")
+    db.write("memory/analytics-schema-note", "analytics schema columnar layout", origin="agent_inferred", agent_id="a1")
+    db.write("memory/analytics-schema-update", "analytics schema columnar layout confirmed", origin="agent_inferred", agent_id="a1")
     old_ts = (datetime.now(timezone.utc) - timedelta(days=8)).isoformat()
     with db._store._connect() as conn:
         conn.execute(
