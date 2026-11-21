@@ -858,8 +858,90 @@ class AgentDB:
         return record
 
     def read(self, key: str, agent_id: Optional[str] = None) -> Optional[MemoryRecord]:
-        """Raw read by key, no permission check."""
-        return self._store.get_by_key(key)
+        """Read a record by key.
+
+        OD-3: when a permissions policy is configured (isolation mode), read
+        authorization is enforced. A caller without identity, or whose identity
+        may not read ``key``, gets ``PermissionDenied`` (fail-closed). In the
+        default trusted mode (no ``permissions_path``) behavior is unchanged.
+        """
+        record = self._store.get_by_key(key)
+        if self._permissions is not None:
+            if record is not None:
+                # Authorize against the actual record (handles canonical
+                # source-visibility, not just the key prefix).
+                if not self._can_read_record(record, agent_id):
+                    # Audit + raise, mirroring key-based denial.
+                    self._authorize_read_key(key, agent_id)
+                    raise PermissionDenied(f"read denied for '{key}'")
+            else:
+                # No record: still enforce identity/key policy so a denied key
+                # fails closed (and audits) even when absent.
+                self._authorize_read_key(key, agent_id)
+        return record
+
+    def _authorize_read_key(self, key: str, agent_id: Optional[str]) -> None:
+        """Enforce configured read authorization for a single key (OD-3).
+
+        No-op in the default trusted mode. In isolation mode (a permissions
+        policy is present) a missing caller identity or a denied key raises
+        :class:`PermissionDenied`.
+        """
+        if self._permissions is None:
+            return
+        if not agent_id:
+            raise PermissionDenied(
+                "read authorization requires a caller identity (agent_id) when a "
+                "permissions policy is configured"
+            )
+        try:
+            self._permissions.check_read(key, agent_id)
+        except PermissionDenied as e:
+            self.audit_log.append(
+                EVENT_PERMISSION_DENIED,
+                {"action": "read", "key": key, "agent_id": agent_id, "reason": str(e)},
+            )
+            raise
+
+    def _can_read_record(self, record: MemoryRecord, agent_id: Optional[str]) -> bool:
+        """Return True if *agent_id* may read *record* under the configured policy.
+
+        Trusted mode (no policy) → always True. Isolation mode → False when the
+        caller has no identity or the key is denied. A derived canonical is only
+        readable if ALL of its sources are readable (no leak through summaries).
+        """
+        if self._permissions is None:
+            return True
+        if not agent_id:
+            return False
+        # Derived canonicals live under memory/canonical/... rather than an
+        # agent scope. Their visibility is defined by their *sources*: a caller
+        # may see a canonical iff it may read every contributing source. (OD-3
+        # critical rule — no leak of unreadable source content via a summary.)
+        if getattr(record, "kind", "source") == "derived_canonical":
+            sources = record.source_record_ids or []
+            if not sources:
+                # No lineage → cannot verify source visibility → deny.
+                return False
+            for sid in sources:
+                src = self._store.get_by_id(sid)
+                if src is None:
+                    continue
+                if not self._can_read_key_simple(src.key, agent_id):
+                    return False
+            return True
+        try:
+            self._permissions.check_read(record.key, agent_id)
+        except PermissionDenied:
+            return False
+        return True
+
+    def _can_read_key_simple(self, key: str, agent_id: str) -> bool:
+        try:
+            self._permissions.check_read(key, agent_id)
+            return True
+        except PermissionDenied:
+            return False
 
     # ------------------------------------------------------------------
     # OD-2 — trusted-host approval pathway
@@ -1249,6 +1331,11 @@ class AgentDB:
         """
         if record.archived:
             return "archived"
+        # OD-3: read authorization (isolation mode only; no-op in trusted mode).
+        # Applied before ranking so unauthorized records never surface, and a
+        # canonical is excluded if any of its sources is unreadable.
+        if not self._can_read_record(record, agent_id):
+            return "read_denied"
         if isolate_by_agent and record.agent_id != agent_id:
             return "agent_scope"
         # Episodic records are session-local; cross-session episodic is excluded.

@@ -109,7 +109,7 @@ def test_last_retrieved_and_conflict_id_persist_across_store_reload(tmp_path):
     db._store.write(record)
 
     reloaded_db = AgentDB(path=db_path, permissions_path=PERMS)
-    reloaded = reloaded_db.read("memory/working/x")
+    reloaded = reloaded_db.read("memory/working/x", agent_id="research_agent")
     assert reloaded.last_retrieved is not None
     assert reloaded.conflict_id == "conf-1"
 
@@ -140,7 +140,7 @@ def test_store_tolerates_legacy_schema_missing_new_columns(tmp_path):
 
     db = AgentDB(path=db_path, permissions_path=PERMS)
     db.write(key="memory/working/x", value="v", origin="agent_inferred", agent_id="research_agent")
-    assert db.read("memory/working/x").value == "v"
+    assert db.read("memory/working/x", agent_id="research_agent").value == "v"
 
 
 def test_retrieve_ranks_human_approved_above_agent_inferred(tmp_path):
@@ -207,11 +207,11 @@ def test_retrieve_updates_last_retrieved_for_recency_scoring(tmp_path):
         origin="agent_inferred",
         agent_id="research_agent",
     )
-    assert db.read("memory/working/task_context").last_retrieved is None
+    assert db.read("memory/working/task_context", agent_id="research_agent").last_retrieved is None
 
     db.retrieve(query="bullet", agent_id="research_agent")
 
-    assert db.read("memory/working/task_context").last_retrieved is not None
+    assert db.read("memory/working/task_context", agent_id="research_agent").last_retrieved is not None
 
 
 def test_agentdb_tracking_configuration_is_initialized(tmp_path):
