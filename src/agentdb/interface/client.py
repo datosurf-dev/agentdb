@@ -370,11 +370,17 @@ class AgentDB:
         infer_fn: Optional[Callable] = None,
         embed_fn: Optional[Callable] = None,
         local_embed: bool = False,
+        authority_verifier: Optional[Callable] = None,
     ) -> None:
         # db_path is an alias for path (used by adapter tests)
         if db_path is not None and path is None:
             path = db_path
         self._summarizer = summarizer
+        # FINAL-HARDENING §4: trusted-host authority verifier. Configured by the
+        # host at init (NOT passed by the requesting agent). Receives an approval
+        # claim dict and returns an affirmative allow/deny decision. Without it,
+        # verified authority cannot be created (fail closed).
+        self._authority_verifier = authority_verifier
         self._infer_fn = infer_fn
         # Resolve memory_dir from args or env vars
         resolved_memory_dir: Optional[Path] = None
@@ -796,11 +802,19 @@ class AgentDB:
             effective_until=effective_until,
         )
 
-        # OD-2: only accept approval evidence whose digest binds to this value.
-        # A mismatched/partial approval is recorded as-is but will NOT satisfy
-        # has_verified_approval() (it stays asserted authority).
+        # FINAL-HARDENING §4: caller-supplied approval metadata is stored as
+        # *unverified* evidence only. Ordinary writes can NEVER create verified
+        # authority — any verified/version/fingerprint claims are stripped and
+        # the record is marked unverified. Verified authority is granted solely
+        # through approve_authority() + the trusted-host verifier.
         if approval:
-            record.approval = dict(approval)
+            ap = dict(approval)
+            ap.pop("verified", None)
+            ap.pop("version", None)
+            ap.pop("fingerprint", None)
+            ap.pop("revoked", None)
+            ap["verified"] = False
+            record.approval = ap
 
         # Conflict detection: check before persisting
         existing = self._store.get_by_key(key)
@@ -979,6 +993,28 @@ class AgentDB:
         payload = json.dumps(value, sort_keys=True, default=str)
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
+    def _require_verifier(self, action: str) -> None:
+        """Fail closed when no trusted-host authority verifier is configured."""
+        if self._authority_verifier is None:
+            raise PermissionDenied(
+                f"{action} requires a trusted-host authority_verifier configured "
+                "at AgentDB initialization; verified authority cannot be created "
+                "or revoked without one (fail closed)."
+            )
+
+    def _verify_claim(self, claim: dict) -> bool:
+        """Ask the host verifier for an affirmative allow/deny decision.
+
+        The verifier receives the claim (record identity, scope, content
+        fingerprint, requested action, principal, mechanism) and must return a
+        truthy value to ALLOW. Any exception or falsy value is a deny.
+        """
+        try:
+            decision = self._authority_verifier(claim)
+        except Exception:
+            return False
+        return bool(decision)
+
     def approve_authority(
         self,
         record_id: str,
@@ -987,31 +1023,64 @@ class AgentDB:
         mechanism: str,
         approved_at: Optional["datetime"] = None,
     ) -> MemoryRecord:
-        """Attach verified human-approval evidence to an existing record (OD-2).
+        """Create **verified** human authority via the trusted-host verifier.
 
-        This is the **trusted-host pathway**: the host application, which owns
-        authentication and human interaction, calls this after a real human has
-        approved the record's content. AgentDB does not manage identities or
-        approval prompts — it records that approval occurred and binds the
-        evidence to the record's current content digest.
-
-        A caller cannot manufacture verified authority by setting an origin
-        string alone; only this method (or an explicit ``approval=`` passed by a
-        trusted host to :meth:`write`) produces verified human authority.
+        FINAL-HARDENING §4: a valid digest proves content consistency, not human
+        authorization. Verified authority is granted ONLY when a host-configured
+        ``authority_verifier`` returns an affirmative decision for this claim.
+        Without a verifier, or on denial, this raises :class:`PermissionDenied`
+        (fail closed). Callers cannot manufacture verified authority by passing
+        metadata.
 
         Returns the updated record.
         """
+        self._require_verifier("approve_authority")
         record = self._store.get_by_id(record_id)
         if record is None:
             raise ValueError(f"no record with id {record_id!r}")
+
+        fingerprint = record.approval_fingerprint()
+        claim = {
+            "action": "approve",
+            "record_id": record.id,
+            "key": record.key,
+            "agent_id": record.agent_id,
+            "workspace_id": record.workspace_id,
+            "repository_id": record.repository_id,
+            "environment": record.environment,
+            "fingerprint": fingerprint,
+            "principal": str(principal),
+            "mechanism": str(mechanism),
+        }
+        if not self._verify_claim(claim):
+            self.audit_log.append(
+                EVENT_PERMISSION_DENIED,
+                {"action": "approve_authority", "record_id": record_id,
+                 "principal": principal, "reason": "verifier_denied"},
+            )
+            raise PermissionDenied(
+                f"authority verifier denied approval for record {record_id!r}"
+            )
+
         ts = approved_at or _utcnow()
-        record.approval = {
+        prev = record.approval or {}
+        history = list(prev.get("history", []))
+        history.append({
+            "action": "approved",
             "principal": str(principal),
             "mechanism": str(mechanism),
             "timestamp": ts.isoformat() if hasattr(ts, "isoformat") else str(ts),
-            "digest": self._content_digest(record.value),
+            "fingerprint": fingerprint,
+        })
+        record.approval = {
+            "verified": True,
+            "version": record.APPROVAL_DIGEST_VERSION,
+            "principal": str(principal),
+            "mechanism": str(mechanism),
+            "timestamp": ts.isoformat() if hasattr(ts, "isoformat") else str(ts),
+            "fingerprint": fingerprint,
+            "history": history,
         }
-        # Verified human approval implies the human-approved origin.
         record.origin = "human_approved"
         record.trust_level = "human"
         self._store.write(record)
@@ -1023,7 +1092,73 @@ class AgentDB:
                 "principal": principal,
                 "mechanism": mechanism,
                 "agent_id": record.agent_id,
+                "fingerprint": fingerprint,
             },
+        )
+        return record
+
+    def revoke_authority(
+        self,
+        record_id: str,
+        *,
+        principal: str,
+        mechanism: str,
+        revoked_at: Optional["datetime"] = None,
+    ) -> MemoryRecord:
+        """Revoke verified authority through the trusted-host verifier (§4).
+
+        Requires an affirmative verifier decision. Removes effective verified
+        authority (origin reverts to asserted), preserves the memory and an
+        auditable revocation history. Does not delete the record.
+        """
+        self._require_verifier("revoke_authority")
+        record = self._store.get_by_id(record_id)
+        if record is None:
+            raise ValueError(f"no record with id {record_id!r}")
+        claim = {
+            "action": "revoke",
+            "record_id": record.id,
+            "key": record.key,
+            "agent_id": record.agent_id,
+            "workspace_id": record.workspace_id,
+            "repository_id": record.repository_id,
+            "environment": record.environment,
+            "fingerprint": record.approval_fingerprint(),
+            "principal": str(principal),
+            "mechanism": str(mechanism),
+        }
+        if not self._verify_claim(claim):
+            self.audit_log.append(
+                EVENT_PERMISSION_DENIED,
+                {"action": "revoke_authority", "record_id": record_id,
+                 "principal": principal, "reason": "verifier_denied"},
+            )
+            raise PermissionDenied(
+                f"authority verifier denied revocation for record {record_id!r}"
+            )
+
+        ts = revoked_at or _utcnow()
+        ap = dict(record.approval or {})
+        history = list(ap.get("history", []))
+        history.append({
+            "action": "revoked",
+            "principal": str(principal),
+            "mechanism": str(mechanism),
+            "timestamp": ts.isoformat() if hasattr(ts, "isoformat") else str(ts),
+        })
+        ap["verified"] = False
+        ap["revoked"] = True
+        ap["revoked_at"] = ts.isoformat() if hasattr(ts, "isoformat") else str(ts)
+        ap["history"] = history
+        record.approval = ap
+        # Effective authority removed: revert asserted human origin.
+        record.origin = "agent_inferred"
+        record.trust_level = "agent"
+        self._store.write(record)
+        self.audit_log.append(
+            EVENT_MEMORY_WRITE,
+            {"action": "revoke_authority", "record_id": record_id,
+             "principal": principal, "mechanism": mechanism, "agent_id": record.agent_id},
         )
         return record
 
