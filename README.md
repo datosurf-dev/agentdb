@@ -132,6 +132,42 @@ Retrieval returns `RetrievalResult` with records, conflicts, authority override 
 
 Consolidation produces a **derived `derived_canonical` record** with full source lineage; the original source records are never overwritten (only archived from default selection), and a canonical is invalidated when its sources change. Only equivalent or compatible-complementary values are merged — contradictory values (including negations and mutually-exclusive values) and scope-incompatible facts stay separate. `validate_canonicals()` reports invalid canonicals non-destructively. Concurrent/repeated consolidation is idempotent (a stable source fingerprint prevents duplicate active canonicals).
 
+### Consolidation synthesis (`llm_fn`)
+
+By default consolidation is **dedup-only** (`cluster_copy`): the canonical value
+is a verbatim copy of the highest-confidence source in a cluster. To synthesize a
+new summary instead (`cluster_synthesis`), pass an `llm_fn` to `consolidate()` /
+`end_session(run_consolidation=True, ...)`:
+
+```python
+db.consolidate(agent_id="my-agent", llm_fn=my_llm_fn)
+```
+
+- **Signature:** `llm_fn(prompt: str) -> str` — receives one synthesis prompt,
+  returns the synthesized text. It is a **plain callable / API argument only**
+  (not settable in `memory.yaml`).
+- **Optional:** when `llm_fn` is `None`, consolidation still runs and produces
+  `cluster_copy` (verbatim copy of the top source), **not** a synthesized
+  summary. Model-call errors are caught and fall back to `cluster_copy`.
+- **Helper (recommended):** instead of hand-rolling the chat-completions call,
+  use `build_llm_fn`, which constructs an OpenAI-compatible client from a model
+  id + connection params and returns a ready `llm_fn`:
+
+  ```python
+  from agentdb.providers.consolidation import build_llm_fn
+
+  llm_fn = build_llm_fn(
+      model="meta-llama/Meta-Llama-3.1-8B-Instruct",
+      base_url="https://api.deepinfra.com/v1/openai",
+      api_key="...",              # placeholder ok for local servers
+      # max_tokens=..., temperature=..., timeout=...  (all optional)
+  )
+  db.consolidate(agent_id="my-agent", llm_fn=llm_fn)
+  ```
+
+  `build_llm_fn` needs the `openai` package: install it with
+  `pip install 'agentdatabase[llm]'`.
+
 Compaction summaries and checkpoints default to `agent_inferred` provenance. A bare `origin="human_approved"` is **asserted** (not verified) authority. **Verified** human authority requires a host-configured `authority_verifier` and an affirmative decision through `approve_authority()`; it is bound to a versioned content/scope fingerprint (edits invalidate it) and can be removed via `revoke_authority()` with an audit trail. AgentDB does not defend against a malicious host process with full code/DB access — the enforceable boundary is between ordinary agent APIs and the host-configured trusted approval pathway.
 
 ## Runtime integrations
