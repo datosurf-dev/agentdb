@@ -15,14 +15,26 @@ def test_memory_workspace_creates_default_layout(tmp_path):
 
     assert db.memory_dir == workspace_root.resolve()
     assert db.memory_config_path == (workspace_root / "config" / "memory.yaml").resolve()
+    # config/ and database/ are always created eagerly.
     assert (workspace_root / "config").is_dir()
     assert (workspace_root / "database").is_dir()
-    assert (workspace_root / "conversations").is_dir()
-    assert (workspace_root / "embeddings").is_dir()
-    assert (workspace_root / "reconciliation").is_dir()
-    assert (workspace_root / "logs").is_dir()
+    # §5: optional dirs are created lazily by default (not pre-created).
+    assert not (workspace_root / "conversations").is_dir()
+    assert not (workspace_root / "embeddings").is_dir()
+    assert not (workspace_root / "reconciliation").is_dir()
+    assert not (workspace_root / "logs").is_dir()
     assert db._path == (workspace_root / "database" / "agentdb.sqlite").resolve()
     assert db.memory_config["profile"]["name"] == "budget_optimized"
+
+
+def test_memory_workspace_eager_dirs_creates_all(tmp_path, monkeypatch):
+    workspace_root = tmp_path / "memory-home"
+    monkeypatch.setenv("AGENTDB_WORKSPACE_EAGER_DIRS", "true")
+
+    AgentDB(memory_dir=workspace_root, permissions_path=PERMS)
+
+    for sub in ("config", "database", "conversations", "embeddings", "reconciliation", "logs"):
+        assert (workspace_root / sub).is_dir(), sub
 
 
 def test_memory_workspace_env_precedence_prefers_memory_dir(tmp_path, monkeypatch):

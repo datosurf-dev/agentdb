@@ -36,6 +36,14 @@ policy in `RELEASING.md`.
   This restores the workspace linkage that retrieval ranking (`weight_workspace`)
   and consolidation scoping depend on.
 
+### Changed — lazy workspace directory creation
+- `AgentDB.__init__` now creates only `config/` and `database/` eagerly; the
+  optional `conversations/`, `embeddings/`, `reconciliation/`, `logs/` dirs are
+  created on first use by their writers. Opt back into eager creation with
+  `workspace.eager_dirs: true` (memory.yaml) or `AGENTDB_WORKSPACE_EAGER_DIRS=true`.
+  Reduces empty-dir clutter in every integrator's memory dir; existing
+  workspaces are unaffected.
+
 ## [0.6.0] — 2026-11-21
 
 Contextual correctness and final hardening: trustworthy, relevant, efficiently

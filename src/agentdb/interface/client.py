@@ -401,8 +401,17 @@ class AgentDB:
         self.memory_config: dict = {}
 
         if resolved_memory_dir is not None:
-            # Create workspace layout
-            for subdir in ("config", "database", "conversations", "embeddings", "reconciliation", "logs"):
+            # Create workspace layout. ``config/`` and ``database/`` are needed
+            # immediately (config file + SQLite). The other dirs are created
+            # lazily by their writers, so we only pre-create them when
+            # ``workspace.eager_dirs`` is enabled. This avoids leaving empty
+            # ``logs/`` / ``embeddings/`` / ``reconciliation/`` / ``conversations/``
+            # dirs in every integrator's memory dir. (§5)
+            eager = self._workspace_eager_dirs()
+            subdirs = ["config", "database"]
+            if eager:
+                subdirs += ["conversations", "embeddings", "reconciliation", "logs"]
+            for subdir in subdirs:
                 (resolved_memory_dir / subdir).mkdir(parents=True, exist_ok=True)
 
             config_path = resolved_memory_dir / "config" / "memory.yaml"
@@ -554,6 +563,34 @@ class AgentDB:
 
         # Notifications — wired last so all gateway subscribers are already registered
         self._setup_notifications()
+
+    @staticmethod
+    def _workspace_eager_dirs() -> bool:
+        """Whether to pre-create the optional workspace subdirs at init (§5).
+
+        Default: False (lazy) — only ``config/`` and ``database/`` are created
+        eagerly; ``conversations/``, ``embeddings/``, ``reconciliation/`` and
+        ``logs/`` are created on first use by their writers. Set
+        ``workspace.eager_dirs: true`` in memory.yaml (or env
+        ``AGENTDB_WORKSPACE_EAGER_DIRS=true``) to restore eager creation.
+        Read from the raw memory.yaml via AGENTDB_MEMORY_DIR, independent of the
+        already-parsed config (this runs before memory_config is parsed).
+        """
+        env = os.environ.get("AGENTDB_WORKSPACE_EAGER_DIRS")
+        if env is not None:
+            return env.strip().lower() in ("true", "1", "yes", "on")
+        try:
+            md = os.environ.get("AGENTDB_MEMORY_DIR") or os.environ.get("AGENTDB_HOME")
+            if md:
+                cfg = Path(md) / "config" / "memory.yaml"
+                if cfg.exists():
+                    data = yaml.safe_load(cfg.read_text(encoding="utf-8")) or {}
+                    ws = data.get("workspace", {}) if isinstance(data, dict) else {}
+                    if isinstance(ws, dict):
+                        return bool(ws.get("eager_dirs", False))
+        except Exception:
+            pass
+        return False
 
     def _setup_notifications(self) -> None:
         """Build and attach NotificationDispatcher from memory.yaml notifications: block."""
