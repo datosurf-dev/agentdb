@@ -1956,6 +1956,72 @@ class AgentDB:
             trace=trace_out,
         )
 
+    # ------------------------------------------------------------------
+    # Context rendering (CONTEXTUAL-SPEC §8)
+    # ------------------------------------------------------------------
+
+    def render_context(self, result: RetrievalResult, *, max_records: Optional[int] = None) -> str:
+        """Render a retrieval result as concise, model-facing context.
+
+        Default: one concise natural-language line per selected record. A
+        derived canonical line includes a compact ``Scope:`` qualifier only when
+        it has one, and an ``Evidence:`` source-id list. If selected records carry
+        a material (unresolved) conflict, a short disagreement block is appended
+        instead of silently merging the claims. Verbose metadata is not emitted
+        unless it is present and relevant. (Does not exceed what was already
+        budgeted in ``result``.)
+        """
+        records = list(result.records)
+        if max_records is not None:
+            records = records[:max_records]
+        lines: list[str] = []
+        for r in records:
+            value = r.value
+            text = json.dumps(value, ensure_ascii=False) if isinstance(value, (dict, list)) else str(value)
+            line = text.strip()
+            if getattr(r, "kind", "source") == "derived_canonical":
+                quals = []
+                env = getattr(r, "environment", None)
+                repo = _extract_repo(getattr(r, "working_dirs", None) or [])
+                scope_bits = [b for b in (repo, env) if b]
+                if scope_bits:
+                    quals.append("Scope: " + " / ".join(scope_bits) + ".")
+                src_ids = getattr(r, "source_record_ids", []) or []
+                if src_ids:
+                    quals.append("Evidence: " + ", ".join(str(s) for s in src_ids) + ".")
+                if quals:
+                    line = line + " " + " ".join(quals)
+            lines.append(line)
+
+        block = self._render_conflict_block(result, records)
+        if block:
+            lines.append(block)
+        return "\n".join(lines)
+
+    def _render_conflict_block(self, result: RetrievalResult, records: list) -> str:
+        """Render a compact "unresolved disagreement" block for material conflicts
+        among the selected records, if any. Returns '' when none."""
+        sel = {r.id for r in records}
+        by_id = {r.id: r for r in records}
+        material = []
+        for c in (result.conflicts or []):
+            if c.record_a_id in sel and c.record_b_id in sel:
+                material.append(c)
+        if not material:
+            return ""
+        out = ["Unresolved disagreement:"]
+        def _val(rid):
+            r = by_id.get(rid)
+            if r is None:
+                return "?"
+            v = r.value
+            return json.dumps(v, ensure_ascii=False) if isinstance(v, (dict, list)) else str(v)
+        for c in material:
+            out.append(f"- {_val(c.record_a_id)}: {c.record_a_id}")
+            out.append(f"- {_val(c.record_b_id)}: {c.record_b_id}")
+        out.append("No verified supersession found.")
+        return "\n".join(out)
+
     def record_outcome(
         self,
         session_id: str,
