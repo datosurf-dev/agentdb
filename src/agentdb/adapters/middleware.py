@@ -133,7 +133,9 @@ class AgentDBMiddleware(GatewayAdapter):
                 session_id=session_id,
                 user_query=user_query,
             )
-        self.gateway.dispatch("conversation_started", session_id=session_id)
+        self.gateway.dispatch(
+            "conversation_started", session_id=session_id, agent_id=self._agent_id
+        )
 
         retrieval = self._db.retrieve(
             query=user_query,

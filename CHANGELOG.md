@@ -4,6 +4,27 @@ All notable changes to AgentDB are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions follow the pre-1.0
 policy in `RELEASING.md`.
 
+## [Unreleased]
+
+### Fixed — consolidation auto-trigger
+- `AgentDBMiddleware.prepare_turn` and the Hermes adapter now include `agent_id`
+  in the `conversation_started` dispatch. Previously only `session_id` was
+  passed, so `_handle_conversation_started_metadata` saw `agent_id=None`, skipped
+  `_increment_session_count`, and the per-agent session counter in
+  `consolidation_state` never advanced — automatic consolidation could never
+  fire. Per-agent scoping is unchanged (the counter still keys on `agent_id`).
+
+> **Integrators patching around this bug:** `_increment_session_count` is a blind
+> `+1` with no idempotency guard. If you manually incremented the session counter
+> to compensate, remove that workaround (and version-gate it if you must support
+> both) or the counter will advance twice per session once you upgrade.
+
+### Added — consolidation synthesis helper
+- `agentdb.providers.consolidation.build_llm_fn(model, *, base_url, api_key,
+  max_tokens, temperature, timeout)` builds the `llm_fn(prompt)->str` callable
+  `consolidate()` expects, so integrators supply only a model + connection params.
+  Requires the new `[llm]` extra (`openai`).
+
 ## [0.6.0] — 2026-11-21
 
 Contextual correctness and final hardening: trustworthy, relevant, efficiently
