@@ -14,7 +14,7 @@ The package currently provides:
 - **Ranked retrieval:** provenance, recency, confidence, retrieval-frequency approximation, optional workspace overlap, and optional embedding similarity. Retrieval supports record limits and token budgets.
 - **Context applicability:** `retrieve(scope=...)` accepts optional `workspace_id`, `repository_id`, `environment`, `task_type`, and `as_of`. Explicit workspace/repository/environment mismatch is inapplicable; missing scope is unknown (not a match); exact scope is a deterministic tie-break that does not change ranking weights. `as_of` gates records outside their explicit validity window (`effective_from`/`effective_until`/`expiry_time`).
 - **Conflict and governance signals:** write-time conflicts, external-context overlap checks, a conflict queue, and a live in-process gateway dispatcher.
-- **Lifecycle:** outcomes and reinforcement, manual lifecycle sweeps, TTL/staleness archival, and memory consolidation. On conversation start, automatic consolidation requires at least seven days and ten sessions since the previous run.
+- **Lifecycle:** outcomes and reinforcement, manual lifecycle sweeps, TTL/staleness archival, and memory consolidation. On conversation start, automatic consolidation requires at least seven days and ten sessions since the previous run (defaults; configurable via `profile.consolidation`).
 - **Runtime integration:** a generic `AgentDBBackend`, model-agnostic middleware, a Claude runtime wrapper, and a Hermes `MemoryProvider` adapter.
 - **Optional integrations:** stdio MCP server, Anthropic message ingestor, and email/Slack notifications.
 

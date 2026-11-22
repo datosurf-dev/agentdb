@@ -15,9 +15,9 @@ AgentDB writes to **up to three separate SQLite files** (the third, `embeddings.
 │   └── embeddings.db                  # metadata, embeddings, session_topics — separate file, only when embeddings are active
 ├── conversations/
 │   └── {agent_id}--{session_id}.jsonl # capture log + ingest_turns target; written when capture.conversation_jsonl is enabled or ingest_turns() is called
-├── embeddings/                        # created on first run, unused (embeddings are written to database/embeddings.db, not here)
-├── reconciliation/                    # created on first run, unused (dispatcher is in-memory; nothing persists here)
-└── logs/                              # created on first run, unused
+├── embeddings/                        # created lazily, unused (embeddings are written to database/embeddings.db, not here)
+├── reconciliation/                    # created lazily, unused (dispatcher is in-memory; nothing persists here)
+└── logs/                              # created lazily, unused
 ```
 
 Two SQLite files are in play: `agentdb.sqlite` (memories + governance bookkeeping) and — only when an embedding provider is configured — `embeddings.db` (vectors). `embeddings.db` lives next to `agentdb.sqlite` (`self._path.parent / "embeddings.db"`, `interface/client.py`).
@@ -211,19 +211,22 @@ One JSON object per line, appended by the Claude adapter's `finalize_turn`/`fina
 This is a flat capture log, not indexed or queried by anything else in the codebase today — it exists for external tooling / manual inspection, not for AgentDB's own retrieval. `AgentDB.ingest_turns()` also appends to this same file/shape (writing JSONL first, then memories, then the `ingest_ledger` dedup row) when a harness brings its own transcript.
 
 ### Directory tracking snapshots
-Not a separate store — persisted **as ordinary `memories` rows**. `core/directory_tracking.collect_directory_snapshots()` walks each configured tracked directory (capped at `tracking_max_files_per_directory` files, default 200) and returns `{directory, exists, file_count, entries: [{path}, ...]}` per directory. The Claude adapter's `finalize_turn` writes one memory record per snapshot:
+Not a separate store — persisted **as ordinary `memories` rows**. `core/directory_tracking.collect_directory_snapshots()` walks each configured tracked directory (capped at `tracking_max_files_per_directory` files, default 200) and returns `{directory, exists, file_count, entries: [{path}, ...]}` per directory. **Since 0.7.0 this is opt-in:** it runs only when `capture.track_directories` is enabled (default OFF); explicit `directory_snapshots` passed by the caller are always honoured. When enabled, the Claude adapter's `finalize_turn` writes one memory record per snapshot:
 
 - key: `memory/episodic/claude/{agent_id}/{session_id}/directory_tracking/{timestamp}-{idx}`
 - value: `{session_id, message_id, directory_snapshot: {...}, captured_at}`
 - origin: `agent_inferred`
 
-This is exactly what you see as "governed memory context" injected at the top of a slack-assistant session — those are `retrieve()` hits against these directory-tracking memory records.
+When directory tracking is enabled, this is what you may see as "governed memory context" injected at the top of a slack-assistant session — those are `retrieve()` hits against these directory-tracking memory records. With the default (tracking OFF), no such records are captured.
 
 ### `core/file_integrity.py` — built, not wired in
 `observe_file()`/`observe_files()` compute a `FileObservation` (path, SHA-256, size, captured/modified timestamps) for a given file. Fully implemented and tested (`tests/unit/test_file_integrity.py`), but **no code path calls it** — it isn't invoked from the client, the adapter, or directory tracking. It exists as a building block, most plausibly for a future content-change-aware `file_modified` reconciliation trigger (directory tracking today only lists paths, not whether their contents actually changed) — but that wiring hasn't been written.
 
 ### `embeddings/`, `reconciliation/`, `logs/`
-Created on first run by `AgentDB.__init__`. None are written to today:
+Created **lazily** on first use by their writers (0.7.0 §5 — only `config/` and
+`database/` are created eagerly by `AgentDB.__init__`; opt back into eager
+creation with `workspace.eager_dirs: true` / `AGENTDB_WORKSPACE_EAGER_DIRS=true`).
+None are written to today:
 - `embeddings/` — **unused**; embeddings are actually persisted to `database/embeddings.db` (see above), so this directory is a leftover from the original layout.
 - `reconciliation/` — **unused**; the reconciliation dispatcher is in-memory (`db.gateway`), nothing is queued or checkpointed to disk.
 - `logs/` — **unused**.

@@ -1907,11 +1907,17 @@ class AgentDB:
         """Retrieve relevant memory for a query.
 
         ``scope`` (CONTEXTUAL-SPEC §7) optionally supplies explicit context:
-        ``{"environment": str, "workspace": str, "repo": str, "task_type": str,
-        "effective_time": datetime}``. Only ``environment`` is used as a hard
-        applicability filter (explicit mismatch excludes a record); ``task_type``
-        is a soft label and never excludes on its own. Missing scope is not a
-        match. Existing ranking weights are unchanged.
+        ``{"environment": str, "workspace_id": str, "repository_id": str,
+        "task_type": str, "as_of": datetime | str}``. ``environment`` is a hard
+        applicability filter (explicit mismatch excludes a record). ``as_of``
+        gates records outside their explicit validity window
+        (``effective_from``/``effective_until``/``expiry_time``). ``workspace_id``,
+        ``repository_id``, and ``task_type`` act only as applicability
+        tie-breaks and never exclude on their own. Missing scope on either side
+        is "unknown", not a match, and contributes no exact-scope bonus. Legacy
+        aliases ``repo`` (soft directory-basename hint) and ``effective_time``
+        are still accepted for backward compatibility. Existing ranking weights
+        are unchanged.
         """
         agent_config = self.config_for(agent_id)
         isolate_by_agent = agent_config["isolate_by_agent"]
