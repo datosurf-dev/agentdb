@@ -3,8 +3,13 @@
 **Purpose:** Cross-platform memory assessment to inform AgentDB adapter design for both
 OpenClaw and Hermes. Covers memory architecture, unique capabilities, overlapping
 features (and which ones are user-configurable), and the recommended integration
-strategy. Written before either adapter exists — treat as the design brief that precedes
-`openclaw.md`'s open-question resolution and the not-yet-written `hermes.md`.
+strategy.
+
+> **Status:** This was originally written as a design brief before either adapter
+> existed. The **Hermes adapter is now implemented** (`AgentDBHermesProvider`,
+> `src/agentdb/adapters/hermes.py`; guide: `docs/integrations/hermes.md`) — read its
+> assessment below as historical design rationale and defer to `hermes.md` + source for
+> current behaviour. **OpenClaw remains planned/unimplemented** (`docs/integrations/openclaw.md`).
 
 ---
 

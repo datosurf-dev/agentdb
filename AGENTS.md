@@ -32,7 +32,7 @@ Full numbered design principles live in `docs/context/architecture-principles.md
 - Do not claim semantic retrieval/conflict behavior before embedding-backed implementation is active.
 - Keep conflict flags assembled before memory content in retrieval flows.
 - Keep provider-ingested origin semantics strict; do not silently promote trust levels.
-- Do not claim read authorization: the configured `PermissionRouter` currently checks writes and deletes, while `read()` and `retrieve()` do not enforce `can_read` rules.
+- Read authorization is enforced on `read()`, `retrieve()`, and `retrieve_by_entities()` **when `permissions_path` is supplied** (isolation mode): reads without a caller identity fail closed, and a derived canonical is disclosed only if all its sources are readable. In the default trusted mode (no `permissions_path`), no read/write authorization is enforced — the host owns its security boundary. Do not document reads as ungoverned in isolation mode; correlate the claim with `client.py` (`_can_read_record`, `_eligibility_reason`).
 - Permission checks are only active when `permissions_path` is supplied to `AgentDB`.
 - Keep tests aligned with package-style imports and editable install workflow.
 - Prefer minimal changes that match verified implementation over speculative features.

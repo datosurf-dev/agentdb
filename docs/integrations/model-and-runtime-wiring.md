@@ -237,7 +237,15 @@ Current status:
 
 ### Directory Tracking
 
-For high-value repository areas (skills, docs, conversation-history folders), the Claude middleware can persist directory snapshots under:
+> **Opt-in since 0.7.0.** Directory snapshot capture is **disabled by default**.
+> `tracking_directories=` only declares *which* dirs to track; to actually
+> capture snapshots you must also enable it via `capture.track_directories: true`
+> in `memory.yaml` (or the per-agent profile override). With the default
+> (no `capture.track_directories`), no snapshots are written even when
+> `tracking_directories` is set. Snapshots are write-only operational
+> breadcrumbs — not read by retrieval, ranking, or consolidation.
+
+For high-value repository areas (skills, docs, conversation-history folders), when enabled the Claude middleware persists directory snapshots under:
 
 - `memory/episodic/claude/{agent_id}/{session_id}/directory_tracking/...`
 
@@ -250,8 +258,9 @@ Each snapshot includes:
 - optional `message_id`
 - truncation marker for large directories
 
-When `tracked_directories` is set on `AgentDB(...)`, middleware calls can omit
-directory arguments and use that default policy automatically.
+When `tracked_directories` is set on `AgentDB(...)` **and** `capture.track_directories`
+is enabled, middleware calls can omit directory arguments and use that default
+policy automatically.
 
 ## B) Local LLM Runtime
 

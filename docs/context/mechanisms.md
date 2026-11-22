@@ -21,9 +21,12 @@ them is the most common integration error.
 | **Conversation JSONL** | `<memory_dir>/conversations/<agent_id>--<session_id>.jsonl` | `AgentDBMiddleware.finalize_turn` | **No** — write-only audit trail | Raw `user_query` / `model_response` per turn |
 
 `memory_dir` is resolved from the constructor argument, then `AGENTDB_MEMORY_DIR`,
-then `AGENTDB_HOME`. On construction these subdirectories are created:
-`config/`, `database/`, `conversations/`, `embeddings/`, `reconciliation/`, `logs/`
-(`interface/client.py`, `AgentDB.__init__`).
+then `AGENTDB_HOME`. On construction only `config/` and `database/` are created
+eagerly — they hold the config file and the SQLite DB. The optional
+`conversations/`, `embeddings/`, `reconciliation/`, and `logs/` dirs are created
+lazily on first use by their writers (`interface/client.py`, `AgentDB.__init__`,
+0.7.0 §5). Opt back into eager creation with `workspace.eager_dirs: true`
+(memory.yaml) or `AGENTDB_WORKSPACE_EAGER_DIRS=true`.
 
 ---
 
@@ -66,7 +69,7 @@ Note the trust model: `origin` decides `trust_level` (`human_approved`,
 | # | Mechanism | Declared in | When it runs | Uses an LLM? |
 |---|---|---|---|---|
 | 1 | **Work-context block** | `middleware._build_work_context_block()` | Every `prepare_turn_async` | No — last 5 work-log entries |
-| 2 | **Consolidation** | `client.consolidate()` → `governance/lifecycle_manager.consolidate()` | Auto at `conversation_started` when **≥7 days AND ≥10 sessions**; or manual | **Only if `llm_fn` supplied** |
+| 2 | **Consolidation** | `client.consolidate()` → `governance/lifecycle_manager.consolidate()` | Auto at `conversation_started` when **≥7 days AND ≥10 sessions** (defaults; configurable via `profile.consolidation` — `days`, `min_sessions`, `enabled`); or manual | **Only if `llm_fn` supplied** |
 | 3 | **Compaction summary** | `client.write_compaction_summary()` | Harness calls it before truncating context | No — caller supplies the text |
 | 4 | **Session summary (JSONL)** | `middleware.write_session_summary()` via `end_session()` | Session close | No |
 
@@ -160,9 +163,11 @@ the harness supplies the values.
 ## 5. Gaps and known limitations
 
 - `retrieval.conflict_threshold` is currently reserved (not used elsewhere).
-- `read()` and `retrieve()` do **not** enforce `can_read`; the `PermissionRouter`
-  governs writes and deletes only. Permission checks are active only when
-  `permissions_path` is supplied.
+- When a `permissions_path` is supplied (isolation mode), `read()`, `retrieve()`,
+  and `retrieve_by_entities()` **enforce `can_read`** — reads without a caller
+  identity fail closed, and a derived canonical is disclosed only if **all** its
+  sources are readable. Without `permissions_path` (default trusted mode), no
+  read/write authorization is enforced and the host owns its security boundary.
 - No background scheduler: `run_sweep()` and `consolidate()` must be triggered.
 - Conversation JSONL is write-only from AgentDB's own retrieval perspective, **but** `AgentDB.ingest_turns()` now provides an explicit ingestion door: the harness normalises its own turns into `ConversationTurn` objects and `ingest_turns()` validates, dedupes (via `ingest_ledger`) and writes them. There is still no parser that reads the raw JSONL back into memory automatically — see [`ingest-turns-design.md`](ingest-turns-design.md) for the design that landed.
 - `delete(key)` is a **soft** delete (`archived = 1`); session content also lives in `conversations/`, embeddings, outcomes, `external_retrieves` and the audit log. `AgentDB.purge_session(agent_id, session_id, require_confirmation=False)` is the implemented **hard** removal that clears all of those for one session (keeping a content-free `session_purged` audit event). See [`ingest-turns-design.md`](ingest-turns-design.md).
