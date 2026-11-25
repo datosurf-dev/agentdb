@@ -4,7 +4,12 @@ All notable changes to AgentDB are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions follow the pre-1.0
 policy in `RELEASING.md`.
 
-## [Unreleased]
+## [0.8.0] — 2026-11-25
+
+**Breaking:** `AgentDB.checkpoint()` was removed. Hosts calling it directly must
+delete the call; hosts that called it immediately before
+`write_compaction_summary()` lose nothing. Removing a public method is a
+MINOR bump under this project's pre-1.0 policy.
 
 ### Removed
 - **`AgentDB.checkpoint()`.** It wrote `memory/compaction/checkpoint/<session_id>`
