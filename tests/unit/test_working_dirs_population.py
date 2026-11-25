@@ -1,9 +1,9 @@
 """Regression tests for workspace (`working_dirs`) population (spec §7).
 
 `working_dirs` is the only workspace linkage for a memory. It was empty on every
-record because (a) `checkpoint()`/`write_compaction_summary()` never forwarded
+record because (a) `write_compaction_summary()` never forwarded
 it, and (b) middleware persist paths only had dirs if `prepare_turn(working_dirs=)`
-ran first in the same instance. Now: checkpoint/summary accept and forward
+ran first in the same instance. Now: summary accepts and forwards
 `working_dirs`, and finalize/end_session accept an explicit `working_dirs` that
 falls back to the remembered ones.
 """
@@ -49,14 +49,6 @@ def _store_record_dirs(db, key_substr):
     return None
 
 
-def test_checkpoint_forwards_working_dirs(tmp_path, perms):
-    db = _db(tmp_path, perms)
-    db.checkpoint(agent_id=_AGENT, session_id="s1", working_dirs=["/tmp/ws"])
-    assert _store_record_dirs(db, "memory/compaction/checkpoint/s1") == [
-        str(Path("/tmp/ws").resolve())
-    ]
-
-
 def test_write_compaction_summary_forwards_working_dirs(tmp_path, perms):
     db = _db(tmp_path, perms)
     db.write_compaction_summary(
@@ -65,12 +57,6 @@ def test_write_compaction_summary_forwards_working_dirs(tmp_path, perms):
     assert _store_record_dirs(db, "memory/compaction/summary/s1") == [
         str(Path("/tmp/ws").resolve())
     ]
-
-
-def test_checkpoint_without_dirs_stays_empty(tmp_path, perms):
-    db = _db(tmp_path, perms)
-    db.checkpoint(agent_id=_AGENT, session_id="s1")
-    assert _store_record_dirs(db, "memory/compaction/checkpoint/s1") == []
 
 
 def test_finalize_turn_persists_explicit_working_dirs(tmp_path, perms):
@@ -102,11 +88,14 @@ def test_finalize_turn_falls_back_to_prepare_dirs(tmp_path, perms):
 
 
 @pytest.mark.asyncio
-async def test_end_session_checkpoint_carries_working_dirs(tmp_path, perms):
+async def test_end_session_records_working_dirs_in_the_summary_line(tmp_path, perms):
+    """The checkpoint record is gone; the session-summary line carries the dirs."""
+    import json
+
     db = _db(tmp_path, perms)
     mw = AgentDBMiddleware(db=db, agent_id=_AGENT)
     jsonl = tmp_path / "summary.jsonl"
     await mw.end_session("s1", str(jsonl), working_dirs=["/tmp/ws"])
-    assert _store_record_dirs(db, "memory/compaction/checkpoint/s1") == [
-        str(Path("/tmp/ws").resolve())
-    ]
+
+    last = json.loads(jsonl.read_text().strip().splitlines()[-1])
+    assert last["working_dirs"] == [str(Path("/tmp/ws").resolve())]

@@ -1517,39 +1517,6 @@ class AgentDB:
             })
         return report
 
-    def checkpoint(
-        self,
-        agent_id: str,
-        session_id: str,
-        origin: str = "agent_inferred",
-        working_dirs: Optional[list[str]] = None,
-    ) -> None:
-        """Write a compaction checkpoint record that survives lifecycle sweeps.
-
-        Call this at the end of a session before context is compacted. The record
-        persists across sweeps and is retrievable by any future session for the
-        same agent.
-
-        Provenance (contract P-01): the checkpoint is machine/agent-produced, so
-        it defaults to ``origin="agent_inferred"``. It is **not**
-        ``human_approved`` unless a verified human action explicitly passes
-        ``origin="human_approved"``. Agent-originated checkpoints therefore
-        remain subject to normal lifecycle decay/archival.
-
-        ``working_dirs`` (CONTEXTUAL-SPEC §7): the session's working directories,
-        forwarded to the record so checkpoints are workspace-scoped rather than
-        always empty.
-        """
-        self.write(
-            key=f"memory/compaction/checkpoint/{session_id}",
-            value={"session_id": session_id, "type": "checkpoint"},
-            origin=origin,
-            agent_id=agent_id,
-            session_id=session_id,
-            confidence=1.0,
-            working_dirs=working_dirs,
-        )
-
     def write_compaction_summary(
         self,
         agent_id: str,

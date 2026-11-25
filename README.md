@@ -138,7 +138,7 @@ Embeddings can also be enabled with `AgentDB(local_embed=True)` or a custom `emb
 
 ## Main API surfaces
 
-- `AgentDB`: memory writes/reads/retrieval, `consolidate()`, `checkpoint()`, `write_compaction_summary()`, `record_outcome()`, `config`, and `config_for(agent_id)`.
+- `AgentDB`: memory writes/reads/retrieval, `consolidate()`, `write_compaction_summary()`, `record_outcome()`, `config`, and `config_for(agent_id)`.
 - `db.lifecycle`: lifecycle sweeps, reinforcement, and outcome recording. Sweeps are not run by a background scheduler.
 - `db.gateway`: in-process event subscriptions/dispatch and conflict queue.
 - `db.system.agentdb_stats()`: corpus and outcome statistics.
@@ -194,7 +194,7 @@ db.consolidate(agent_id="my-agent", llm_fn=my_llm_fn)
   archived raw sources (raw is re-surfaced only when it holds a query detail the
   canonical dropped).
 
-Compaction summaries and checkpoints default to `agent_inferred` provenance. A bare `origin="human_approved"` is **asserted** (not verified) authority. **Verified** human authority requires a host-configured `authority_verifier` and an affirmative decision through `approve_authority()`; it is bound to a versioned content/scope fingerprint (edits invalidate it) and can be removed via `revoke_authority()` with an audit trail. AgentDB does not defend against a malicious host process with full code/DB access — the enforceable boundary is between ordinary agent APIs and the host-configured trusted approval pathway.
+Compaction summaries default to `agent_inferred` provenance. A bare `origin="human_approved"` is **asserted** (not verified) authority. **Verified** human authority requires a host-configured `authority_verifier` and an affirmative decision through `approve_authority()`; it is bound to a versioned content/scope fingerprint (edits invalidate it) and can be removed via `revoke_authority()` with an audit trail. AgentDB does not defend against a malicious host process with full code/DB access — the enforceable boundary is between ordinary agent APIs and the host-configured trusted approval pathway.
 
 ## Runtime integrations
 
