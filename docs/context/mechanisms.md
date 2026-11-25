@@ -93,12 +93,17 @@ Note the trust model: `origin` decides `trust_level` (`human_approved`,
   that holds a query-critical detail the canonical omits (`unique_detail`).
 - `human_approved` records are immune.
 
-**Compaction summary** writes to `memory/compaction/summary/<session_id>` and
-**checkpoint** to `memory/compaction/checkpoint/<session_id>`, both defaulting to
-`origin="agent_inferred"` (machine-produced → lifecycle-decayable). Only an
-explicit `origin="human_approved"` (verified human action) survives all sweeps.
-Retrievable by any future session for that agent (`client.py`:
-`write_compaction_summary`, `checkpoint`).
+**Compaction summary** writes to `memory/compaction/summary/<session_id>`,
+defaulting to `origin="agent_inferred"` (machine-produced → lifecycle-decayable).
+Only an explicit `origin="human_approved"` (verified human action) survives all
+sweeps. Retrievable by any future session for that agent (`client.py`:
+`write_compaction_summary`).
+
+There is no longer a `checkpoint()` companion. It wrote
+`memory/compaction/checkpoint/<session_id>` whose entire value was
+`{session_id, type}`, no code path read it, and because retrieval returns every
+eligible record it surfaced as a content-free line in each injection. The summary
+written at the same moment is the durable record of the session.
 
 ### D. Lifecycle and governance — decay, archival, signals
 

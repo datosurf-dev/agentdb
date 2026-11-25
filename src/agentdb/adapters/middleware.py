@@ -858,17 +858,25 @@ class AgentDBMiddleware(GatewayAdapter):
 
         return record
 
-    def write_session_summary(self, session_id: str, jsonl_path: str) -> None:
+    def write_session_summary(
+        self, session_id: str, jsonl_path: str,
+        working_dirs: Optional[list[str]] = None,
+    ) -> None:
         """
         Append a session summary JSON line to jsonl_path (creates file if missing).
+
+        ``working_dirs`` (CONTEXTUAL-SPEC §7): explicit dirs for this session,
+        falling back to those remembered from ``prepare_turn``. Before the
+        checkpoint record was removed this line always reported whatever
+        ``prepare_turn`` had remembered, so an explicit argument at
+        ``end_session`` was silently dropped.
         """
         summary = {
             "type": "session_summary",
             "session_id": session_id,
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "agent_id": self._agent_id,
-            "agentdb_checkpoint_key": f"memory/compaction/checkpoint/{session_id}",
-            "working_dirs": self._session_working_dirs.get(session_id, []),
+            "working_dirs": self._resolve_working_dirs(session_id, working_dirs),
             "temp_dirs": [r.path for r in self._session_dir_state.get(session_id, []) if not r.elevated],
             "elevated_dirs": [r.path for r in self._session_dir_state.get(session_id, []) if r.elevated],
             "turn_count": len(self._session_work_log.get(session_id, [])),
@@ -887,18 +895,17 @@ class AgentDBMiddleware(GatewayAdapter):
         working_dirs: Optional[list[str]] = None,
     ) -> None:
         """
-        Finalize a session: checkpoint, optionally consolidate, write summary, clear state.
+        Finalize a session: optionally consolidate, write summary, clear state.
 
         ``working_dirs`` (CONTEXTUAL-SPEC §7): explicit session working dirs for
-        the checkpoint record; falls back to those remembered from ``prepare_turn``.
+        the session-summary line; falls back to those remembered from
+        ``prepare_turn``.
         """
-        self._db.checkpoint(
-            agent_id=self._agent_id,
-            session_id=session_id,
-            working_dirs=self._resolve_working_dirs(session_id, working_dirs),
-        )
         if run_consolidation:
             self._db.consolidate(agent_id=self._agent_id, llm_fn=llm_fn)
-        self.write_session_summary(session_id, jsonl_path)
+        self.write_session_summary(
+            session_id, jsonl_path,
+            working_dirs=self._resolve_working_dirs(session_id, working_dirs),
+        )
         self._session_dir_state.pop(session_id, None)
         self._session_work_log.pop(session_id, None)

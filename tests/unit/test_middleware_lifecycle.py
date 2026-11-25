@@ -35,7 +35,9 @@ def test_write_session_summary_creates_file_if_missing(mw, tmp_path):
     assert last["type"] == "session_summary"
     assert last["session_id"] == "s1"
     assert last["agent_id"] == "test_agent"
-    assert "agentdb_checkpoint_key" in last
+    # No checkpoint key: the tombstone record was removed, so the summary line
+    # no longer names a key that is never written.
+    assert "agentdb_checkpoint_key" not in last
     assert "last_work_context" in last
 
 

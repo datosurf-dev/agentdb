@@ -6,6 +6,23 @@ policy in `RELEASING.md`.
 
 ## [Unreleased]
 
+### Removed
+- **`AgentDB.checkpoint()`.** It wrote `memory/compaction/checkpoint/<session_id>`
+  whose entire value was `{"session_id": ..., "type": "checkpoint"}`. Nothing in
+  the package ever read it — the only references were the writer itself and a
+  string in the session-summary line naming a key that was never queried. Its one
+  observable effect was reaching the model: `_build_memory_context()` renders
+  every eligible record, and the exclude list only covered
+  `/directory_tracking/`, so a content-free tombstone appeared as a line of
+  injection noise on sessions that had compacted. The compaction **summary**,
+  written at the same moment, carries the actual handover content and remains.
+
+### Fixed
+- **`end_session(working_dirs=...)` was silently dropped.** `write_session_summary`
+  read only the dirs remembered by `prepare_turn`, so a caller passing explicit
+  workspace dirs got `[]` in the session-summary line. It now accepts and
+  resolves them, which is what the removed checkpoint record used to carry.
+
 ## [0.7.0] — 2026-11-21
 
 Consolidation/distillation quality, workspace scoping, and a simpler permission

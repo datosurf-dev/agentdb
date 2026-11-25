@@ -1,9 +1,15 @@
 """
-Tests for checkpoint() and write_compaction_summary().
+Tests for write_compaction_summary().
 
-Both are retrievable across session boundaries. Per contract P-01 / ADB-03 they
-default to origin="agent_inferred" (machine/agent-produced) and never become
+The summary is retrievable across session boundaries. Per contract P-01 / ADB-03
+it defaults to origin="agent_inferred" (machine/agent-produced) and never becomes
 human_approved implicitly; a verified human action may pass origin="human_approved".
+
+`checkpoint()` was removed: it wrote a record whose entire value was
+``{"session_id": ..., "type": "checkpoint"}``, nothing in the package ever read
+it, and its only observable effect was a line of noise in every injection that
+retrieval could surface. The compaction SUMMARY is the record that carries the
+handover content, and it is written at the same moment.
 """
 from agentdb import AgentDB
 
@@ -12,30 +18,34 @@ def _db(tmp_path):
     return AgentDB(path=tmp_path / "test.db")
 
 
-def test_checkpoint_writes_recoverable_record(tmp_path):
+def test_checkpoint_is_gone(tmp_path):
+    """Removed entirely: nothing read it, and it polluted every injection.
+
+    A test rather than a comment so the removal is a contract: re-adding the
+    method has to be a deliberate decision, not a quiet reintroduction.
+    """
     db = _db(tmp_path)
-    db.checkpoint(agent_id="agent1", session_id="sess-1")
-    results = db.retrieve(query="compaction checkpoint", agent_id="agent1", session_id="sess-2")
-    assert any("checkpoint" in r.key for r in results.records)
+    assert not hasattr(db, "checkpoint")
 
 
-def test_checkpoint_record_is_agent_inferred_by_default(tmp_path):
-    """ADB-03: a machine/agent checkpoint must NOT be labeled human_approved."""
+def test_end_session_writes_a_summary_but_no_checkpoint(tmp_path):
+    """The summary is the record that survives a session; the tombstone is not."""
+    from agentdb.adapters.middleware import AgentDBMiddleware
+    from agentdb.adapters.capabilities import LOCAL_CAPABILITIES
+    import asyncio
+
     db = _db(tmp_path)
-    db.checkpoint(agent_id="agent1", session_id="sess-1")
-    record = db.read("memory/compaction/checkpoint/sess-1")
-    assert record is not None
-    assert record.origin == "agent_inferred"
-    assert record.trust_level == "agent"
+    mw = AgentDBMiddleware(db=db, agent_id="agent1", capabilities=LOCAL_CAPABILITIES)
+    jsonl = tmp_path / "session_summary.jsonl"
+    asyncio.run(mw.end_session("sess-1", str(jsonl)))
 
-
-def test_checkpoint_honors_explicit_human_origin(tmp_path):
-    """A verified human action may explicitly mark a checkpoint human_approved."""
-    db = _db(tmp_path)
-    db.checkpoint(agent_id="agent1", session_id="sess-1", origin="human_approved")
-    record = db.read("memory/compaction/checkpoint/sess-1")
-    assert record.origin == "human_approved"
-    assert record.trust_level == "human"
+    all_keys = [r.key for r in db.retrieve(
+        query="session", agent_id="agent1", session_id="sess-1", limit=100,
+    ).records]
+    assert not any("compaction/checkpoint" in k for k in all_keys)
+    # The session summary line is still written, as the durable record of the session.
+    assert jsonl.exists()
+    assert "agentdb_checkpoint_key" not in jsonl.read_text()
 
 
 def test_write_compaction_summary_survives_lifecycle_sweep(tmp_path):
@@ -98,23 +108,23 @@ def test_compaction_summary_per_session_not_overwritten(tmp_path):
     assert r2 is not None and r2.value == "Second summary."
 
 
-def test_checkpoint_retrieves_across_session_boundary(tmp_path):
+def test_compaction_summary_retrieves_across_session_boundary(tmp_path):
+    """The summary survives the session that wrote it — this is the handover."""
     db = _db(tmp_path)
-    db.checkpoint(agent_id="agent1", session_id="sess-A")
+    db.write_compaction_summary(
+        agent_id="agent1", session_id="sess-A", summary="Implemented the milestone.",
+    )
 
     # Simulate a new session — session_id has changed but agent_id is same
-    results = db.retrieve(query="checkpoint session", agent_id="agent1", session_id="sess-B")
-    assert any("checkpoint" in r.key for r in results.records)
+    results = db.retrieve(query="compaction summary", agent_id="agent1", session_id="sess-B")
+    assert any("summary" in r.key for r in results.records)
 
 
-def test_compaction_records_have_max_confidence(tmp_path):
+def test_compaction_summary_has_max_confidence(tmp_path):
     db = _db(tmp_path)
-    db.checkpoint(agent_id="agent1", session_id="sess-1")
     db.write_compaction_summary(agent_id="agent1", session_id="sess-1", summary="done")
 
-    cp = db.read("memory/compaction/checkpoint/sess-1")
     sm = db.read("memory/compaction/summary/sess-1")
-    assert cp.confidence == 1.0
     assert sm.confidence == 1.0
 
 
