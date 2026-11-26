@@ -651,7 +651,10 @@ def test_concurrent_replacement_across_two_connections(tmp_path):
     # Connection B opens *after* that commit and tries to publish rev-3 over the
     # same knowledge ID. rev-2 is already active, so this must fail.
     store_b = MemoryStore(db_path)
-    with pytest.raises(ValueError, match="already has an active revision"):
+    # The prior active revision is now rev-2, not the one this caller expected.
+    # The transaction refuses rather than retiring a revision it did not
+    # authorize, and tells the caller to retry from committed state.
+    with pytest.raises(ValueError, match="retry from committed state"):
         store_b.activate_learned_revision(
             revision(3), supersedes_id=active.id,
             superseded_record=dataclasses.replace(superseded),
@@ -961,3 +964,220 @@ def test_queries_and_claims_are_tokenized_consistently(db):
     assert db.retrieve_learned("he", **query) == []      # inside "the"
     assert db.retrieve_learned("", **query) == []
     assert db.retrieve_learned("how do i", **query) == []   # all stopwords
+
+
+# ---------------------------------------------------------------------------
+# Review round 4 — transactional atomicity, committed source state,
+# logical observation vs shared key, authorization binding, atomic proposals
+# ---------------------------------------------------------------------------
+
+def _two_instances(tmp_path):
+    """Two AgentDB instances over one file, opened in a chosen order."""
+    def make():
+        return AgentDB(memory_dir=str(tmp_path / "shared"))
+    return make
+
+
+def test_conflict_committing_before_activation_blocks_it(tmp_path):
+    """Finding 1, ordering A: the conflict commits first.
+
+    A conflict can land after the last evidence check but before the activation
+    write. Validation inside the activation transaction sees committed conflict
+    state and refuses.
+    """
+    import agentdb.core.store as store_mod
+
+    db = AgentDB(memory_dir=str(tmp_path / "s"))
+    src = _obs(db, "memory/obs/a", "the original observation")
+    claim = db.propose_learned(agent_id="ag", claim="check index usage",
+                               repository_id=REPO, task_type=TASK,
+                               supporting_ids=[src.id])
+
+    original = store_mod.MemoryStore.activate_learned_revision
+
+    def conflict_first(self, *a, **kw):
+        # A competing connection commits a conflict before activation begins.
+        other = AgentDB(memory_dir=str(tmp_path / "s"))
+        other.write(key=src.key, value="revised observation",
+                    origin="agent_inferred", agent_id="ag", session_id="s-1",
+                    repository_id=REPO, task_type=TASK)
+        return original(self, *a, **kw)
+
+    monkeypatched = store_mod.MemoryStore
+    try:
+        store_mod.MemoryStore.activate_learned_revision = conflict_first
+        with pytest.raises(ValueError, match="contested"):
+            db.activate_learned(claim.id, agent_id="ag")
+    finally:
+        store_mod.MemoryStore.activate_learned_revision = original
+
+    assert db.retrieve_learned("index", agent_id="ag",
+                               repository_id=REPO, task_type=TASK) == []
+
+
+def test_conflict_committing_after_activation_withdraws_the_claim(tmp_path):
+    """Finding 1, ordering B: the activation commits first, then a conflict.
+
+    The conflict handler retires the now-active revision, so a fresh reader sees
+    it withdrawn.
+
+    Guards the other half of the ordering pair: this passed on the previous head
+    as well, because the conflict path already retired active revisions. The
+    ordering-A test above is the one that discriminates.
+    """
+    db = AgentDB(memory_dir=str(tmp_path / "s"))
+    src = _obs(db, "memory/obs/a", "the original observation")
+    claim = db.propose_learned(agent_id="ag", claim="check index usage",
+                               repository_id=REPO, task_type=TASK,
+                               supporting_ids=[src.id])
+    db.activate_learned(claim.id, agent_id="ag")
+
+    db.write(key=src.key, value="revised observation", origin="agent_inferred",
+             agent_id="ag", session_id="s-1", repository_id=REPO, task_type=TASK)
+
+    fresh = AgentDB(memory_dir=str(tmp_path / "s"))
+    assert fresh.retrieve_learned("index", agent_id="ag",
+                                  repository_id=REPO, task_type=TASK) == []
+
+
+def test_an_instance_opened_before_source_deletion_stops_serving(tmp_path):
+    """Finding 2: source state is read from committed storage."""
+    db = AgentDB(memory_dir=str(tmp_path / "d"))
+    src = _obs(db, "memory/obs/a", "an observation")
+    claim = db.propose_learned(agent_id="ag", claim="check index usage",
+                               repository_id=REPO, task_type=TASK,
+                               supporting_ids=[src.id])
+    db.activate_learned(claim.id, agent_id="ag")
+
+    reader = AgentDB(memory_dir=str(tmp_path / "d"))     # opened before deletion
+    query = dict(agent_id="ag", repository_id=REPO, task_type=TASK)
+    assert reader.retrieve_learned("index", **query) != []
+
+    db._store.archive_record(src.id)
+    assert reader.retrieve_learned("index", **query) == [], (
+        "an instance opened before the deletion kept serving the claim"
+    )
+
+
+def test_independent_write_with_same_key_and_origin_leaves_claim_active(db):
+    """Finding 3: a shared key is not a shared logical observation.
+
+    Same key, same origin, different repository/task scope. This is an independent
+    observation, not a correction of the pinned one, so the claim stays active.
+    """
+    src = _obs(db, "memory/obs/shared", "the pinned observation")
+    claim = db.propose_learned(agent_id="ag", claim="check index usage",
+                               repository_id=REPO, task_type=TASK,
+                               supporting_ids=[src.id])
+    db.activate_learned(claim.id, agent_id="ag")
+
+    # Identical key and origin; different scope.
+    _obs(db, "memory/obs/shared", "an independent observation",
+         repository_id=OTHER_REPO, task_type=OTHER_TASK)
+
+    assert db.retrieve_learned("index", agent_id="ag",
+                               repository_id=REPO, task_type=TASK) != []
+
+
+def test_authorization_is_bound_to_the_revision_actually_retired(tmp_path):
+    """Finding 4: a caller cannot retire a revision it was never authorized for.
+
+    Between authorizing revision 1 and the activation write, another connection
+    activates revision 2. This transaction would retire revision 2, so it must
+    reject rather than proceed against a state it did not authorize.
+    """
+    import agentdb.core.store as store_mod
+
+    policy = tmp_path / "p.yaml"
+    policy.write_text(
+        "default_policy: deny\nagents:\n"
+        "  ag:\n    can_write:\n      - 'memory/**'\n    can_read:\n      - 'memory/**'\n"
+    )
+    db = AgentDB(memory_dir=str(tmp_path / "a"), permissions_path=str(policy))
+    src = _obs(db, "memory/obs/a", "an observation")
+    first = db.propose_learned(agent_id="ag", claim="first guidance",
+                               repository_id=REPO, task_type=TASK,
+                               supporting_ids=[src.id])
+    kid = knowledge_id_of(first)
+    db.activate_learned(first.id, agent_id="ag")
+
+    src2 = _obs(db, "memory/obs/b", "another observation")
+    second = db.propose_learned(agent_id="ag", claim="second guidance",
+                                repository_id=REPO, task_type=TASK,
+                                supporting_ids=[src2.id], knowledge_id=kid)
+    src3 = _obs(db, "memory/obs/c", "a third observation")
+    third = db.propose_learned(agent_id="ag", claim="third guidance",
+                               repository_id=REPO, task_type=TASK,
+                               supporting_ids=[src3.id], knowledge_id=kid)
+
+    original = store_mod.MemoryStore.activate_learned_revision
+    fired = {"done": False}
+
+    def raced(self, *a, **kw):
+        # Another connection activates `second` first. Guard against re-entry:
+        # the competitor's own activation also goes through this method.
+        if not fired["done"]:
+            fired["done"] = True
+            other = AgentDB(memory_dir=str(tmp_path / "a"), permissions_path=str(policy))
+            other.activate_learned(second.id, agent_id="ag")
+        return original(self, *a, **kw)
+
+    try:
+        store_mod.MemoryStore.activate_learned_revision = raced
+        with pytest.raises(ValueError, match="retry from committed state"):
+            db.activate_learned(third.id, agent_id="ag")
+    finally:
+        store_mod.MemoryStore.activate_learned_revision = original
+
+    # The competitor's activation stands; nothing was retired by the failed call.
+    from agentdb.learning import is_active_claim
+
+    active = [r for r in db._store.read_learned_committed()
+              if knowledge_id_of(r) == kid and is_active_claim(r)]
+    assert [r.id for r in active] == [second.id], (
+        "the failed activation changed which revision is active"
+    )
+
+
+def test_two_connections_proposing_identical_content_converge(tmp_path):
+    """Finding 5: dedupe, allocation and insert are one transaction."""
+    import threading
+
+    db_a = AgentDB(memory_dir=str(tmp_path / "p"))
+    src = _obs(db_a, "memory/obs/a", "an observation")
+    db_b = AgentDB(memory_dir=str(tmp_path / "p"))
+
+    kwargs = dict(agent_id="ag", claim="identical guidance", repository_id=REPO,
+                  task_type=TASK, supporting_ids=[src.id], knowledge_id="K1")
+    ids = []
+
+    def propose(database):
+        ids.append(database.propose_learned(**kwargs).id)
+
+    threads = [threading.Thread(target=propose, args=(d,)) for d in (db_a, db_b)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    rows = [r for r in db_a._store.read_learned_committed_all()
+            if r.derivation.get("knowledge_id") == "K1"]
+    assert len(rows) == 1, f"two revision-1 rows persisted: {len(rows)}"
+    assert len(set(ids)) == 1, "concurrent retries returned different revisions"
+
+
+def test_distinct_proposals_under_one_knowledge_id_get_unique_numbers(tmp_path):
+    """Finding 5: allocation is serialized, so numbers cannot collide."""
+    db_a = AgentDB(memory_dir=str(tmp_path / "u"))
+    src = _obs(db_a, "memory/obs/a", "an observation")
+    db_b = AgentDB(memory_dir=str(tmp_path / "u"))
+
+    first = db_a.propose_learned(agent_id="ag", claim="first", repository_id=REPO,
+                                 task_type=TASK, supporting_ids=[src.id],
+                                 knowledge_id="K2")
+    second = db_b.propose_learned(agent_id="ag", claim="second", repository_id=REPO,
+                                  task_type=TASK, supporting_ids=[src.id],
+                                  knowledge_id="K2")
+
+    assert first.derivation["revision"] == 1
+    assert second.derivation["revision"] == 2

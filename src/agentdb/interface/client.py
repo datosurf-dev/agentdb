@@ -1509,10 +1509,6 @@ class AgentDB:
             required=False,   # a claim needs support; it need not be contradicted
         )
 
-        revision = 1
-        if knowledge_id:
-            revision = self._next_learned_revision(knowledge_id)
-
         # Idempotency: the same claim over the same evidence in the same scope is
         # one revision, not two. Compared on the content that defines a revision,
         # not on the record identity.
@@ -1521,23 +1517,20 @@ class AgentDB:
             supporting=[r.id for r in supporting],
             contradicting=[r.id for r in contradicting],
         )
-        # Dedupe is scoped to the knowledge ID the caller asked for. Two
-        # different knowledge IDs may legitimately hold the same text over the
-        # same evidence; reusing one for the other would silently discard the
-        # second ID the host named.
-        existing = self._find_learned_revision_by_fingerprint(
-            fingerprint, knowledge_id=knowledge_id,
-        )
-        if existing is not None:
-            return existing
 
         record = build_proposal(
-            knowledge_id=knowledge_id, revision=revision, claim=claim, scope=scope,
+            knowledge_id=knowledge_id, revision=1, claim=claim, scope=scope,
             supporting=supporting, contradicting=contradicting,
             agent_id=agent_id, actor=actor, fingerprint=fingerprint,
         )
-        self._store.write(record)
-        return record
+        # Dedupe, revision allocation and insertion happen in ONE transaction.
+        # Read-then-insert lets two interleaved proposals both observe "no match,
+        # revision 1" and persist duplicate revision-1 rows. The store resolves it
+        # under a write lock and returns the effective revision.
+        return self._store.insert_learned_revision_atomic(
+            record, fingerprint=fingerprint,
+            explicit_knowledge_id=knowledge_id is not None,
+        )
 
     def activate_learned(
         self,
@@ -1549,13 +1542,16 @@ class AgentDB:
     ) -> MemoryRecord:
         """Publish an exact proposed revision as the active guidance.
 
-        Revalidates evidence and authorization first: a proposal whose sources
-        have since been edited, deleted, rescoped, or become unreadable cannot be
-        activated. Both supporting and contradicting evidence are checked.
+        Everything that decides whether publication is allowed runs **inside the
+        activation transaction**, against committed state: evidence validity,
+        evidence readability, conflict status, and authorization. A check made
+        before the transaction can be invalidated by a write that commits in
+        between — a source conflict can land after the last check and before the
+        activation, and the claim would publish contested guidance.
 
-        Activation requires **lifecycle authority**, not merely source read access:
-        being able to read the observations a claim was built from does not confer
-        the right to publish guidance derived from them.
+        Authorization is bound to the revision the transaction will actually
+        mutate, not the one this call expected: a replacement checks the incoming
+        revision and the prior *active* revision, resolved under the write lock.
 
         Replacement is atomic. Retiring the prior revision, publishing the new one,
         and writing both history entries happen in one transaction, so a failure
@@ -1563,10 +1559,8 @@ class AgentDB:
         """
         from ..learning import (
             ClaimScope, STATUS_ACTIVE, _with_lifecycle, is_learned_claim,
-            knowledge_id_of, validate_evidence,
+            knowledge_id_of, source_is_contested, validate_evidence,
         )
-
-
 
         record = self._store.get_by_id(record_id)
         if record is None or not is_learned_claim(record):
@@ -1574,56 +1568,13 @@ class AgentDB:
         if getattr(record, "archived", False):
             raise ValueError(f"{record_id!r} is already archived (superseded)")
 
-        prior_for_auth = self._active_learned_revision(
-            (record.derivation or {}).get("knowledge_id")
-        )
-        self._authorize_lifecycle(
-            agent_id, operation="activate",
-            keys=[record.key] + ([prior_for_auth.key] if prior_for_auth else []),
-        )
-
         derivation = record.derivation or {}
         scope_dict = derivation.get("scope", {})
         scope = ClaimScope(
             repository_id=scope_dict.get("repository_id", ""),
             task_type=scope_dict.get("task_type", ""),
         )
-
-        evidence = derivation.get("evidence", {})
-        for kind in ("supporting", "contradicting"):
-            ids = [s.get("id") for s in evidence.get(kind, [])]
-            if not ids:
-                continue      # contradicting evidence is optional
-            live = []
-            for source_id in ids:
-                candidate = self._store.get_by_id(source_id)
-                if candidate is None or getattr(candidate, "archived", False):
-                    raise ValueError(
-                        f"evidence {source_id!r} is missing; revalidate before activating"
-                    )
-                if not self._can_read_record(candidate, agent_id):
-                    raise ValueError(
-                        f"evidence {source_id!r} is not readable by this caller"
-                    )
-                live.append(candidate)
-            validate_evidence(
-                source_ids=[r.id for r in live], scope=scope,
-                store=self._store, can_read=self._can_read_record, agent_id=agent_id,
-            )
-            # A conflict scored between proposal and activation blocks
-            # publication, even if the sibling has since been archived. The
-            # conflict record is durable; the digest check alone would miss this.
-            from ..learning import source_is_contested
-            for source in live:
-                if source_is_contested(self._store, source.id):
-                    raise ValueError(
-                        f"evidence {source.id!r} is contested by a conflict; "
-                        "resolve it and withdraw this revision explicitly"
-                    )
-
         kid = knowledge_id_of(record)
-        prior = self._active_learned_revision(kid)
-        supersedes = prior is not None and prior.id != record.id
 
         activated = dataclasses.replace(
             record,
@@ -1632,8 +1583,45 @@ class AgentDB:
                 reason=reason or "activation",
             ),
         )
+
+        def _validate(*, prior_active: Optional[MemoryRecord]) -> None:
+            """Runs inside the write transaction, on committed state."""
+            # Authorize the exact keys this commit mutates.
+            self._authorize_lifecycle(
+                agent_id, operation="activate",
+                keys=[record.key] + ([prior_active.key] if prior_active else []),
+            )
+
+            evidence = derivation.get("evidence", {})
+            for kind in ("supporting", "contradicting"):
+                ids = [s.get("id") for s in evidence.get(kind, [])]
+                if not ids:
+                    continue      # contradicting evidence is optional
+                live = []
+                for source_id in ids:
+                    candidate = self._store.get_committed(source_id)
+                    if candidate is None or getattr(candidate, "archived", False):
+                        raise ValueError(
+                            f"evidence {source_id!r} is missing; revalidate before activating"
+                        )
+                    if not self._can_read_record(candidate, agent_id):
+                        raise ValueError(
+                            f"evidence {source_id!r} is not readable by this caller"
+                        )
+                    if source_is_contested(self._store, source_id):
+                        raise ValueError(
+                            f"evidence {source_id!r} is contested by a conflict; "
+                            "resolve it and withdraw this revision explicitly"
+                        )
+                    live.append(candidate)
+                validate_evidence(
+                    source_ids=[r.id for r in live], scope=scope,
+                    store=self._store, can_read=self._can_read_record, agent_id=agent_id,
+                )
+
+        prior = self._active_learned_revision(kid)
         superseded = None
-        if supersedes:
+        if prior is not None and prior.id != activated.id:
             superseded = dataclasses.replace(
                 prior,
                 derivation=_with_lifecycle(
@@ -1644,8 +1632,9 @@ class AgentDB:
 
         self._store.activate_learned_revision(
             activated,
-            supersedes_id=prior.id if supersedes else None,
+            supersedes_id=prior.id if prior is not None else None,
             superseded_record=superseded,
+            validate=_validate,
         )
         return activated
 
@@ -1869,32 +1858,13 @@ class AgentDB:
         )
         return _hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
-    def _find_learned_revision_by_fingerprint(
-        self, fingerprint: str, *, knowledge_id: Optional[str] = None,
-    ) -> Optional[MemoryRecord]:
-        """Reuse an existing revision with identical content.
-
-        ``knowledge_id`` narrows the search to one knowledge ID. When the caller
-        supplied an ID, a revision of a *different* ID is not a valid reuse even
-        if its content is identical.
-        """
-        from ..learning import is_learned_claim, knowledge_id_of
-
-        for record in self._store.read_learned_committed_all():
-            if not is_learned_claim(record):
-                continue
-            if (record.derivation or {}).get("fingerprint") != fingerprint:
-                continue
-            if knowledge_id is not None and knowledge_id_of(record) != knowledge_id:
-                continue
-            return record
-        return None
-
     def _learned_sources_readable(self, record: MemoryRecord, agent_id: Optional[str]) -> bool:
         """True when this caller may read every source the revision references."""
         evidence = (getattr(record, "derivation", {}) or {}).get("evidence", {})
         for entry in list(evidence.get("supporting", [])) + list(evidence.get("contradicting", [])):
-            source = self._store.get_by_id(entry.get("id"))
+            # Committed source state: an instance opened before the source was
+            # deleted must not keep answering from its startup snapshot.
+            source = self._store.get_committed(entry.get("id"))
             if source is None or getattr(source, "archived", False):
                 return False
             if not self._can_read_record(source, agent_id):
@@ -1955,13 +1925,6 @@ class AgentDB:
                 if knowledge_id_of(record) == knowledge_id:
                     return record
         return None
-
-    def _next_learned_revision(self, knowledge_id: str) -> int:
-        revisions = [
-            (r.derivation or {}).get("revision", 0)
-            for r in self._learned_revisions(knowledge_id)
-        ]
-        return (max(revisions) + 1) if revisions else 1
 
     def consolidate(self, agent_id: str, llm_fn=None, **kwargs) -> "ConsolidationResult":
         """Cluster near-duplicate records into a NEW derived canonical record.

@@ -354,17 +354,25 @@ class MemoryStore:
         *,
         supersedes_id: Optional[str] = None,
         superseded_record: Optional["MemoryRecord"] = None,
+        validate: Optional[Any] = None,
     ) -> "MemoryRecord":
         """Atomically make ``record`` the one active revision of its knowledge ID.
 
         Mirrors ``write_canonical_atomic``: a single ``BEGIN IMMEDIATE``
         transaction, so two concurrent activations cannot both win and leave two
-        active revisions. The prior active revision, when given, is marked
-        superseded inside the same transaction — either both changes commit or
-        neither does.
+        active revisions. The prior active revision, when given, is superseded
+        inside the same transaction — either both changes commit or neither does.
 
-        Raises ``ValueError`` when another revision is already active (a
-        concurrent writer won), so the caller can re-read and retry rather than
+        ``validate`` is called inside the transaction with the prior active
+        revision that this commit will actually retire. Every check that decides
+        whether publication is allowed — evidence validity, evidence readability,
+        authorization — belongs there, because a check performed before the
+        transaction can be invalidated by a write that commits in between. The
+        callback may still be given the caller's intent (``supersedes_id``), but it
+        must authorize the revision it is handed, not the one the caller expected.
+
+        Raises ``ValueError`` when another revision is already active, or when
+        ``validate`` refuses, so the caller can re-read and retry rather than
         silently overwrite.
         """
         from .sqlite_connection import connect as _connect
@@ -387,39 +395,41 @@ class MemoryStore:
             conn.isolation_level = None
             conn.execute("BEGIN IMMEDIATE")
             try:
-                # Any other revision of this knowledge ID must not already be
-                # active. Checked inside the write lock, so it is race-safe.
+                # Every learned row, committed, as this transaction sees it.
                 rows = conn.execute(
                     "SELECT * FROM memories WHERE kind = ? AND archived = 0",
                     ("learned_claim",),
                 ).fetchall()
+                current_active = None
                 for row in rows:
                     other = self._row_to_record(row)
                     if (other.derivation or {}).get("knowledge_id") != kid:
                         continue
                     if other.id == record.id:
                         continue
-                    # The revision being replaced is expected to be active; it is
-                    # retired inside this same transaction.
-                    if supersedes_id and other.id == supersedes_id:
-                        continue
                     if (other.derivation or {}).get("lifecycle", {}).get("status") == "active":
-                        raise ValueError(
-                            f"knowledge {kid!r} already has an active revision "
-                            f"({other.id}); suspend or replace it explicitly"
-                        )
+                        current_active = other
 
-                # Activation, the superseded revision's final history entry, and
-                # its retirement all commit together. A failure anywhere leaves
-                # the prior revision active and the new one unpublished.
-                # Order matters: archive the prior revision, write its final
-                # (superseded) state, then publish the new one. Re-inserting the
-                # superseded copy after the UPDATE would rewrite `archived` back
-                # to 0 and leave two unarchived revisions.
-                if supersedes_id:
+                # Validate against the revision this commit will actually retire.
+                if validate is not None:
+                    validate(prior_active=current_active)
+
+                # Retire whatever is active now — not what was active when the
+                # caller started, which another connection may have replaced.
+                retire_id = current_active.id if current_active is not None else None
+                if retire_id and superseded_record is not None \
+                        and superseded_record.id != retire_id:
+                    # The caller prepared a superseded copy of a different
+                    # revision: its history would be misleading, so refuse.
+                    raise ValueError(
+                        f"prior revision changed: expected {superseded_record.id!r}, "
+                        f"found {retire_id!r}; retry from committed state"
+                    )
+
+                if retire_id:
                     conn.execute(
                         "UPDATE memories SET archived = 1 WHERE id = ?",
-                        (supersedes_id,),
+                        (retire_id,),
                     )
                 if superseded_record is not None:
                     conn.execute(self._INSERT_SQL, self._record_params(superseded_record))
@@ -443,6 +453,20 @@ class MemoryStore:
             if old is not None:
                 old.archived = True
         return record
+
+    def get_committed(self, record_id: str) -> Optional["MemoryRecord"]:
+        """One record as committed by *any* connection.
+
+        Source state must come from the database, not this instance's snapshot: an
+        instance opened before a source was deleted would otherwise keep answering
+        from the state it loaded at startup and serve a claim whose evidence no
+        longer exists.
+        """
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM memories WHERE id = ?", (record_id,)
+            ).fetchone()
+        return self._row_to_record(row) if row is not None else None
 
     def read_learned_committed_all(self) -> list[MemoryRecord]:
         """Learned revisions as committed, archived included (for inspection)."""
@@ -506,11 +530,27 @@ class MemoryStore:
                 (conflict.id, conflict.record_a_id),
             )
 
-            # Retire dependents in the same transaction.
+            # Retire dependents in the same transaction — but only when this
+            # conflict genuinely contests the pinned observation. A conflict is
+            # scored on key + origin alone, so an independent observation filed
+            # under a shared key in another scope scores one too; treating that as
+            # a contest would withdraw guidance because someone wrote about the
+            # same topic elsewhere.
+            from ..learning import _same_logical_observation
+
+            contested_a = True
+            prior_a = self._row_to_record(
+                conn.execute(
+                    "SELECT * FROM memories WHERE id = ?", (conflict.record_a_id,)
+                ).fetchone()
+            ) if conflict.record_a_id else None
+            if prior_a is not None:
+                contested_a = _same_logical_observation(prior_a, record)
+
             rows = conn.execute(
                 "SELECT * FROM memories WHERE kind = ? AND archived = 0",
                 ("learned_claim",),
-            ).fetchall()
+            ).fetchall() if contested_a else []
             for row in rows:
                 claim = self._row_to_record(row)
                 derivation = dict(claim.derivation or {})
@@ -614,6 +654,77 @@ class MemoryStore:
                 self._by_id[record.id] = record
                 retired.append(record.id)
         return retired
+
+
+    def insert_learned_revision_atomic(
+        self, record: "MemoryRecord", *, fingerprint: str,
+        explicit_knowledge_id: bool = False,
+    ) -> "MemoryRecord":
+        """Allocate a revision number and insert, in one transaction.
+
+        Proposal is "reuse this revision if the content already exists, otherwise
+        insert the next revision of this knowledge ID". Reading the fingerprint and
+        the current maximum revision outside a write lock lets two interleaved
+        proposals both observe "no match, revision 1" and persist duplicate
+        revision-1 rows.
+
+        The fingerprint lookup and the revision allocation happen inside
+        ``BEGIN IMMEDIATE``, so concurrent proposals converge: identical retries
+        return the existing revision, and distinct content under one knowledge ID
+        receives a unique number.
+
+        Returns the effective revision — the new one, or the existing match.
+        """
+        kid = (record.derivation or {}).get("knowledge_id")
+        if not kid:
+            raise ValueError("learned revision has no knowledge_id")
+
+        from .sqlite_connection import connect as _connect
+
+        conn = _connect(self._db_path, timeout=30.0)
+        try:
+            conn.isolation_level = None
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                rows = conn.execute(
+                    "SELECT * FROM memories WHERE kind = ? AND archived = 0",
+                    ("learned_claim",),
+                ).fetchall()
+                same_kid: list[MemoryRecord] = []
+                for row in rows:
+                    other = self._row_to_record(row)
+                    derivation = other.derivation or {}
+                    # Dedupe scope depends on what the caller stated.
+                    #  * no knowledge ID: identical content is the same proposal,
+                    #    wherever it was filed, so a retry converges on it;
+                    #  * explicit knowledge ID: only that ID's revisions count, so
+                    #    the same text filed under a different ID stays separate.
+                    if derivation.get("fingerprint") == fingerprint:
+                        if not explicit_knowledge_id or derivation.get("knowledge_id") == kid:
+                            conn.execute("COMMIT")
+                            self._by_id[other.id] = other
+                            return other
+                    if derivation.get("knowledge_id") != kid:
+                        continue
+                    same_kid.append(other)
+
+                next_revision = max(
+                    [int((r.derivation or {}).get("revision") or 0) for r in same_kid],
+                    default=0,
+                ) + 1
+                derivation = dict(record.derivation or {})
+                derivation["revision"] = next_revision
+                record.derivation = derivation
+                conn.execute(self._INSERT_SQL, self._record_params(record))
+                conn.execute("COMMIT")
+            except Exception:
+                conn.execute("ROLLBACK")
+                raise
+        finally:
+            conn.close()
+
+        self._by_id[record.id] = record
+        return record
 
     def get_by_key(self, key: str) -> Optional[MemoryRecord]:
         for record in self._by_id.values():

@@ -372,28 +372,82 @@ def _claims_match_query(claim: Any, words: list[str]) -> bool:
     return any(w in tokens for w in words)
 
 
+def _same_logical_observation(a: MemoryRecord, b: MemoryRecord) -> bool:
+    """True when two records describe the same observation, not merely the same key.
+
+    ``ConflictDetector`` scores a conflict on key + origin alone, so an independent
+    observation filed under a shared key produces a ``temporal`` conflict too.
+    Treating every such conflict as a contest would withdraw guidance because
+    someone wrote about the same topic in another repository.
+
+    Two writes are the same logical observation when they share a key and origin
+    **and** either:
+
+    * carry the same applicability — a plain revision of the same fact; or
+    * carry the same *content* with different applicability — the same fact
+      re-scoped, which the spec treats as a correction (same-text rescoping) and
+      which must invalidate the claim.
+
+    Different content under a different scope is an independent observation and
+    leaves the claim valid. Missing scope counts as different: unknown is not the
+    same.
+    """
+    if a.key != b.key or str(a.origin) != str(b.origin):
+        return False
+
+    def scope(record):
+        return (
+            getattr(record, "repository_id", None),
+            getattr(record, "task_type", None),
+            getattr(record, "workspace_id", None),
+            getattr(record, "environment", None),
+        )
+
+    if scope(a) == scope(b):
+        return True
+    # Same text, different scope: the same observation re-scoped.
+    return _evidence_content_digest(a) == _evidence_content_digest(b)
+
+
+def _evidence_content_digest(record: MemoryRecord) -> str:
+    """Digest of the observation's *content* only — no scope, no identity."""
+    payload = json.dumps(
+        {"key": record.key, "value": record.value, "origin": str(record.origin)},
+        sort_keys=True, default=str,
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
 def source_is_contested(store: Any, source_id: str) -> bool:
     """True when a pinned observation is contested by a genuine conflict.
 
     The single rule shared by activation and invalidation, so the two cannot
     disagree about what "contested" means.
 
-    A conflict on the *pinned record* is durable: it is recorded in the conflicts
-    table and read from there, so archiving the conflicting sibling, or resolving
-    the conflict, does not clear it. That is deliberate — a conflict score is the
-    store's statement that a logical observation was revised, and a claim built
-    from the superseded value must not become publishable again by cleanup.
+    A conflict counts only when the *other* record is the same logical observation
+    — same key, origin and scope. A sibling under a shared key in another
+    repository or task scope is an independent observation and leaves the claim
+    valid.
 
-    A sibling under the *same key* that is not a conflict (for example an
-    independent observation in another repository or task scope) leaves the pinned
-    record uncontested, so the claim stays valid.
+    A conflict on the pinned record is durable: it is read from the conflicts
+    table, so archiving the sibling or resolving the conflict does not clear it.
     """
-    conflicts = store.get_conflicts_for_records([source_id])
-    return any(
-        getattr(c, "record_a_id", None) == source_id
-        or getattr(c, "record_b_id", None) == source_id
-        for c in conflicts
-    )
+    pinned = store.get_committed(source_id)
+    if pinned is None:
+        return False
+    for conflict in store.get_conflicts_for_records([source_id]):
+        other_id = (
+            conflict.record_b_id if conflict.record_a_id == source_id
+            else conflict.record_a_id
+        )
+        other = store.get_committed(other_id)
+        if other is None:
+            # A conflict whose counterpart is gone still contests: the store
+            # recorded that this observation was revised.
+            return True
+        if _same_logical_observation(pinned, other):
+            return True
+    return False
 
 
 def persisted_invalidation(record: MemoryRecord) -> Optional[str]:
