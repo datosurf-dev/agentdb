@@ -501,3 +501,219 @@ def test_repeating_an_identical_proposal_reuses_the_revision(db):
     first = db.propose_learned(**kwargs)
     second = db.propose_learned(**kwargs)
     assert first.id == second.id
+
+
+# ---------------------------------------------------------------------------
+# Review findings — regression tests
+# ---------------------------------------------------------------------------
+
+def test_conflict_invalidates_durably_not_by_recomputation(db, proposal):
+    """Finding 1: archiving the conflicting sibling must not revive the claim.
+
+    Invalidation is *persisted* when the conflict is scored. Recomputing validity
+    on read would make the claim reappear the moment the sibling is archived,
+    which is exactly the resurrection the spec forbids.
+    """
+    db.activate_learned(proposal.id, agent_id="ag")
+    src = next(r for r in db._store.list_all() if r.key == "memory/obs/a")
+
+    sibling = db.write(
+        key=src.key, value="revised observation", origin="agent_inferred",
+        agent_id="ag", session_id="s-1", repository_id=REPO, task_type=TASK,
+    )
+    query = dict(agent_id="ag", repository_id=REPO, task_type=TASK)
+    assert db.retrieve_learned("serial migrations", **query) == []
+
+    # Archiving (and deleting) the sibling must change nothing.
+    db._store.archive_record(sibling.id)
+    assert db.retrieve_learned("serial migrations", **query) == [], (
+        "claim reappeared after the conflicting sibling was archived"
+    )
+    assert db.retrieve_learned("serial migrations", **query) == [], (
+        "claim reappeared after a second read"
+    )
+
+
+def test_unrelated_same_key_sibling_leaves_claim_valid_when_not_conflicting(db):
+    """Finding 1, the other half: a sibling that is not a conflict is inert.
+
+    A sibling written under a different key never contests the pinned source, so
+    the claim stays eligible.
+    """
+    src = _obs(db, "memory/obs/pinned", "the pinned observation")
+    claim = db.propose_learned(
+        agent_id="ag", claim="check the index", repository_id=REPO,
+        task_type=TASK, supporting_ids=[src.id],
+    )
+    db.activate_learned(claim.id, agent_id="ag")
+
+    _obs(db, "memory/obs/sibling", "an unrelated observation")
+    assert db.retrieve_learned("index", agent_id="ag",
+                               repository_id=REPO, task_type=TASK) != []
+
+
+def test_failed_replacement_leaves_the_prior_revision_active(tmp_path, monkeypatch):
+    """Finding 2: replacement is all-or-nothing."""
+    db = AgentDB(memory_dir=str(tmp_path / "atomic"))
+    src = _obs(db, "memory/obs/a", "an observation")
+    first = db.propose_learned(agent_id="ag", claim="first guidance",
+                               repository_id=REPO, task_type=TASK,
+                               supporting_ids=[src.id])
+    kid = knowledge_id_of(first)
+    db.activate_learned(first.id, agent_id="ag")
+
+    src2 = _obs(db, "memory/obs/b", "another observation")
+    second = db.propose_learned(agent_id="ag", claim="second guidance",
+                                repository_id=REPO, task_type=TASK,
+                                supporting_ids=[src2.id], knowledge_id=kid)
+
+    # Fail the transaction after the prior revision would have been retired.
+    import agentdb.core.store as store_mod
+    original = store_mod.MemoryStore.activate_learned_revision
+
+    def boom(self, *a, **kw):
+        raise RuntimeError("simulated commit failure")
+
+    monkeypatch.setattr(store_mod.MemoryStore, "activate_learned_revision", boom)
+    with pytest.raises(RuntimeError):
+        db.activate_learned(second.id, agent_id="ag")
+    monkeypatch.setattr(store_mod.MemoryStore, "activate_learned_revision", original)
+
+    # The prior revision is still active; the new one did not publish.
+    hits = db.retrieve_learned("guidance", agent_id="ag",
+                               repository_id=REPO, task_type=TASK)
+    assert [r.id for r in hits] == [first.id], (
+        "a failed replacement left no active revision"
+    )
+
+
+def test_an_open_instance_observes_a_committed_suspension(tmp_path):
+    """Finding 2: in-memory state must reflect a committed lifecycle change."""
+    db = AgentDB(memory_dir=str(tmp_path / "obs"))
+    src = _obs(db, "memory/obs/a", "an observation")
+    claim = db.propose_learned(agent_id="ag", claim="check the index",
+                               repository_id=REPO, task_type=TASK,
+                               supporting_ids=[src.id])
+    kid = knowledge_id_of(claim)
+    db.activate_learned(claim.id, agent_id="ag")
+    query = dict(agent_id="ag", repository_id=REPO, task_type=TASK)
+    assert db.retrieve_learned("index", **query) != []
+
+    db.suspend_learned(kid, agent_id="ag", actor="host", reason="withdrawn")
+    assert db.retrieve_learned("index", **query) == [], (
+        "the same instance kept serving a suspended claim"
+    )
+
+
+def test_concurrent_replacement_across_two_connections(tmp_path):
+    """Finding 2: a real two-connection race, not a sequential one.
+
+    Two ``MemoryStore`` instances over the same file each hold their own snapshot.
+    The second one must not be able to publish a third active revision while the
+    first's replacement stands.
+    """
+    import dataclasses
+
+    from agentdb.core.store import MemoryStore
+    from agentdb.learning import knowledge_id_of
+
+    db = AgentDB(memory_dir=str(tmp_path / "race"))
+    src = _obs(db, "memory/obs/a", "an observation")
+    first = db.propose_learned(agent_id="ag", claim="first", repository_id=REPO,
+                               task_type=TASK, supporting_ids=[src.id])
+    db.activate_learned(first.id, agent_id="ag")
+
+    db_path = tmp_path / "race" / "database" / "agentdb.sqlite"
+    store_a = MemoryStore(db_path)
+    active = store_a.get_by_id(first.id)
+
+    def revision(n):
+        # The store publishes only an already-activated revision; anything else
+        # would occupy the active slot without ever being eligible.
+        return dataclasses.replace(
+            active, id=f"rev-{n}",
+            derivation={
+                **active.derivation,
+                "revision": n,
+                "lifecycle": {"status": "active"},
+            },
+        )
+
+    superseded = dataclasses.replace(
+        active, derivation={**active.derivation,
+                            "lifecycle": {"status": "superseded"}},
+    )
+    # Connection A replaces the active revision with rev-2.
+    store_a.activate_learned_revision(
+        revision(2), supersedes_id=active.id, superseded_record=superseded,
+    )
+
+    # Connection B opens *after* that commit and tries to publish rev-3 over the
+    # same knowledge ID. rev-2 is already active, so this must fail.
+    store_b = MemoryStore(db_path)
+    with pytest.raises(ValueError, match="already has an active revision"):
+        store_b.activate_learned_revision(
+            revision(3), supersedes_id=active.id,
+            superseded_record=dataclasses.replace(superseded),
+        )
+
+    live = [r for r in store_b.list_all_including_archived()
+            if r.kind == "learned_claim" and not r.archived]
+    active_ids = [r.id for r in live
+                  if (r.derivation or {}).get("lifecycle", {}).get("status") == "active"]
+    assert active_ids == ["rev-2"], f"expected exactly one active revision, got {active_ids}"
+
+
+def test_read_only_caller_cannot_activate(iso_db):
+    """Finding 3: source read access does not authorize lifecycle changes."""
+    from agentdb.governance.permission_router import PermissionDenied
+
+    src = _obs(iso_db, "memory/obs/a", "an observation")
+    claim = iso_db.propose_learned(agent_id="ag", claim="check the index",
+                                   repository_id=REPO, task_type=TASK,
+                                   supporting_ids=[src.id])
+    with pytest.raises(PermissionDenied):
+        iso_db.activate_learned(claim.id, agent_id="reader")
+
+
+def test_revoked_reader_cannot_retrieve_the_claim(iso_db, tmp_path):
+    """Finding 3: every source, supporting and contradicting, must be readable."""
+    a = _obs(iso_db, "memory/obs/a", "supporting observation")
+    b = _obs(iso_db, "memory/obs/b", "contradicting observation")
+    claim = iso_db.propose_learned(
+        agent_id="ag", claim="check the index", repository_id=REPO, task_type=TASK,
+        supporting_ids=[a.id], contradicting_ids=[b.id],
+    )
+    iso_db.activate_learned(claim.id, agent_id="ag")
+    query = dict(repository_id=REPO, task_type=TASK)
+    assert iso_db.retrieve_learned("index", agent_id="ag", **query) != []
+    assert iso_db.retrieve_learned("index", agent_id="stranger", **query) == []
+
+
+@pytest.mark.parametrize("query", ["", "   ", "\n\t"])
+def test_strict_retrieval_abstains_on_a_blank_query(db, proposal, query):
+    """Finding 4: relevance is required, so no query means no result."""
+    db.activate_learned(proposal.id, agent_id="ag")
+    assert db.retrieve_learned(query, agent_id="ag", repository_id=REPO,
+                               task_type=TASK) == []
+
+
+def test_strict_retrieval_ignores_incidental_substrings(db, proposal):
+    """Finding 4: `he` must not match `the`."""
+    db.activate_learned(proposal.id, agent_id="ag")
+    assert db.retrieve_learned("he", agent_id="ag", repository_id=REPO,
+                               task_type=TASK) == []
+    assert db.retrieve_learned("zzz unrelated", agent_id="ag", repository_id=REPO,
+                               task_type=TASK) == []
+
+
+def test_identical_proposal_retry_returns_the_same_knowledge_id(db):
+    """Finding 4: a retry must not mint a new knowledge ID."""
+    a = _obs(db, "memory/obs/a", "an observation")
+    kwargs = dict(agent_id="ag", claim="check the index", repository_id=REPO,
+                  task_type=TASK, supporting_ids=[a.id])
+    first = db.propose_learned(**kwargs)
+    for _ in range(3):
+        again = db.propose_learned(**kwargs)
+        assert again.id == first.id
+        assert knowledge_id_of(again) == knowledge_id_of(first)

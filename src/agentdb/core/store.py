@@ -349,7 +349,11 @@ class MemoryStore:
         return canonical
 
     def activate_learned_revision(
-        self, record: "MemoryRecord", *, supersedes_id: Optional[str],
+        self,
+        record: "MemoryRecord",
+        *,
+        supersedes_id: Optional[str] = None,
+        superseded_record: Optional["MemoryRecord"] = None,
     ) -> "MemoryRecord":
         """Atomically make ``record`` the one active revision of its knowledge ID.
 
@@ -368,6 +372,15 @@ class MemoryStore:
         kid = (record.derivation or {}).get("knowledge_id")
         if not kid:
             raise ValueError("learned revision has no knowledge_id")
+        # The caller must hand in an *activated* revision. Publishing a record
+        # still marked proposed would leave a revision that is live, occupying
+        # the one-active slot, yet never eligible — the worst of both states,
+        # and invisible to the invariant check below.
+        status = (record.derivation or {}).get("lifecycle", {}).get("status")
+        if status != "active":
+            raise ValueError(
+                f"activate_learned_revision requires status 'active', got {status!r}"
+            )
 
         conn = _connect(self._db_path, timeout=30.0)
         try:
@@ -386,18 +399,29 @@ class MemoryStore:
                         continue
                     if other.id == record.id:
                         continue
+                    # The revision being replaced is expected to be active; it is
+                    # retired inside this same transaction.
+                    if supersedes_id and other.id == supersedes_id:
+                        continue
                     if (other.derivation or {}).get("lifecycle", {}).get("status") == "active":
                         raise ValueError(
                             f"knowledge {kid!r} already has an active revision "
                             f"({other.id}); suspend or replace it explicitly"
                         )
 
-                conn.execute(self._INSERT_SQL, self._record_params(record))
+                # Activation, the superseded revision's final history entry, and
+                # its retirement all commit together. A failure anywhere leaves
+                # the prior revision active and the new one unpublished.
+                # Retire the prior revision first, so the active-revision check
+                # above cannot see it as still active when the new one lands.
                 if supersedes_id:
                     conn.execute(
                         "UPDATE memories SET archived = 1 WHERE id = ?",
                         (supersedes_id,),
                     )
+                conn.execute(self._INSERT_SQL, self._record_params(record))
+                if superseded_record is not None:
+                    conn.execute(self._INSERT_SQL, self._record_params(superseded_record))
                 conn.execute("COMMIT")
             except Exception:
                 conn.execute("ROLLBACK")
@@ -406,6 +430,8 @@ class MemoryStore:
             conn.close()
 
         self._by_id[record.id] = record
+        if superseded_record is not None:
+            self._by_id[superseded_record.id] = superseded_record
         if supersedes_id:
             old = self._by_id.get(supersedes_id)
             if old is not None:

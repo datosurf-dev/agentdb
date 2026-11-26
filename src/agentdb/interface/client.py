@@ -879,6 +879,10 @@ class AgentDB:
                 existing.conflict_id = conflict.id
                 self._store.update_conflict_id(existing.id, conflict.id)
                 self._store.store_conflict(conflict)
+                # A conflict score is the durable signal that a logical
+                # observation was contested. Retire any claim pinned to it *now*,
+                # so archiving the sibling later cannot make guidance reappear.
+                self._retire_claims_for_source(existing.id, reason="evidence_conflicted")
                 self.gateway.dispatch(
                     "conflict_detected",
                     conflict_id=conflict.id,
@@ -1542,13 +1546,22 @@ class AgentDB:
 
         Revalidates evidence and authorization first: a proposal whose sources
         have since been edited, deleted, rescoped, or become unreadable cannot be
-        activated. At most one revision per knowledge ID is active; activating a
-        newer revision supersedes the previous one in a single transaction.
+        activated. Both supporting and contradicting evidence are checked.
+
+        Activation requires **lifecycle authority**, not merely source read access:
+        being able to read the observations a claim was built from does not confer
+        the right to publish guidance derived from them.
+
+        Replacement is atomic. Retiring the prior revision, publishing the new one,
+        and writing both history entries happen in one transaction, so a failure
+        leaves the prior revision active rather than nothing active.
         """
         from ..learning import (
-            ClaimScope, STATUS_ACTIVE, _with_lifecycle, evidence_invalidation_reason, is_active_claim,
-            is_learned_claim, knowledge_id_of,
+            ClaimScope, STATUS_ACTIVE, _with_lifecycle, is_learned_claim,
+            knowledge_id_of, validate_evidence,
         )
+
+        self._authorize_lifecycle(agent_id, operation="activate")
 
         record = self._store.get_by_id(record_id)
         if record is None or not is_learned_claim(record):
@@ -1563,29 +1576,31 @@ class AgentDB:
             task_type=scope_dict.get("task_type", ""),
         )
 
-        # Revalidate every snapshotted source as it is *now*.
-        sources = derivation.get("evidence", {}).get("supporting", [])
-        current = []
-        for src in sources:
-            live = self._store.get_by_id(src.get("id"))
-            if live is None or getattr(live, "archived", False):
-                raise ValueError(
-                    f"evidence {src.get('id')!r} is missing; revalidate before activating"
-                )
-            if not self._can_read_record(live, agent_id):
-                raise ValueError(
-                    f"evidence {src.get('id')!r} is not readable by this caller"
-                )
-            current.append(live)
-
-        from ..learning import validate_evidence
-        validate_evidence(
-            source_ids=[r.id for r in current], scope=scope,
-            store=self._store, can_read=self._can_read_record, agent_id=agent_id,
-        )
+        evidence = derivation.get("evidence", {})
+        for kind in ("supporting", "contradicting"):
+            ids = [s.get("id") for s in evidence.get(kind, [])]
+            if not ids:
+                continue      # contradicting evidence is optional
+            live = []
+            for source_id in ids:
+                candidate = self._store.get_by_id(source_id)
+                if candidate is None or getattr(candidate, "archived", False):
+                    raise ValueError(
+                        f"evidence {source_id!r} is missing; revalidate before activating"
+                    )
+                if not self._can_read_record(candidate, agent_id):
+                    raise ValueError(
+                        f"evidence {source_id!r} is not readable by this caller"
+                    )
+                live.append(candidate)
+            validate_evidence(
+                source_ids=[r.id for r in live], scope=scope,
+                store=self._store, can_read=self._can_read_record, agent_id=agent_id,
+            )
 
         kid = knowledge_id_of(record)
         prior = self._active_learned_revision(kid)
+        supersedes = prior is not None and prior.id != record.id
 
         activated = dataclasses.replace(
             record,
@@ -1594,7 +1609,8 @@ class AgentDB:
                 reason=reason or "activation",
             ),
         )
-        if prior is not None and prior.id != activated.id:
+        superseded = None
+        if supersedes:
             superseded = dataclasses.replace(
                 prior,
                 derivation=_with_lifecycle(
@@ -1602,13 +1618,11 @@ class AgentDB:
                     reason=f"superseded by revision {derivation.get('revision')}",
                 ),
             )
-            # Keep the superseded copy's history without re-activating it: it is
-            # archived, so it is preserved for inspection but never retrieved.
-            self._store.write(superseded)
-            self._store.archive_record(prior.id)
 
         self._store.activate_learned_revision(
-            activated, supersedes_id=prior.id if prior is not None else None,
+            activated,
+            supersedes_id=prior.id if supersedes else None,
+            superseded_record=superseded,
         )
         return activated
 
@@ -1624,6 +1638,8 @@ class AgentDB:
         """
         from ..learning import _with_lifecycle
 
+        self._authorize_lifecycle(agent_id, operation="suspend")
+
         active = self._active_learned_revision(knowledge_id)
         if active is None:
             return None
@@ -1633,6 +1649,11 @@ class AgentDB:
                 active, status="suspended", actor=actor, reason=reason or "suspended",
             ),
         )
+        suspended.derivation["invalidated"] = {
+            "reason": reason or "suspended",
+            "source_id": None,
+            "at": datetime.now(timezone.utc).isoformat(),
+        }
         self._store.write(suspended)
         self._store.archive_record(active.id)
         return suspended
@@ -1663,6 +1684,8 @@ class AgentDB:
         """
         from ..learning import _with_lifecycle
 
+        self._authorize_lifecycle(agent_id, operation="suspend")
+
         active = self._active_learned_revision(knowledge_id)
         if active is None:
             return None
@@ -1687,6 +1710,11 @@ class AgentDB:
             ),
         )
         invalidated.derivation["evidence"] = evidence
+        invalidated.derivation["invalidated"] = {
+            "reason": reason or f"evidence {source_id} withdrawn",
+            "source_id": source_id,
+            "at": datetime.now(timezone.utc).isoformat(),
+        }
         self._store.write(invalidated)
         self._store.archive_record(active.id)
         return invalidated
@@ -1703,43 +1731,47 @@ class AgentDB:
         """Strict retrieval of active, in-scope, still-valid learned claims.
 
         Deliberately **not** a wrapper over :meth:`retrieve`. The generic path
-        builds a capped candidate set first and filters afterwards, so
-        out-of-scope records can consume the cap and starve an eligible claim.
-        This scans the learned claims directly and applies every gate — scope,
-        active state, evidence validity, source readability, relevance — *before*
-        ``limit`` is applied. An empty list is a normal result.
+        builds a capped candidate set first and filters afterwards, so out-of-scope
+        records can consume the cap and starve an eligible claim. This scans
+        learned claims directly and applies every gate before ``limit``.
+
+        Gate order — note that validity comes from the **persisted** invalidation,
+        never from a recomputation. A revision retired because a conflict
+        contested its evidence stays retired even if that conflict is later
+        closed: closing a conflict is not revalidation.
+
+        A blank or whitespace-only query abstains (an empty result), because a
+        query is what makes retrieval relevance-dependent. Matching is on whole
+        words: an incidental substring such as ``he`` inside ``the`` is not a
+        match.
         """
         from ..learning import (
-            ClaimScope, is_active_claim, is_learned_claim,
-            evidence_invalidation_reason,
+            ClaimScope, _claims_match_query, is_active_claim, is_retired,
+            persisted_invalidation, relevant_words,
         )
 
         scope = ClaimScope(repository_id=repository_id, task_type=task_type)
-        words = [w.lower() for w in (query or "").split() if w]
+        words = relevant_words(query)
+        if not words:
+            return []          # blank query: abstain rather than dump everything
 
         eligible: list[MemoryRecord] = []
         for record in self._store.list_all():
             if getattr(record, "archived", False) or not is_active_claim(record):
                 continue
-            # Exact scope, before anything else.
+            # Exact scope, before any cap.
             if not scope.matches(record):
                 continue
-            # Evidence validity: edited / deleted / rescoped withdraws the claim.
-            if evidence_invalidation_reason(record, store=self._store) is not None:
+            # Durable retirement: edited, deleted, rescoped, or contested.
+            if is_retired(record):
                 continue
-            # Source readability for *this* caller.
-            sources = (record.derivation or {}).get("evidence", {}).get("supporting", [])
-            if any(
-                (self._store.get_by_id(s.get("id")) is None)
-                or not self._can_read_record(self._store.get_by_id(s.get("id")), agent_id)
-                for s in sources
-            ):
+            # Every referenced source must still be readable by this caller, for
+            # both supporting and contradicting evidence.
+            if not self._learned_sources_readable(record, agent_id):
                 continue
-            # Relevance last, and only when a query was supplied.
-            if words:
-                haystack = str(record.value).lower()
-                if not any(w in haystack for w in words):
-                    continue
+            # Relevance last, so scope and validity are never displaced by it.
+            if not _claims_match_query(record.value, words):
+                continue
             eligible.append(record)
 
         # Cap applies only after every gate, so an eligible claim cannot be
@@ -1812,6 +1844,76 @@ class AgentDB:
                     (record.derivation or {}).get("fingerprint") == fingerprint:
                 return record
         return None
+
+    def _retire_claims_for_source(self, source_id: str, *, reason: str) -> None:
+        """Durably retire every active claim pinned to ``source_id``.
+
+        Called when the store learns that a source is contested or withdrawn.
+        Retirement is recorded on the revision and the revision is archived, so
+        the decision survives later changes to the evidence — including the
+        conflict being resolved or the sibling being deleted.
+        """
+        from ..learning import _with_lifecycle, is_active_claim, is_learned_claim
+
+        for record in list(self._store.list_all_including_archived()):
+            if not is_learned_claim(record) or not is_active_claim(record):
+                continue
+            evidence = (record.derivation or {}).get("evidence", {})
+            pinned = {
+                s.get("id")
+                for s in list(evidence.get("supporting", []))
+                + list(evidence.get("contradicting", []))
+            }
+            if source_id not in pinned:
+                continue
+            retired = dataclasses.replace(
+                record,
+                derivation=_with_lifecycle(
+                    record, status="invalidated", actor=None, reason=reason,
+                ),
+            )
+            retired.derivation["invalidated"] = {
+                "reason": reason, "source_id": source_id,
+                "at": datetime.now(timezone.utc).isoformat(),
+            }
+            self._store.write(retired)
+            self._store.archive_record(record.id)
+
+    def _learned_sources_readable(self, record: MemoryRecord, agent_id: Optional[str]) -> bool:
+        """True when this caller may read every source the revision references."""
+        evidence = (getattr(record, "derivation", {}) or {}).get("evidence", {})
+        for entry in list(evidence.get("supporting", [])) + list(evidence.get("contradicting", [])):
+            source = self._store.get_by_id(entry.get("id"))
+            if source is None or getattr(source, "archived", False):
+                return False
+            if not self._can_read_record(source, agent_id):
+                return False
+        return True
+
+    def _authorize_lifecycle(self, agent_id: Optional[str], *, operation: str) -> None:
+        """Require explicit write authority on the learned namespace.
+
+        Reading a source does not imply the right to publish, suspend or withdraw
+        guidance built from it. In trusted mode (no policy) the host owns the
+        boundary and this is a no-op; in isolation mode it fails closed.
+        """
+        if self._permissions is None:
+            return
+        if not agent_id:
+            raise PermissionDenied(
+                f"{operation} requires a caller identity in isolation mode"
+            )
+        try:
+            from ..learning import KEY_PREFIX
+            # Probe a real key in the namespace: policy rules match on the key,
+            # so a synthetic placeholder would be evaluated against the wrong
+            # rule set.
+            self._permissions.check_write(f"{KEY_PREFIX}probe", agent_id, "agent_inferred")
+        except PermissionDenied:
+            raise PermissionDenied(
+                f"Agent '{agent_id}' may read learned evidence but may not "
+                f"{operation} learned knowledge"
+            ) from None
 
     def _learned_revisions(self, knowledge_id: str) -> list[MemoryRecord]:
         from ..learning import is_learned_claim, knowledge_id_of

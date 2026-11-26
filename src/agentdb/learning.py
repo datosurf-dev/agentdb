@@ -53,6 +53,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -295,35 +296,81 @@ def evidence_invalidation_reason(
     *,
     store: Any,
 ) -> Optional[str]:
-    """Why an active revision's evidence no longer holds, or ``None``.
+    """Why a revision's evidence no longer holds, or ``None``.
 
-    Evidence is **pinned to source IDs**, so an unrelated record that merely
-    shares a key cannot withdraw a claim. Invalidation fires only when the pinned
-    observation itself is genuinely contested or gone:
+    A *probe*, used at proposal and activation time. It is deliberately not the
+    source of truth for retrieval: retrieval reads the persisted invalidation
+    (``derivation["invalidated"]``), because a computed check changes its answer
+    when the world changes. Archiving the conflicting sibling would otherwise make
+    a withdrawn claim reappear, which is exactly what the spec forbids.
 
-    * ``evidence_missing``  — the pinned record was archived or deleted;
-    * ``evidence_revised``  — the pinned record's digest changed (content or
-      scope, including same-text rescoping);
-    * ``evidence_conflicted`` — a newer live record now shares the pinned
-      record's key, i.e. a genuine conflict contests the same logical
-      observation.
+    Evidence is pinned to source IDs, so an unrelated record sharing a key cannot
+    withdraw a claim. Invalidation fires only when the pinned observation itself is
+    contested or gone:
 
-    Resolving the conflict, deleting the sibling, or restoring the original
-    content clears nothing by itself: the revision must be explicitly revalidated
-    and reactivated, because this function only reports.
+    * ``evidence_missing``    — the pinned record is archived or deleted;
+    * ``evidence_revised``    — its digest changed (content or scope, including
+      same-text rescoping);
+    * ``evidence_conflicted`` — a newer live record now shares its key, i.e. a
+      genuine conflict contests the same logical observation.
     """
     sources = (getattr(record, "derivation", {}) or {}).get("evidence", {}).get("supporting", [])
-    for src in sources:
+    contradicting = (getattr(record, "derivation", {}) or {}).get("evidence", {}).get("contradicting", [])
+    for src in list(sources) + list(contradicting):
         pinned = store.get_by_id(src.get("id"))
         if pinned is None or getattr(pinned, "archived", False):
             return "evidence_missing"
         if _evidence_digest(pinned) != src.get("digest"):
             return "evidence_revised"
-        # A newer live record on the same key is a contested observation.
         live = _live_records_for_key(store, pinned.key)
         if live and live[-1].id != pinned.id:
             return "evidence_conflicted"
     return None
+
+
+#: Words too common to make a claim relevant on their own. A claim is guidance
+#: for a task; "the", "and", "how" do not select one.
+_STOPWORDS = frozenset(
+    "a an and are as at be but by do does for from how i if in into is it its "
+    "of on or that the then there these this to was we what when where which "
+    "who why will with you your".split()
+)
+
+
+def relevant_words(query: str) -> list[str]:
+    """Query words that can make a claim relevant. Empty means *abstain*.
+
+    A blank or whitespace-only query yields ``[]``: retrieval is required to be
+    query-dependent, so with no query there is nothing to be relevant *to* and the
+    correct answer is an empty result rather than every claim in scope.
+    """
+    if not isinstance(query, str):
+        return []
+    return [w.lower() for w in query.split() if w.lower() not in _STOPWORDS]
+
+
+def _claims_match_query(claim: Any, words: list[str]) -> bool:
+    """Whole-word match of any query word against the claim text.
+
+    Whole-word, not substring: ``he`` must not match ``the``. Incidental substring
+    hits made the abstention test unusable in practice.
+    """
+    tokens = set(re.findall(r"[a-z0-9_]+", str(claim).lower()))
+    return any(w in tokens for w in words)
+
+
+def persisted_invalidation(record: MemoryRecord) -> Optional[str]:
+    """The reason this revision was durably retired, or ``None``.
+
+    Set once, at the moment a genuine conflict or an explicit correction is
+    detected, and never recomputed. This is what retrieval reads.
+    """
+    return (getattr(record, "derivation", {}) or {}).get("invalidated", {}).get("reason")
+
+
+def is_retired(record: MemoryRecord) -> bool:
+    """True once a revision has been durably retired, whatever the cause."""
+    return persisted_invalidation(record) is not None
 
 
 def build_proposal(
