@@ -108,6 +108,30 @@ class AgentDBMiddleware(GatewayAdapter):
         self._capabilities = capabilities
         self.gateway.subscribe("conflict_detected", self._on_conflict)
 
+    def _session_scope(self, session_id: str,
+                       working_dirs: Optional[list[str]] = None
+                       ) -> tuple[Optional[list[str]], Optional[str]]:
+        """The scope a write should carry: (working_dirs, repository_id).
+
+        Derives ``repository_id`` from the session's working dirs, so a record
+        can be scoped without the caller having to know the repository. This is
+        the *only* place identity is derived, so every write path is covered by
+        construction rather than by remembering to pass it.
+
+        ``repository_id`` is the repository the session is working in — the last
+        working dir that is inside a git checkout, else the basename of the last
+        working dir. It is ``None`` only when the session genuinely has no dirs,
+        and a ``None`` is never invented as a placeholder: an absent identity is
+        what ``retrieve(scope=...)`` treats as "unknown", which is not a match.
+
+        (CONTEXTUAL-SPEC §7 — scope must be recorded at write time or it cannot
+        be filtered at read time.)
+        """
+        from ..interface.client import _extract_repo
+
+        dirs = self._resolve_working_dirs(session_id, working_dirs)
+        return dirs, _extract_repo(dirs)
+
     def _resolve_working_dirs(
         self, session_id: str, explicit: Optional[list[str]] = None
     ) -> Optional[list[str]]:
@@ -214,7 +238,7 @@ class AgentDBMiddleware(GatewayAdapter):
         ``finalize_turn`` runs without a preceding ``prepare_turn`` in this
         process/session (e.g. after a restart, or from a separate persist path).
         """
-        session_dirs = self._resolve_working_dirs(session_id, working_dirs)
+        session_dirs, repository_id = self._session_scope(session_id, working_dirs)
 
         explicit_writes = list(memory_writes or [])
         for item in explicit_writes:
@@ -226,6 +250,7 @@ class AgentDBMiddleware(GatewayAdapter):
                 session_id=session_id,
                 entities=touched_entities or [],
                 working_dirs=session_dirs,
+                repository_id=repository_id,
             )
 
         if self._resolved["capture"]["auto_persist_response"] and model_response:
@@ -241,6 +266,7 @@ class AgentDBMiddleware(GatewayAdapter):
                 session_id=session_id,
                 entities=touched_entities or [],
                 working_dirs=session_dirs,
+                repository_id=repository_id,
             )
 
         # Write conversation JSONL if enabled
@@ -871,12 +897,14 @@ class AgentDBMiddleware(GatewayAdapter):
         ``prepare_turn`` had remembered, so an explicit argument at
         ``end_session`` was silently dropped.
         """
+        dirs, repository_id = self._session_scope(session_id, working_dirs)
         summary = {
             "type": "session_summary",
             "session_id": session_id,
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "agent_id": self._agent_id,
-            "working_dirs": self._resolve_working_dirs(session_id, working_dirs),
+            "working_dirs": dirs,
+            "repository_id": repository_id,
             "temp_dirs": [r.path for r in self._session_dir_state.get(session_id, []) if not r.elevated],
             "elevated_dirs": [r.path for r in self._session_dir_state.get(session_id, []) if r.elevated],
             "turn_count": len(self._session_work_log.get(session_id, [])),

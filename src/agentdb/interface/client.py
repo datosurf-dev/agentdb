@@ -1524,6 +1524,7 @@ class AgentDB:
         summary: str,
         origin: str = "agent_inferred",
         working_dirs: Optional[list[str]] = None,
+        repository_id: Optional[str] = None,
     ) -> None:
         """Write a compaction summary so agents survive context truncation.
 
@@ -1536,8 +1537,9 @@ class AgentDB:
         ``origin="human_approved"`` explicitly. This prevents untrusted
         agent input from being laundered into human authority.
 
-        ``working_dirs`` (CONTEXTUAL-SPEC §7): forwarded to the record so
-        compaction summaries carry the session's workspace scope.
+        ``working_dirs`` / ``repository_id`` (CONTEXTUAL-SPEC §7): forwarded to
+        the record so compaction summaries carry the session's scope, and can be
+        filtered by it at read time.
         """
         self.write(
             key=f"memory/compaction/summary/{session_id}",
@@ -1547,6 +1549,7 @@ class AgentDB:
             session_id=session_id,
             confidence=1.0,
             working_dirs=working_dirs,
+            repository_id=repository_id,
         )
 
     # ------------------------------------------------------------------
