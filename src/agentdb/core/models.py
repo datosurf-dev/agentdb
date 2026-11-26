@@ -68,7 +68,9 @@ class MemoryRecord:
     # source record from a derived canonical. ``producer`` records what created
     # the record (user/agent/provider/consolidation). ``derivation`` holds
     # per-source digests and evidence when this record is a derived canonical.
-    kind: str = "source"  # "source" | "derived_canonical"
+    # "source" | "derived_canonical" | "learned_claim". A learned claim is an
+    # immutable revision of host-approved guidance; see agentdb/learning.py.
+    kind: str = "source"
     producer: Optional[str] = None
     derivation: dict = field(default_factory=dict)
     # Verified approval evidence (OD-2). When present and well-formed this

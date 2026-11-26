@@ -348,6 +348,70 @@ class MemoryStore:
                 rec.archived = True
         return canonical
 
+    def activate_learned_revision(
+        self, record: "MemoryRecord", *, supersedes_id: Optional[str],
+    ) -> "MemoryRecord":
+        """Atomically make ``record`` the one active revision of its knowledge ID.
+
+        Mirrors ``write_canonical_atomic``: a single ``BEGIN IMMEDIATE``
+        transaction, so two concurrent activations cannot both win and leave two
+        active revisions. The prior active revision, when given, is marked
+        superseded inside the same transaction — either both changes commit or
+        neither does.
+
+        Raises ``ValueError`` when another revision is already active (a
+        concurrent writer won), so the caller can re-read and retry rather than
+        silently overwrite.
+        """
+        from .sqlite_connection import connect as _connect
+
+        kid = (record.derivation or {}).get("knowledge_id")
+        if not kid:
+            raise ValueError("learned revision has no knowledge_id")
+
+        conn = _connect(self._db_path, timeout=30.0)
+        try:
+            conn.isolation_level = None
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                # Any other revision of this knowledge ID must not already be
+                # active. Checked inside the write lock, so it is race-safe.
+                rows = conn.execute(
+                    "SELECT * FROM memories WHERE kind = ? AND archived = 0",
+                    ("learned_claim",),
+                ).fetchall()
+                for row in rows:
+                    other = self._row_to_record(row)
+                    if (other.derivation or {}).get("knowledge_id") != kid:
+                        continue
+                    if other.id == record.id:
+                        continue
+                    if (other.derivation or {}).get("lifecycle", {}).get("status") == "active":
+                        raise ValueError(
+                            f"knowledge {kid!r} already has an active revision "
+                            f"({other.id}); suspend or replace it explicitly"
+                        )
+
+                conn.execute(self._INSERT_SQL, self._record_params(record))
+                if supersedes_id:
+                    conn.execute(
+                        "UPDATE memories SET archived = 1 WHERE id = ?",
+                        (supersedes_id,),
+                    )
+                conn.execute("COMMIT")
+            except Exception:
+                conn.execute("ROLLBACK")
+                raise
+        finally:
+            conn.close()
+
+        self._by_id[record.id] = record
+        if supersedes_id:
+            old = self._by_id.get(supersedes_id)
+            if old is not None:
+                old.archived = True
+        return record
+
     def get_by_key(self, key: str) -> Optional[MemoryRecord]:
         for record in self._by_id.values():
             if record.key == key and not record.archived:
@@ -394,6 +458,16 @@ class MemoryStore:
 
     def list_all(self) -> list[MemoryRecord]:
         return [r for r in self._by_id.values() if not r.archived]
+
+    def list_all_including_archived(self) -> list[MemoryRecord]:
+        """Every record in memory, archived included.
+
+        ``list_all`` deliberately hides archived records from retrieval paths.
+        Inspection needs the opposite: a superseded or suspended revision must
+        stay explainable, so its history is readable after it stops being
+        eligible.
+        """
+        return list(self._by_id.values())
 
     def list_by_agent(self, agent_id: str) -> list[MemoryRecord]:
         return [r for r in self._by_id.values() if r.agent_id == agent_id and not r.archived]

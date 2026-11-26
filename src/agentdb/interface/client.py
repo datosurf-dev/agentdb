@@ -803,6 +803,12 @@ class AgentDB:
         *asserted* authority. A caller cannot escalate to verified authority by
         passing an origin string alone.
         """
+        if self._is_learned_key(key):
+            raise PermissionDenied(
+                f"{key!r} is in the learned-claim namespace; use "
+                "propose_learned()/activate_learned() so scope and evidence are "
+                "validated"
+            )
         if infer:
             if self._infer_fn is None:
                 raise ValueError(
@@ -1211,7 +1217,17 @@ class AgentDB:
         return record
 
     def delete(self, key: str, agent_id: str, trust_zone: str) -> None:
-        """Archive a record by key. Raises PermissionDenied if not allowed."""
+        """Archive a record by key. Raises PermissionDenied if not allowed.
+
+        Learned-claim revisions cannot be deleted through this path: the lifecycle
+        owns them, and a generic delete would destroy revision history that
+        ``inspect_learned`` is required to preserve. Use ``suspend_learned``.
+        """
+        if self._is_learned_key(key):
+            raise PermissionDenied(
+                f"{key!r} is a learned-claim revision; use suspend_learned() "
+                "instead of generic delete so its history is preserved"
+            )
         if self._permissions is not None:
             try:
                 self._permissions.check_write(key, agent_id, trust_zone)
@@ -1447,6 +1463,381 @@ class AgentDB:
         except Exception:
             return []
 
+    # ------------------------------------------------------------------
+    # Scoped learned knowledge (see agentdb/learning.py)
+    # ------------------------------------------------------------------
+
+    def propose_learned(
+        self,
+        *,
+        agent_id: str,
+        claim: str,
+        repository_id: str,
+        task_type: str,
+        supporting_ids: Sequence[str],
+        contradicting_ids: Sequence[str] = (),
+        knowledge_id: Optional[str] = None,
+        actor: Optional[str] = None,
+    ) -> MemoryRecord:
+        """Propose one scoped claim from existing observations.
+
+        The proposal is stored but **not retrievable**: it becomes eligible only
+        through :meth:`activate_learned`. The claim, its scope and the evidence
+        snapshot are fixed here and never rewritten — later lifecycle changes are
+        recorded beside them.
+
+        Evidence is validated now: every referenced observation must exist, be
+        readable by ``agent_id``, and carry exactly this repository and task
+        type. Evidence with *missing* scope is rejected — unknown is not a match.
+        """
+        from ..learning import (
+            ClaimScope, build_proposal, validate_evidence,
+        )
+        from ..interface.client import _extract_repo  # noqa: F401  (parity import)
+
+        scope = ClaimScope(repository_id=repository_id, task_type=task_type)
+        supporting = validate_evidence(
+            source_ids=list(supporting_ids), scope=scope,
+            store=self._store, can_read=self._can_read_record, agent_id=agent_id,
+        )
+        contradicting = validate_evidence(
+            source_ids=list(contradicting_ids), scope=scope,
+            store=self._store, can_read=self._can_read_record, agent_id=agent_id,
+            required=False,   # a claim needs support; it need not be contradicted
+        )
+
+        revision = 1
+        if knowledge_id:
+            revision = self._next_learned_revision(knowledge_id)
+
+        # Idempotency: the same claim over the same evidence in the same scope is
+        # one revision, not two. Compared on the content that defines a revision,
+        # not on the record identity.
+        fingerprint = self._learned_fingerprint(
+            claim=claim, scope=scope,
+            supporting=[r.id for r in supporting],
+            contradicting=[r.id for r in contradicting],
+        )
+        existing = self._find_learned_revision_by_fingerprint(fingerprint)
+        if existing is not None:
+            return existing
+
+        record = build_proposal(
+            knowledge_id=knowledge_id, revision=revision, claim=claim, scope=scope,
+            supporting=supporting, contradicting=contradicting,
+            agent_id=agent_id, actor=actor, fingerprint=fingerprint,
+        )
+        self._store.write(record)
+        return record
+
+    def activate_learned(
+        self,
+        record_id: str,
+        *,
+        agent_id: str,
+        actor: Optional[str] = None,
+        reason: Optional[str] = None,
+    ) -> MemoryRecord:
+        """Publish an exact proposed revision as the active guidance.
+
+        Revalidates evidence and authorization first: a proposal whose sources
+        have since been edited, deleted, rescoped, or become unreadable cannot be
+        activated. At most one revision per knowledge ID is active; activating a
+        newer revision supersedes the previous one in a single transaction.
+        """
+        from ..learning import (
+            ClaimScope, STATUS_ACTIVE, _with_lifecycle, evidence_invalidation_reason, is_active_claim,
+            is_learned_claim, knowledge_id_of,
+        )
+
+        record = self._store.get_by_id(record_id)
+        if record is None or not is_learned_claim(record):
+            raise ValueError(f"{record_id!r} is not a learned claim revision")
+        if getattr(record, "archived", False):
+            raise ValueError(f"{record_id!r} is already archived (superseded)")
+
+        derivation = record.derivation or {}
+        scope_dict = derivation.get("scope", {})
+        scope = ClaimScope(
+            repository_id=scope_dict.get("repository_id", ""),
+            task_type=scope_dict.get("task_type", ""),
+        )
+
+        # Revalidate every snapshotted source as it is *now*.
+        sources = derivation.get("evidence", {}).get("supporting", [])
+        current = []
+        for src in sources:
+            live = self._store.get_by_id(src.get("id"))
+            if live is None or getattr(live, "archived", False):
+                raise ValueError(
+                    f"evidence {src.get('id')!r} is missing; revalidate before activating"
+                )
+            if not self._can_read_record(live, agent_id):
+                raise ValueError(
+                    f"evidence {src.get('id')!r} is not readable by this caller"
+                )
+            current.append(live)
+
+        from ..learning import validate_evidence
+        validate_evidence(
+            source_ids=[r.id for r in current], scope=scope,
+            store=self._store, can_read=self._can_read_record, agent_id=agent_id,
+        )
+
+        kid = knowledge_id_of(record)
+        prior = self._active_learned_revision(kid)
+
+        activated = dataclasses.replace(
+            record,
+            derivation=_with_lifecycle(
+                record, status=STATUS_ACTIVE, actor=actor,
+                reason=reason or "activation",
+            ),
+        )
+        if prior is not None and prior.id != activated.id:
+            superseded = dataclasses.replace(
+                prior,
+                derivation=_with_lifecycle(
+                    prior, status="superseded", actor=actor,
+                    reason=f"superseded by revision {derivation.get('revision')}",
+                ),
+            )
+            # Keep the superseded copy's history without re-activating it: it is
+            # archived, so it is preserved for inspection but never retrieved.
+            self._store.write(superseded)
+            self._store.archive_record(prior.id)
+
+        self._store.activate_learned_revision(
+            activated, supersedes_id=prior.id if prior is not None else None,
+        )
+        return activated
+
+    def suspend_learned(
+        self, knowledge_id: str, *, agent_id: str,
+        actor: Optional[str] = None, reason: str = "",
+    ) -> Optional[MemoryRecord]:
+        """Withdraw the active revision of a knowledge ID, recording why.
+
+        Suspension is a lifecycle change, not a deletion: the revision and its
+        history stay inspectable. Reactivating requires an explicit
+        :meth:`activate_learned` call on a revision.
+        """
+        from ..learning import _with_lifecycle
+
+        active = self._active_learned_revision(knowledge_id)
+        if active is None:
+            return None
+        suspended = dataclasses.replace(
+            active,
+            derivation=_with_lifecycle(
+                active, status="suspended", actor=actor, reason=reason or "suspended",
+            ),
+        )
+        self._store.write(suspended)
+        self._store.archive_record(active.id)
+        return suspended
+
+    def withdraw_learned_evidence(
+        self,
+        knowledge_id: str,
+        *,
+        source_id: str,
+        agent_id: str,
+        actor: Optional[str] = None,
+        reason: str = "",
+    ) -> Optional[MemoryRecord]:
+        """Durably invalidate the active revision when a source is corrected.
+
+        Exists because an ordinary ``write()`` cannot always express a correction:
+        a repeat write scores a conflict and stores a sibling, so it neither
+        updates the original nor tells a dependent claim that the observation it
+        was built on has been superseded. Same-text rescoping is the clearest
+        case — the content is byte-identical and only the scope moved.
+
+        The withdrawal is recorded on the revision (``status="invalidated"``) and
+        the record is archived, so search stops returning it immediately while
+        inspection can still explain why. Reactivation requires a new
+        ``activate_learned`` call: nothing restores this implicitly.
+
+        Returns the invalidated revision, or ``None`` when nothing was active.
+        """
+        from ..learning import _with_lifecycle
+
+        active = self._active_learned_revision(knowledge_id)
+        if active is None:
+            return None
+
+        derivation = dict(active.derivation or {})
+        evidence = dict(derivation.get("evidence", {}))
+        withdrawn = list(evidence.get("withdrawn", []))
+        withdrawn.append({
+            "source_id": source_id,
+            "actor": actor,
+            "reason": reason or "withdrawn",
+            "at": datetime.now(timezone.utc).isoformat(),
+        })
+        evidence["withdrawn"] = withdrawn
+        derivation["evidence"] = evidence
+
+        invalidated = dataclasses.replace(
+            active,
+            derivation=_with_lifecycle(
+                active, status="invalidated", actor=actor,
+                reason=reason or f"evidence {source_id} withdrawn",
+            ),
+        )
+        invalidated.derivation["evidence"] = evidence
+        self._store.write(invalidated)
+        self._store.archive_record(active.id)
+        return invalidated
+
+    def retrieve_learned(
+        self,
+        query: str,
+        *,
+        agent_id: str,
+        repository_id: str,
+        task_type: str,
+        limit: int = 3,
+    ) -> list[MemoryRecord]:
+        """Strict retrieval of active, in-scope, still-valid learned claims.
+
+        Deliberately **not** a wrapper over :meth:`retrieve`. The generic path
+        builds a capped candidate set first and filters afterwards, so
+        out-of-scope records can consume the cap and starve an eligible claim.
+        This scans the learned claims directly and applies every gate — scope,
+        active state, evidence validity, source readability, relevance — *before*
+        ``limit`` is applied. An empty list is a normal result.
+        """
+        from ..learning import (
+            ClaimScope, is_active_claim, is_learned_claim,
+            evidence_invalidation_reason,
+        )
+
+        scope = ClaimScope(repository_id=repository_id, task_type=task_type)
+        words = [w.lower() for w in (query or "").split() if w]
+
+        eligible: list[MemoryRecord] = []
+        for record in self._store.list_all():
+            if getattr(record, "archived", False) or not is_active_claim(record):
+                continue
+            # Exact scope, before anything else.
+            if not scope.matches(record):
+                continue
+            # Evidence validity: edited / deleted / rescoped withdraws the claim.
+            if evidence_invalidation_reason(record, store=self._store) is not None:
+                continue
+            # Source readability for *this* caller.
+            sources = (record.derivation or {}).get("evidence", {}).get("supporting", [])
+            if any(
+                (self._store.get_by_id(s.get("id")) is None)
+                or not self._can_read_record(self._store.get_by_id(s.get("id")), agent_id)
+                for s in sources
+            ):
+                continue
+            # Relevance last, and only when a query was supplied.
+            if words:
+                haystack = str(record.value).lower()
+                if not any(w in haystack for w in words):
+                    continue
+            eligible.append(record)
+
+        # Cap applies only after every gate, so an eligible claim cannot be
+        # starved by out-of-scope matches.
+        eligible.sort(key=lambda r: (r.created_at, r.id), reverse=True)
+        return eligible[:limit]
+
+    def inspect_learned(self, knowledge_id: str, *, agent_id: str) -> list[dict]:
+        """Revision history for one knowledge ID, readable by this caller.
+
+        Returns one entry per revision: its ID, revision number, lifecycle state,
+        actor, reason, timestamps and evidence references. Claim text is included
+        only where the caller may read it.
+        """
+        from ..learning import is_learned_claim, knowledge_id_of
+
+        out: list[dict] = []
+        for record in self._store.list_all_including_archived():
+            if not is_learned_claim(record) or knowledge_id_of(record) != knowledge_id:
+                continue
+            if not self._can_read_record(record, agent_id):
+                continue
+            d = record.derivation or {}
+            life = d.get("lifecycle", {})
+            out.append({
+                "record_id": record.id,
+                "revision": d.get("revision"),
+                "status": life.get("status"),
+                "actor": life.get("actor"),
+                "reason": life.get("reason"),
+                "at": life.get("at"),
+                "archived": bool(getattr(record, "archived", False)),
+                "scope": d.get("scope", {}),
+                "supporting": [s.get("id") for s in d.get("evidence", {}).get("supporting", [])],
+                "contradicting": [s.get("id") for s in d.get("evidence", {}).get("contradicting", [])],
+                "claim": record.value if self._can_read_record(record, agent_id) else None,
+                "history": d.get("history", []),
+            })
+        out.sort(key=lambda e: (e.get("revision") or 0))
+        return out
+
+    # -- learned-knowledge internals ------------------------------------
+
+    @staticmethod
+    def _is_learned_key(key: str) -> bool:
+        """True for a key in the learned-claim namespace."""
+        from ..learning import KEY_PREFIX
+        return isinstance(key, str) and key.startswith(KEY_PREFIX)
+
+    @staticmethod
+    def _learned_fingerprint(*, claim: str, scope, supporting, contradicting) -> str:
+        """Stable identity of a revision's *content* (idempotent proposals)."""
+        import hashlib as _hashlib
+        payload = json.dumps(
+            {
+                "claim": claim,
+                "scope": scope.as_dict(),
+                "supporting": sorted(supporting),
+                "contradicting": sorted(contradicting),
+            },
+            sort_keys=True, default=str,
+        )
+        return _hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+    def _find_learned_revision_by_fingerprint(self, fingerprint: str) -> Optional[MemoryRecord]:
+        from ..learning import is_learned_claim
+
+        for record in self._store.list_all_including_archived():
+            if is_learned_claim(record) and \
+                    (record.derivation or {}).get("fingerprint") == fingerprint:
+                return record
+        return None
+
+    def _learned_revisions(self, knowledge_id: str) -> list[MemoryRecord]:
+        from ..learning import is_learned_claim, knowledge_id_of
+
+        return [
+            r for r in self._store.list_all_including_archived()
+            if is_learned_claim(r) and knowledge_id_of(r) == knowledge_id
+        ]
+
+    def _active_learned_revision(self, knowledge_id: str) -> Optional[MemoryRecord]:
+        from ..learning import is_active_claim
+
+        for record in self._store.list_all_including_archived():
+            if is_active_claim(record):
+                from ..learning import knowledge_id_of
+                if knowledge_id_of(record) == knowledge_id:
+                    return record
+        return None
+
+    def _next_learned_revision(self, knowledge_id: str) -> int:
+        revisions = [
+            (r.derivation or {}).get("revision", 0)
+            for r in self._learned_revisions(knowledge_id)
+        ]
+        return (max(revisions) + 1) if revisions else 1
+
     def consolidate(self, agent_id: str, llm_fn=None, **kwargs) -> "ConsolidationResult":
         """Cluster near-duplicate records into a NEW derived canonical record.
 
@@ -1614,6 +2005,11 @@ class AgentDB:
                 return "repo_scope"
         if not include_consolidated and record.consolidated:
             return "consolidated_excluded"
+        # Learned claims are reachable only through retrieve_learned(), which
+        # applies the exact-scope, activation and evidence gates the spec
+        # requires. Reaching generic retrieval would bypass every one of them.
+        if getattr(record, "kind", "source") == "learned_claim":
+            return "learned_claim_not_generic"
         # Derived canonicals are invalidated when any source has been revised
         # since derivation (T04): a stale canonical must not be presented as
         # fresh. Fall back to the (audit-retained) sources instead.

@@ -648,6 +648,9 @@ class LifecycleManager:
             and not r.archived
             and _origin_value(r.origin) != "human_approved"
             and r.kind != "derived_canonical"  # do not re-consolidate canonicals
+            # Learned claims have their own lifecycle; folding one into a
+            # canonical would archive a revision the host still controls.
+            and r.kind != "learned_claim"
             and r.created_at <= cutoff
         ]
         raw_clusters = _lc_cluster(all_records, min_overlap=2)
