@@ -337,26 +337,63 @@ _STOPWORDS = frozenset(
 )
 
 
+#: One tokenizer for both the query and the claim text. Using different rules on
+#: each side is how "index?" stopped matching "index": query side split on
+#: whitespace, claim side on punctuation, so the trailing "?" survived on one side
+#: only. Both now go through ``tokenize``.
+_TOKEN_RE = re.compile(r"[a-z0-9_]+")
+
+
+def tokenize(text: Any) -> list[str]:
+    """Normalise text to comparable word tokens (lowercased, punctuation-free)."""
+    if not isinstance(text, str):
+        return []
+    return _TOKEN_RE.findall(text.lower())
+
+
 def relevant_words(query: str) -> list[str]:
     """Query words that can make a claim relevant. Empty means *abstain*.
 
     A blank or whitespace-only query yields ``[]``: retrieval is required to be
     query-dependent, so with no query there is nothing to be relevant *to* and the
-    correct answer is an empty result rather than every claim in scope.
+    correct answer is an empty result rather than every claim in scope. The same
+    is true when every word is a stopword — "how do I" carries no topic.
     """
-    if not isinstance(query, str):
-        return []
-    return [w.lower() for w in query.split() if w.lower() not in _STOPWORDS]
+    return [w for w in tokenize(query) if w not in _STOPWORDS]
 
 
 def _claims_match_query(claim: Any, words: list[str]) -> bool:
-    """Whole-word match of any query word against the claim text.
+    """Whole-token match of any query word against the claim text.
 
-    Whole-word, not substring: ``he`` must not match ``the``. Incidental substring
-    hits made the abstention test unusable in practice.
+    Both sides are tokenized by the same function, so "index?" matches "index"
+    while an incidental substring ("he" inside "the") still does not.
     """
-    tokens = set(re.findall(r"[a-z0-9_]+", str(claim).lower()))
+    tokens = set(tokenize(claim))
     return any(w in tokens for w in words)
+
+
+def source_is_contested(store: Any, source_id: str) -> bool:
+    """True when a pinned observation is contested by a genuine conflict.
+
+    The single rule shared by activation and invalidation, so the two cannot
+    disagree about what "contested" means.
+
+    A conflict on the *pinned record* is durable: it is recorded in the conflicts
+    table and read from there, so archiving the conflicting sibling, or resolving
+    the conflict, does not clear it. That is deliberate — a conflict score is the
+    store's statement that a logical observation was revised, and a claim built
+    from the superseded value must not become publishable again by cleanup.
+
+    A sibling under the *same key* that is not a conflict (for example an
+    independent observation in another repository or task scope) leaves the pinned
+    record uncontested, so the claim stays valid.
+    """
+    conflicts = store.get_conflicts_for_records([source_id])
+    return any(
+        getattr(c, "record_a_id", None) == source_id
+        or getattr(c, "record_b_id", None) == source_id
+        for c in conflicts
+    )
 
 
 def persisted_invalidation(record: MemoryRecord) -> Optional[str]:

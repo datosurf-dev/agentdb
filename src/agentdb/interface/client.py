@@ -871,18 +871,16 @@ class AgentDB:
             record.approval = ap
 
         # Conflict detection: check before persisting
+        conflict = None
         existing = self._store.get_by_key(key)
         if existing is not None and not existing.archived:
             conflict = ConflictDetector().check(new_record=record, existing=existing)
             if conflict is not None:
-                record.conflict_id = conflict.id
-                existing.conflict_id = conflict.id
-                self._store.update_conflict_id(existing.id, conflict.id)
-                self._store.store_conflict(conflict)
-                # A conflict score is the durable signal that a logical
-                # observation was contested. Retire any claim pinned to it *now*,
-                # so archiving the sibling later cannot make guidance reappear.
-                self._retire_claims_for_source(existing.id, reason="evidence_conflicted")
+                # One transaction: the record, the conflict, and the retirement of
+                # every claim pinned to the contested source. Splitting these
+                # leaves a window where the conflict is visible but a dependent
+                # claim is still active — and a crash makes it permanent.
+                self._store.write_with_conflict(record, conflict)
                 self.gateway.dispatch(
                     "conflict_detected",
                     conflict_id=conflict.id,
@@ -903,7 +901,8 @@ class AgentDB:
                     },
                 )
 
-        self._store.write(record)
+        if conflict is None:
+            self._store.write(record)
 
         # Expand session profile with this write's repo and request type
         if session_id and session_id in self._session_profiles:
@@ -1522,7 +1521,13 @@ class AgentDB:
             supporting=[r.id for r in supporting],
             contradicting=[r.id for r in contradicting],
         )
-        existing = self._find_learned_revision_by_fingerprint(fingerprint)
+        # Dedupe is scoped to the knowledge ID the caller asked for. Two
+        # different knowledge IDs may legitimately hold the same text over the
+        # same evidence; reusing one for the other would silently discard the
+        # second ID the host named.
+        existing = self._find_learned_revision_by_fingerprint(
+            fingerprint, knowledge_id=knowledge_id,
+        )
         if existing is not None:
             return existing
 
@@ -1561,13 +1566,21 @@ class AgentDB:
             knowledge_id_of, validate_evidence,
         )
 
-        self._authorize_lifecycle(agent_id, operation="activate")
+
 
         record = self._store.get_by_id(record_id)
         if record is None or not is_learned_claim(record):
             raise ValueError(f"{record_id!r} is not a learned claim revision")
         if getattr(record, "archived", False):
             raise ValueError(f"{record_id!r} is already archived (superseded)")
+
+        prior_for_auth = self._active_learned_revision(
+            (record.derivation or {}).get("knowledge_id")
+        )
+        self._authorize_lifecycle(
+            agent_id, operation="activate",
+            keys=[record.key] + ([prior_for_auth.key] if prior_for_auth else []),
+        )
 
         derivation = record.derivation or {}
         scope_dict = derivation.get("scope", {})
@@ -1597,6 +1610,16 @@ class AgentDB:
                 source_ids=[r.id for r in live], scope=scope,
                 store=self._store, can_read=self._can_read_record, agent_id=agent_id,
             )
+            # A conflict scored between proposal and activation blocks
+            # publication, even if the sibling has since been archived. The
+            # conflict record is durable; the digest check alone would miss this.
+            from ..learning import source_is_contested
+            for source in live:
+                if source_is_contested(self._store, source.id):
+                    raise ValueError(
+                        f"evidence {source.id!r} is contested by a conflict; "
+                        "resolve it and withdraw this revision explicitly"
+                    )
 
         kid = knowledge_id_of(record)
         prior = self._active_learned_revision(kid)
@@ -1638,7 +1661,11 @@ class AgentDB:
         """
         from ..learning import _with_lifecycle
 
-        self._authorize_lifecycle(agent_id, operation="suspend")
+        active_for_auth = self._active_learned_revision(knowledge_id)
+        self._authorize_lifecycle(
+            agent_id, operation="suspend",
+            keys=[active_for_auth.key] if active_for_auth else [],
+        )
 
         active = self._active_learned_revision(knowledge_id)
         if active is None:
@@ -1684,7 +1711,11 @@ class AgentDB:
         """
         from ..learning import _with_lifecycle
 
-        self._authorize_lifecycle(agent_id, operation="suspend")
+        active_for_auth = self._active_learned_revision(knowledge_id)
+        self._authorize_lifecycle(
+            agent_id, operation="suspend",
+            keys=[active_for_auth.key] if active_for_auth else [],
+        )
 
         active = self._active_learned_revision(knowledge_id)
         if active is None:
@@ -1756,7 +1787,9 @@ class AgentDB:
             return []          # blank query: abstain rather than dump everything
 
         eligible: list[MemoryRecord] = []
-        for record in self._store.list_all():
+        # Committed state, not this instance's snapshot: the lifecycle is shared,
+        # so a long-lived instance must observe another's suspension/activation.
+        for record in self._store.read_learned_committed():
             if getattr(record, "archived", False) or not is_active_claim(record):
                 continue
             # Exact scope, before any cap.
@@ -1789,7 +1822,7 @@ class AgentDB:
         from ..learning import is_learned_claim, knowledge_id_of
 
         out: list[dict] = []
-        for record in self._store.list_all_including_archived():
+        for record in self._store.read_learned_committed_all():
             if not is_learned_claim(record) or knowledge_id_of(record) != knowledge_id:
                 continue
             if not self._can_read_record(record, agent_id):
@@ -1836,48 +1869,26 @@ class AgentDB:
         )
         return _hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
-    def _find_learned_revision_by_fingerprint(self, fingerprint: str) -> Optional[MemoryRecord]:
-        from ..learning import is_learned_claim
+    def _find_learned_revision_by_fingerprint(
+        self, fingerprint: str, *, knowledge_id: Optional[str] = None,
+    ) -> Optional[MemoryRecord]:
+        """Reuse an existing revision with identical content.
 
-        for record in self._store.list_all_including_archived():
-            if is_learned_claim(record) and \
-                    (record.derivation or {}).get("fingerprint") == fingerprint:
-                return record
-        return None
-
-    def _retire_claims_for_source(self, source_id: str, *, reason: str) -> None:
-        """Durably retire every active claim pinned to ``source_id``.
-
-        Called when the store learns that a source is contested or withdrawn.
-        Retirement is recorded on the revision and the revision is archived, so
-        the decision survives later changes to the evidence — including the
-        conflict being resolved or the sibling being deleted.
+        ``knowledge_id`` narrows the search to one knowledge ID. When the caller
+        supplied an ID, a revision of a *different* ID is not a valid reuse even
+        if its content is identical.
         """
-        from ..learning import _with_lifecycle, is_active_claim, is_learned_claim
+        from ..learning import is_learned_claim, knowledge_id_of
 
-        for record in list(self._store.list_all_including_archived()):
-            if not is_learned_claim(record) or not is_active_claim(record):
+        for record in self._store.read_learned_committed_all():
+            if not is_learned_claim(record):
                 continue
-            evidence = (record.derivation or {}).get("evidence", {})
-            pinned = {
-                s.get("id")
-                for s in list(evidence.get("supporting", []))
-                + list(evidence.get("contradicting", []))
-            }
-            if source_id not in pinned:
+            if (record.derivation or {}).get("fingerprint") != fingerprint:
                 continue
-            retired = dataclasses.replace(
-                record,
-                derivation=_with_lifecycle(
-                    record, status="invalidated", actor=None, reason=reason,
-                ),
-            )
-            retired.derivation["invalidated"] = {
-                "reason": reason, "source_id": source_id,
-                "at": datetime.now(timezone.utc).isoformat(),
-            }
-            self._store.write(retired)
-            self._store.archive_record(record.id)
+            if knowledge_id is not None and knowledge_id_of(record) != knowledge_id:
+                continue
+            return record
+        return None
 
     def _learned_sources_readable(self, record: MemoryRecord, agent_id: Optional[str]) -> bool:
         """True when this caller may read every source the revision references."""
@@ -1890,12 +1901,23 @@ class AgentDB:
                 return False
         return True
 
-    def _authorize_lifecycle(self, agent_id: Optional[str], *, operation: str) -> None:
-        """Require explicit write authority on the learned namespace.
+    def _authorize_lifecycle(
+        self, agent_id: Optional[str], *, operation: str, keys: Sequence[str],
+    ) -> None:
+        """Require explicit write authority on the revisions being changed.
 
-        Reading a source does not imply the right to publish, suspend or withdraw
-        guidance built from it. In trusted mode (no policy) the host owns the
-        boundary and this is a no-op; in isolation mode it fails closed.
+        Reads a source does not imply the right to publish, suspend or withdraw
+        guidance built from it. The check runs against the **actual revision
+        keys**, because a policy may deny a specific revision (or a sub-prefix)
+        while allowing the namespace broadly — a synthetic probe key would be
+        evaluated against a different rule and let that deny through.
+
+        Replacement checks both the incoming and the prior active revision: a
+        caller allowed to publish a new revision but denied the existing one must
+        not be able to retire it.
+
+        Trusted mode (no policy) leaves the boundary to the host and is a no-op;
+        isolation mode fails closed.
         """
         if self._permissions is None:
             return
@@ -1903,17 +1925,16 @@ class AgentDB:
             raise PermissionDenied(
                 f"{operation} requires a caller identity in isolation mode"
             )
-        try:
-            from ..learning import KEY_PREFIX
-            # Probe a real key in the namespace: policy rules match on the key,
-            # so a synthetic placeholder would be evaluated against the wrong
-            # rule set.
-            self._permissions.check_write(f"{KEY_PREFIX}probe", agent_id, "agent_inferred")
-        except PermissionDenied:
-            raise PermissionDenied(
-                f"Agent '{agent_id}' may read learned evidence but may not "
-                f"{operation} learned knowledge"
-            ) from None
+        for key in keys:
+            if not key:
+                continue
+            try:
+                self._permissions.check_write(key, agent_id, "agent_inferred")
+            except PermissionDenied:
+                raise PermissionDenied(
+                    f"Agent '{agent_id}' may read learned evidence but may not "
+                    f"{operation} {key!r}"
+                ) from None
 
     def _learned_revisions(self, knowledge_id: str) -> list[MemoryRecord]:
         from ..learning import is_learned_claim, knowledge_id_of
@@ -1926,7 +1947,9 @@ class AgentDB:
     def _active_learned_revision(self, knowledge_id: str) -> Optional[MemoryRecord]:
         from ..learning import is_active_claim
 
-        for record in self._store.list_all_including_archived():
+        for record in self._store.read_learned_committed():
+            if getattr(record, "archived", False):
+                continue
             if is_active_claim(record):
                 from ..learning import knowledge_id_of
                 if knowledge_id_of(record) == knowledge_id:
@@ -2231,7 +2254,13 @@ class AgentDB:
         strongly-relevant record with zero lexical overlap is still eligible
         (ADB-05/T07). Record embeddings are hydrated for ranking.
         """
-        lexical = self._store.search(query, limit=lexical_cap, agent_id=None)
+        # Learned claims are reachable only through retrieve_learned(). Excluding
+        # them during the scan (not after) keeps them out of the candidate cap, so
+        # they cannot displace ordinary memory from generic retrieval.
+        lexical = self._store.search(
+            query, limit=lexical_cap, agent_id=None,
+            exclude_kinds=("learned_claim",),
+        )
         lexical_ids = {r.id for r in lexical}
         records: dict[str, MemoryRecord] = {r.id: r for r in lexical}
         embeddings: dict[str, list[float]] = {}

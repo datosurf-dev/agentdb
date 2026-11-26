@@ -412,16 +412,22 @@ class MemoryStore:
                 # Activation, the superseded revision's final history entry, and
                 # its retirement all commit together. A failure anywhere leaves
                 # the prior revision active and the new one unpublished.
-                # Retire the prior revision first, so the active-revision check
-                # above cannot see it as still active when the new one lands.
+                # Order matters: archive the prior revision, write its final
+                # (superseded) state, then publish the new one. Re-inserting the
+                # superseded copy after the UPDATE would rewrite `archived` back
+                # to 0 and leave two unarchived revisions.
                 if supersedes_id:
                     conn.execute(
                         "UPDATE memories SET archived = 1 WHERE id = ?",
                         (supersedes_id,),
                     )
-                conn.execute(self._INSERT_SQL, self._record_params(record))
                 if superseded_record is not None:
                     conn.execute(self._INSERT_SQL, self._record_params(superseded_record))
+                    conn.execute(
+                        "UPDATE memories SET archived = 1 WHERE id = ?",
+                        (superseded_record.id,),
+                    )
+                conn.execute(self._INSERT_SQL, self._record_params(record))
                 conn.execute("COMMIT")
             except Exception:
                 conn.execute("ROLLBACK")
@@ -437,6 +443,177 @@ class MemoryStore:
             if old is not None:
                 old.archived = True
         return record
+
+    def read_learned_committed_all(self) -> list[MemoryRecord]:
+        """Learned revisions as committed, archived included (for inspection)."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM memories WHERE kind = ?", ("learned_claim",)
+            ).fetchall()
+        return [self._row_to_record(row) for row in rows]
+
+    def read_learned_committed(self) -> list[MemoryRecord]:
+        """Learned-claim revisions as committed by *any* connection.
+
+        The in-memory snapshot is refreshed only when this instance writes, so a
+        long-lived instance cannot see a suspension, activation or retirement
+        committed elsewhere — it would keep serving stale guidance. Learned reads
+        therefore come from the database directly: the lifecycle is shared state,
+        and reading it must be too.
+
+        Row → record uses the same ``_row_to_record`` path as the cache, so a
+        caller sees identical objects either way.
+        """
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM memories WHERE kind = ?", ("learned_claim",)
+            ).fetchall()
+        return [self._row_to_record(row) for row in rows]
+
+    def write_with_conflict(
+        self, record: "MemoryRecord", conflict: "ConflictRecord",
+    ) -> list[str]:
+        """Persist a record and the conflict it scored, in one transaction.
+
+        The conflict, the record that scored it, and the retirement of every claim
+        pinned to the contested source commit together. Writing them separately
+        leaves a window where the conflict exists but a dependent claim is still
+        active — observable from another connection, and permanent after a crash.
+
+        Returns the ids of learned revisions retired by this conflict.
+        """
+        import json as _json
+
+        retired: list[str] = []
+        with self._connect() as conn:
+            conn.execute(self._INSERT_SQL, self._record_params(record))
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO conflicts
+                    (id, record_a_id, record_b_id, conflict_type, resolved,
+                     auto_resolved, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    conflict.id, conflict.record_a_id, conflict.record_b_id,
+                    conflict.conflict_type, int(getattr(conflict, "resolved", 0)),
+                    int(getattr(conflict, "auto_resolved", 0)),
+                    _utcnow().isoformat(),
+                ),
+            )
+            conn.execute(
+                "UPDATE memories SET conflict_id = ? WHERE id = ?",
+                (conflict.id, conflict.record_a_id),
+            )
+
+            # Retire dependents in the same transaction.
+            rows = conn.execute(
+                "SELECT * FROM memories WHERE kind = ? AND archived = 0",
+                ("learned_claim",),
+            ).fetchall()
+            for row in rows:
+                claim = self._row_to_record(row)
+                derivation = dict(claim.derivation or {})
+                if derivation.get("lifecycle", {}).get("status") != "active":
+                    continue
+                evidence = derivation.get("evidence", {}) or {}
+                pinned = {
+                    src.get("id")
+                    for src in list(evidence.get("supporting", []))
+                    + list(evidence.get("contradicting", []))
+                }
+                if conflict.record_a_id not in pinned:
+                    continue
+                history = list(derivation.get("history", []))
+                event = {
+                    "status": "invalidated", "reason": "evidence_conflicted",
+                    "at": _utcnow().isoformat(),
+                }
+                history.append(event)
+                derivation["history"] = history
+                derivation["lifecycle"] = dict(event)
+                derivation["invalidated"] = {
+                    "reason": "evidence_conflicted",
+                    "source_id": conflict.record_a_id,
+                    "at": event["at"],
+                }
+                conn.execute(
+                    "UPDATE memories SET derivation = ?, archived = 1 WHERE id = ?",
+                    (_json.dumps(derivation, default=str), claim.id),
+                )
+                retired.append(claim.id)
+
+        # Reflect the commit in this instance's cache.
+        record.conflict_id = conflict.id
+        self._by_id[record.id] = record
+        prior = self._by_id.get(conflict.record_a_id)
+        if prior is not None:
+            prior.conflict_id = conflict.id
+        for claim_id in retired:
+            cached = self._by_id.get(claim_id)
+            if cached is not None:
+                cached.archived = True
+        return retired
+
+    def retract_learned_for_source_in_tx(
+        self, source_id: str, *, reason: str, status: str = "invalidated",
+    ) -> list[str]:
+        """Retire every active claim pinned to *source_id*, atomically.
+
+        Runs inside the caller's write transaction so the evidence mutation and
+        the dependents' retirement commit together: there is no window in which a
+        conflict exists but the claim depending on it is still active.
+
+        The retirement is written as a full record update (status, persisted
+        invalidation, archived flag) so a later read — from any connection — sees
+        the same answer.
+
+        Returns the ids of the retired revisions.
+        """
+        import json as _json
+
+        retired: list[str] = []
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM memories WHERE kind = ? AND archived = 0",
+                ("learned_claim",),
+            ).fetchall()
+            for row in rows:
+                record = self._row_to_record(row)
+                derivation = dict(record.derivation or {})
+                if derivation.get("lifecycle", {}).get("status") != "active":
+                    continue
+                evidence = derivation.get("evidence", {}) or {}
+                pinned = {
+                    s.get("id")
+                    for s in list(evidence.get("supporting", []))
+                    + list(evidence.get("contradicting", []))
+                }
+                if source_id not in pinned:
+                    continue
+
+                history = list(derivation.get("history", []))
+                event = {
+                    "status": status, "reason": reason,
+                    "at": _utcnow().isoformat(),
+                }
+                history.append(event)
+                derivation["history"] = history
+                derivation["lifecycle"] = dict(event)
+                derivation["invalidated"] = {
+                    "reason": reason, "source_id": source_id,
+                    "at": event["at"],
+                }
+
+                conn.execute(
+                    "UPDATE memories SET derivation = ?, archived = 1 WHERE id = ?",
+                    (_json.dumps(derivation, default=str), record.id),
+                )
+                record.archived = True
+                record.derivation = derivation
+                self._by_id[record.id] = record
+                retired.append(record.id)
+        return retired
 
     def get_by_key(self, key: str) -> Optional[MemoryRecord]:
         for record in self._by_id.values():
@@ -498,13 +675,20 @@ class MemoryStore:
     def list_by_agent(self, agent_id: str) -> list[MemoryRecord]:
         return [r for r in self._by_id.values() if r.agent_id == agent_id and not r.archived]
 
-    def search(self, query: str, limit: int = 5, agent_id: Optional[str] = None) -> list[MemoryRecord]:
+    def search(
+        self, query: str, limit: int = 5, agent_id: Optional[str] = None,
+        *, exclude_kinds: Optional[tuple[str, ...]] = None,
+    ) -> list[MemoryRecord]:
         """
         Simple text search: find records whose key or value contains
         any word from query (case-insensitive). agent_id, if given, is
         applied during the scan (before the `limit` slice below) so an
         isolated caller's own matches can't be truncated away by another
         agent's larger matching set.
+
+        ``exclude_kinds`` filters *during the scan*, before ``limit`` is applied.
+        A kind excluded afterwards would still consume the candidate cap, so 60
+        learned claims could crowd out the ordinary record the caller wanted.
         """
         words = [w.lower() for w in query.split() if w]
         if not words:
@@ -513,6 +697,8 @@ class MemoryStore:
         results: list[MemoryRecord] = []
         for record in self._by_id.values():
             if record.archived:
+                continue
+            if exclude_kinds and getattr(record, "kind", "source") in exclude_kinds:
                 continue
             if agent_id is not None and record.agent_id != agent_id:
                 continue

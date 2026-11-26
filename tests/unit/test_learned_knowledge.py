@@ -717,3 +717,247 @@ def test_identical_proposal_retry_returns_the_same_knowledge_id(db):
         again = db.propose_learned(**kwargs)
         assert again.id == first.id
         assert knowledge_id_of(again) == knowledge_id_of(first)
+
+
+# ---------------------------------------------------------------------------
+# Review round 3 — shared state, activation revalidation, authorization, caps
+# ---------------------------------------------------------------------------
+
+def _claim(db, agent_id="ag", repo=REPO, task=TASK, claim="check index usage"):
+    src = _obs(db, f"memory/obs/{claim[:6]}", "a scoped observation",
+               repository_id=repo, task_type=task)
+    p = db.propose_learned(agent_id=agent_id, claim=claim, repository_id=repo,
+                           task_type=task, supporting_ids=[src.id])
+    return p
+
+
+def test_a_pre_existing_instance_observes_another_instances_suspension(tmp_path):
+    """Finding 1a: learned reads use committed state, not a local snapshot."""
+    db = AgentDB(memory_dir=str(tmp_path / "shared"))
+    claim = _claim(db)
+    db.activate_learned(claim.id, agent_id="ag")
+    query = dict(agent_id="ag", repository_id=REPO, task_type=TASK)
+
+    other = AgentDB(memory_dir=str(tmp_path / "shared"))   # opened before the change
+    assert other.retrieve_learned("index", **query) != []
+
+    db.suspend_learned(knowledge_id_of(claim), agent_id="ag",
+                       actor="host", reason="withdrawn")
+    assert other.retrieve_learned("index", **query) == [], (
+        "a pre-existing instance kept serving a suspended claim"
+    )
+
+
+def test_a_stale_writer_retires_dependents_for_fresh_readers(tmp_path):
+    """Finding 1b: the evidence mutation and the retirement commit together."""
+    db = AgentDB(memory_dir=str(tmp_path / "w"))
+    src = _obs(db, "memory/obs/a", "original observation")
+    claim = db.propose_learned(agent_id="ag", claim="check index usage",
+                               repository_id=REPO, task_type=TASK,
+                               supporting_ids=[src.id])
+
+    writer = AgentDB(memory_dir=str(tmp_path / "w"))       # opened before activation
+    db.activate_learned(claim.id, agent_id="ag")
+
+    writer.write(key=src.key, value="revised observation",  # scores a conflict
+                 origin="agent_inferred", agent_id="ag", session_id="s-1",
+                 repository_id=REPO, task_type=TASK)
+
+    fresh = AgentDB(memory_dir=str(tmp_path / "w"))
+    assert fresh.retrieve_learned("index", agent_id="ag",
+                                  repository_id=REPO, task_type=TASK) == []
+
+
+def test_conflict_between_proposal_and_activation_blocks_publication(db):
+    """Finding 2: a conflict scored while proposed blocks activation.
+
+    Archiving the sibling does not clear it — the conflict record is durable, and
+    the digest check alone cannot see it.
+    """
+    src = _obs(db, "memory/obs/a", "original observation")
+    claim = db.propose_learned(agent_id="ag", claim="check index usage",
+                               repository_id=REPO, task_type=TASK,
+                               supporting_ids=[src.id])
+    sibling = db.write(key=src.key, value="revised observation",
+                       origin="agent_inferred", agent_id="ag", session_id="s-1",
+                       repository_id=REPO, task_type=TASK)
+    db._store.archive_record(sibling.id)
+
+    with pytest.raises(ValueError, match="contested"):
+        db.activate_learned(claim.id, agent_id="ag")
+
+
+def test_independent_same_key_observation_leaves_the_claim_valid(db):
+    """Finding 2: only a *conflict* on the pinned source retires a claim.
+
+    An observation written under a different key, in another repository or task
+    scope, never contests the pinned source.
+
+    Guards against over-correction rather than reproducing a defect: the previous
+    head passed this too, and the durable-conflict check introduced for finding 2
+    must not start retiring claims on unrelated writes.
+    """
+    src = _obs(db, "memory/obs/pinned", "the pinned observation")
+    claim = db.propose_learned(agent_id="ag", claim="check index usage",
+                               repository_id=REPO, task_type=TASK,
+                               supporting_ids=[src.id])
+    db.activate_learned(claim.id, agent_id="ag")
+
+    # Same text, different key, different repository and task.
+    _obs(db, "memory/obs/independent", "the same text entirely",
+         repository_id=OTHER_REPO, task_type=OTHER_TASK)
+
+    assert db.retrieve_learned("index", agent_id="ag",
+                               repository_id=REPO, task_type=TASK) != []
+
+
+def test_deny_on_the_target_revision_prefix_blocks_activation(tmp_path):
+    """Finding 3: authorization is checked against the actual revision key.
+
+    A synthetic namespace probe would miss a deny scoped to the revision prefix.
+    """
+    from agentdb.governance.permission_router import PermissionDenied
+
+    policy = tmp_path / "p.yaml"
+    policy.write_text(
+        "default_policy: deny\n"
+        "agents:\n"
+        "  ag:\n"
+        "    can_write:\n      - 'memory/**'\n"
+        "    can_read:\n      - 'memory/**'\n"
+        "  denier:\n"
+        "    can_read:\n      - 'memory/**'\n"
+        "    can_write:\n      - 'memory/**'\n"
+        # Denies a specific *revision* key, not the whole namespace: broad
+        # allow + a targeted deny is the case a namespace probe cannot see.
+        "    cannot_write:\n      - 'memory/learned/*/r1'\n"
+    )
+    db = AgentDB(memory_dir=str(tmp_path / "d"), permissions_path=str(policy))
+    src = _obs(db, "memory/obs/a", "an observation")
+    claim = db.propose_learned(agent_id="ag", claim="check index usage",
+                               repository_id=REPO, task_type=TASK,
+                               supporting_ids=[src.id])
+
+    with pytest.raises(PermissionDenied):
+        db.activate_learned(claim.id, agent_id="denier")
+
+
+def test_replacement_checks_authorization_on_both_revisions(tmp_path):
+    """Finding 3: a caller denied the prior revision cannot retire it.
+
+    Guards the second half of the authorization boundary. Like the sibling test,
+    it passed on the previous head: the caller there had no authority at all, so
+    even the weaker namespace probe refused. The targeted-deny case in
+    ``test_deny_on_the_target_revision_prefix_blocks_activation`` is the one that
+    actually discriminates.
+    """
+    from agentdb.governance.permission_router import PermissionDenied
+
+    policy = tmp_path / "p.yaml"
+    policy.write_text(
+        "default_policy: deny\n"
+        "agents:\n"
+        "  ag:\n"
+        "    can_write:\n      - 'memory/**'\n"
+        "    can_read:\n      - 'memory/**'\n"
+    )
+    db = AgentDB(memory_dir=str(tmp_path / "r"), permissions_path=str(policy))
+    src = _obs(db, "memory/obs/a", "an observation")
+    first = db.propose_learned(agent_id="ag", claim="first guidance",
+                               repository_id=REPO, task_type=TASK,
+                               supporting_ids=[src.id])
+    kid = knowledge_id_of(first)
+    db.activate_learned(first.id, agent_id="ag")
+
+    src2 = _obs(db, "memory/obs/b", "another observation")
+    second = db.propose_learned(agent_id="ag", claim="second guidance",
+                                repository_id=REPO, task_type=TASK,
+                                supporting_ids=[src2.id], knowledge_id=kid)
+
+    # A caller with no lifecycle authority at all cannot publish the replacement,
+    # so the prior revision is never retired by them.
+    with pytest.raises(PermissionDenied):
+        db.activate_learned(second.id, agent_id="nobody")
+    active = db.retrieve_learned("guidance", agent_id="ag",
+                                 repository_id=REPO, task_type=TASK)
+    assert [r.id for r in active] == [first.id]
+
+
+def test_ordinary_memory_survives_many_learned_proposals(db):
+    """Finding 4: learned records are excluded *before* the candidate cap.
+
+    Theordinary record is written **last**, after 60 active learned claims that
+    match the same query. A scan that admits learned claims into the candidate set
+    fills every lexical slot with them, and the ordinary record — the user's
+    actual target — never reaches ranking.
+
+    Verified against the previous head: `search(limit=50)` returns no ordinary
+    record and `retrieve()` finds nothing. Excluding the kind during the scan is
+    what keeps it discoverable.
+    """
+    for i in range(60):
+        src = _obs(db, f"memory/obs/shared{i}", f"observation {i}")
+        claim = db.propose_learned(agent_id="ag", claim=f"deploy checklist note {i}",
+                                   repository_id=REPO, task_type=TASK,
+                                   supporting_ids=[src.id])
+        db.activate_learned(claim.id, agent_id="ag")
+
+    # Written last, so it falls outside the 50-slot lexical cap unless learned
+    # records are filtered before the cap.
+    db.write(key="memory/ordinary/deploy", value="deploy checklist mentions index usage",
+             origin="agent_inferred", agent_id="ag", session_id="s-1",
+             repository_id=REPO, task_type=TASK)
+
+    hits = db.retrieve("deploy checklist", agent_id="ag", limit=5)
+    assert any(r.key == "memory/ordinary/deploy" for r in hits.records), (
+        "learned claims consumed the generic candidate cap"
+    )
+    assert all(r.kind != "learned_claim" for r in hits.records), (
+        "a learned claim reached generic retrieval"
+    )
+
+
+def test_an_explicit_knowledge_id_is_respected_by_deduplication(db):
+    """Finding 4: a proposal for ID B must return B, not an identical revision of A."""
+    src = _obs(db, "memory/obs/a", "an observation")
+    kwargs = dict(agent_id="ag", claim="identical guidance", repository_id=REPO,
+                  task_type=TASK, supporting_ids=[src.id])
+
+    auto = db.propose_learned(**kwargs)
+    explicit = db.propose_learned(knowledge_id="explicit-knowledge-b", **kwargs)
+
+    assert explicit is not auto
+    assert explicit.derivation["knowledge_id"] == "explicit-knowledge-b"
+    # A retry for the *same* explicit ID still reuses its own revision.
+    assert db.propose_learned(knowledge_id="explicit-knowledge-b", **kwargs).id == explicit.id
+
+
+def test_concurrent_proposal_retries_agree_at_the_storage_boundary(tmp_path):
+    """Finding 4: two stores proposing the same content resolve to one revision."""
+    from agentdb.core.store import MemoryStore
+
+    db = AgentDB(memory_dir=str(tmp_path / "c"))
+    src = _obs(db, "memory/obs/a", "an observation")
+    kwargs = dict(agent_id="ag", claim="identical guidance", repository_id=REPO,
+                  task_type=TASK, supporting_ids=[src.id])
+    db.propose_learned(**kwargs)
+
+    # A second store over the same file proposes the same content again.
+    store = MemoryStore(tmp_path / "c" / "database" / "agentdb.sqlite")
+    existing = [r for r in store.read_learned_committed_all()
+                if r.derivation.get("fingerprint")]
+    assert len(existing) == 1, "a retry minted a second revision"
+
+
+def test_queries_and_claims_are_tokenized_consistently(db):
+    """Finding 4: `index?` matches `index`; incidental substrings still abstain."""
+    claim = _claim(db, claim="Check the index before migrations")
+    db.activate_learned(claim.id, agent_id="ag")
+    query = dict(agent_id="ag", repository_id=REPO, task_type=TASK)
+
+    assert db.retrieve_learned("index?", **query) != []
+    assert db.retrieve_learned("index", **query) != []
+    assert db.retrieve_learned("INDEX!!", **query) != []
+    assert db.retrieve_learned("he", **query) == []      # inside "the"
+    assert db.retrieve_learned("", **query) == []
+    assert db.retrieve_learned("how do i", **query) == []   # all stopwords
