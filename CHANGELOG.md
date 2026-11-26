@@ -4,6 +4,23 @@ All notable changes to AgentDB are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions follow the pre-1.0
 policy in `RELEASING.md`.
 
+## [Unreleased]
+
+### Added
+- **Records are written with a `repository_id`.** `write()` accepted the field
+  from the start, but nothing ever passed it, so every record was stored
+  unscoped. `retrieve(scope={"repository_id": ...})` excludes a record only on an
+  *explicit* mismatch — a missing identity is "unknown", not a mismatch — so an
+  unscoped record was an immortal candidate: it could never be filtered out,
+  whatever the session was working on, and a host had no way to stop one
+  session's memory reaching another.
+  `AgentDBMiddleware` now derives it from the session's working dirs at every
+  write path (`finalize_turn`, the session-summary line, `end_session`) through
+  one helper, so no path can be missed. `write_compaction_summary()` accepts it
+  too, so summaries are scoped the same way. An absent identity stays absent — it
+  is never invented as a placeholder, because that would turn "unknown" into a
+  false claim about the session.
+
 ## [0.8.0] — 2026-11-25
 
 **Breaking:** `AgentDB.checkpoint()` was removed. Hosts calling it directly must

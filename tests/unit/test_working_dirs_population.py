@@ -99,3 +99,86 @@ async def test_end_session_records_working_dirs_in_the_summary_line(tmp_path, pe
 
     last = json.loads(jsonl.read_text().strip().splitlines()[-1])
     assert last["working_dirs"] == [str(Path("/tmp/ws").resolve())]
+
+
+# -- repository identity is derived at write time ---------------------------
+#
+# Before this, `write()` accepted `repository_id` but nothing ever passed it, so
+# every record was written unscoped. `retrieve(scope={"repository_id": ...})`
+# excludes only on an explicit mismatch, so an unscoped record was an immortal
+# candidate: it could never be filtered out, whatever the session was working on.
+
+
+def test_finalize_turn_derives_repository_id(tmp_path, perms):
+    """A turn's record carries the repository its working dirs point at."""
+    import asyncio
+
+    db = _db(tmp_path, perms)
+    mw = AgentDBMiddleware(db=db, agent_id=_AGENT)
+    mw.prepare_turn(
+        user_query="work in the komper repo", session_id="s1",
+        working_dirs=["/tmp/agent-sessions/slack/T1/workspace", "/tmp/repos/komper"],
+    )
+    mw._resolved["capture"]["auto_persist_response"] = True
+    asyncio.run(mw.finalize_turn_async(
+        session_id="s1", model_response="done. " * 8, message_id="m1",
+        outcome_type="task_complete", outcome_value=1.0,
+    ))
+
+    record = next(
+        r for r in db._store.list_all()
+        if r.session_id == "s1" and "memory/episodic/" in r.key
+    )
+    assert record.repository_id == "komper"
+
+
+def test_no_working_dirs_means_no_invented_identity(tmp_path, perms):
+    """An absent identity stays absent — it must not be guessed.
+
+    `retrieve()` treats a missing identity as "unknown", which is not a match. A
+    placeholder would turn "unknown" into a false claim about the session.
+    """
+    import asyncio
+
+    db = _db(tmp_path, perms)
+    mw = AgentDBMiddleware(db=db, agent_id=_AGENT)
+    mw._resolved["capture"]["auto_persist_response"] = True
+    asyncio.run(mw.finalize_turn_async(
+        session_id="s1", model_response="done. " * 8, message_id="m1",
+        outcome_type="task_complete", outcome_value=1.0,
+    ))
+    assert mw._session_scope("s1") == (None, None)
+
+
+def test_scope_excludes_a_foreign_repository(tmp_path):
+    """The read side the write side exists for: scope filters, unscoped does not."""
+    from agentdb import AgentDB
+
+    db = AgentDB(memory_dir=str(tmp_path))
+    for repo in ("komper", "agentgate"):
+        db.write(
+            key=f"memory/fact/{repo}", value=f"{repo} uses its own storage",
+            origin="agent_inferred", agent_id=_AGENT, session_id="s1",
+            working_dirs=[f"/tmp/repos/{repo}"], repository_id=repo,
+        )
+
+    query = "what storage does the project use"
+    unscoped = db.retrieve(query=query, agent_id=_AGENT, session_id="s2")
+    assert len(unscoped.records) == 2
+
+    scoped = db.retrieve(query=query, agent_id=_AGENT, session_id="s2",
+                         scope={"repository_id": "komper"})
+    assert [r.key for r in scoped.records] == ["memory/fact/komper"]
+
+
+def test_compaction_summary_can_carry_repository_id(tmp_path):
+    """Summaries are scoped the same way, or they stay immortal candidates."""
+    from agentdb import AgentDB
+
+    db = AgentDB(memory_dir=str(tmp_path))
+    db.write_compaction_summary(
+        agent_id=_AGENT, session_id="s1", summary="implemented the milestone",
+        working_dirs=["/tmp/repos/komper"], repository_id="komper",
+    )
+    record = db.read("memory/compaction/summary/s1")
+    assert record.repository_id == "komper"
