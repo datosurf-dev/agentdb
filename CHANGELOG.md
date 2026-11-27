@@ -4,7 +4,33 @@ All notable changes to AgentDB are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions follow the pre-1.0
 policy in `RELEASING.md`.
 
-## [Unreleased]
+## [0.9.0] — 2026-11-27
+
+### Added
+- **`AgentDB.select_unique(key, agent_id=...)`** — returns the single live,
+  readable record for a key, or `None`.
+
+  A repeat `write()` on an existing key stores a sibling and leaves the original
+  live, so one key can have several live records and `read()` returns whichever it
+  encounters first, with no indication a choice was made. A caller that treats a
+  key as a configured pointer — "the guidance record for this repository" — cannot
+  rely on that.
+
+  Uniqueness and the returned record come from **one** database read, so a
+  concurrent write cannot land between "how many?" and "which one?", and a
+  sibling write or withdrawal committed by another connection is observed on the
+  next lookup. In isolation mode the record must also be readable by the caller;
+  a denied read yields `None`, never an unauthorized result.
+
+  `read()` and `write()` behaviour is unchanged.
+
+### Documentation
+- Maintainer-managed guidance: one governed record, selected by a
+  maintainer-configured key, with repository, task and caller resolved by the host
+  and the read authorized by AgentDB. Publishing lifecycle, automatic synthesis,
+  embeddings and query discovery remain deferred (`README.md`,
+  `docs/context/mechanisms.md`, `docs/integrations/model-and-runtime-wiring.md`).
+
 
 ### Added
 - **Records are written with a `repository_id`.** `write()` accepted the field
