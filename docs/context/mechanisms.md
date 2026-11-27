@@ -53,6 +53,41 @@ The memory header is configurable text, e.g.
 `SERVERLESS_CAPABILITIES`, `LOCAL_CAPABILITIES`, or your own `RunnerCapabilities(...)`);
 budgets and header text come from the profile in `memory.yaml`.
 
+### A.1 Maintainer-managed guidance — one configured instruction
+
+| Question | Answer |
+|---|---|
+| What is stored | One ordinary governed record: the instruction as its value, with `repository_id` and `task_type` set |
+| Who selects it | The **host**, from a maintainer-configured mapping of exact `repository_id` + `task_type` → record key |
+| How it is read | `read(key, agent_id=...)` — AgentDB's read policy applies in isolation mode |
+| Who delivers it | The host, as at most one block in the ephemeral per-turn context |
+| When it is omitted | Unresolved scope, missing record, denied read, ambiguous key, scope mismatch, or the maintainer withdrawing the selection |
+
+**Decision.** Guidance that a maintainer publishes is a *configured lookup*, not a
+retrieval. AgentDB was asked to do only what it already does — store a record and
+authorize reads — because the alternative (query discovery, ranking, activation
+lifecycle) reintroduces exactly the failure mode this mechanism exists to avoid:
+guidance arriving because it was similar, rather than because it applies.
+
+**Why the host resolves scope.** AgentDB cannot know which repository a session is
+working in, or which task type the current intent maps to. The host already holds
+that state, so it resolves repository, task type, and caller, and requires the
+record's own scope to match exactly before delivering anything. Generated text
+cannot establish or broaden scope.
+
+**Ambiguity is a real case.** A repeated `write()` on an existing key stores a
+sibling and leaves the original live, so one key can have several live records.
+`read()` returns one of them, without indicating that a choice was made. A host
+that must be certain it read the maintainer's record therefore has to be able to
+detect the ambiguity; inspecting the store directly is not an acceptable
+substitute for a public surface.
+
+**Deferred, and why:** a publishing/activation lifecycle, automatic synthesis,
+embeddings for guidance, and query-based discovery. Each is a real feature, but
+none has a consumer yet, and each would make it harder to say *why* an instruction
+reached the model. The narrow slice is chosen so that question always has one
+answer: a maintainer selected it for this repository and this task.
+
 ### B. Extraction and distillation — turning turns into knowledge
 
 | Mechanism | Declared in | When it runs | Configurable? |

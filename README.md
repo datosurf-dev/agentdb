@@ -145,6 +145,54 @@ Embeddings can also be enabled with `AgentDB(local_embed=True)` or a custom `emb
 - `db.audit_log.replay()`: replay persisted audit entries.
 - `AgentDBBackend` (`from agentdb.backend import AgentDBBackend`): key/value `read`, `write`, `delete`, `list`, `grep`, and `glob` for a selected agent and trust zone.
 
+### Maintainer-managed guidance
+
+A maintainer can publish **one short instruction** for a specific repository and
+task by writing an ordinary governed record and pointing the host at its key. This
+is deliberately not retrieval: there is no query and no ranking, so what the agent
+receives is exactly what the maintainer configured.
+
+The division of responsibility is strict:
+
+| Step | Owner |
+|---|---|
+| Publish the instruction as a record with `repository_id` and `task_type` | maintainer, via `write()` |
+| Map an exact `repository_id` + `task_type` to that record key | host configuration |
+| Resolve repository, task type, and caller | **host** (AgentGate) |
+| Authorize the read | **AgentDB**, via `read(key, agent_id=...)` |
+| Deliver at most one instruction, in the ephemeral turn context | host |
+| Verify the record's own scope still matches | host |
+
+AgentDB's part is small on purpose: it stores the record and enforces its read
+policy. It does not select, rank, or interpret guidance, and a record's scope never
+broadens what a caller may retrieve.
+
+```python
+db.write(
+    key="memory/guidance/komper/bug-fix",
+    value="Verify an upgrade from a database created by the previous release.",
+    origin="human_approved",
+    agent_id="maintainer",
+    repository_id="komper",
+    task_type="bug_fix",
+)
+
+# The host reads it with the caller's identity; AgentDB applies its read policy.
+record = db.read("memory/guidance/komper/bug-fix", agent_id="agentgate")
+```
+
+Guidance is **omitted** when the scope is unresolved, the record is missing,
+inaccessible, ambiguous, or does not itself match the requested scope, and when the
+maintainer withdraws it by removing the selection. A turn without applicable
+guidance is normal, not an error.
+
+A repeated `write()` on an existing key leaves sibling records, so give each
+published instruction an unambiguous key. Identical text published for two
+repositories is two independent records, not one shared one.
+
+**Deferred:** a publishing/activation lifecycle, automatic synthesis, embeddings for
+guidance, and query-based discovery. See `docs/spec/managed-repository-guidance.md`. 
+
 Retrieval returns `RetrievalResult` with records, conflicts, authority override instructions, a token estimate, a truncation flag, and an optional `trace` (pass `trace=True`) exposing candidate sources, exclusions, and per-candidate ranking evidence. Candidates are the **union of lexical and (optional) semantic matches**, ranked by the existing multi-signal ranker and packed within a rendered-token budget that skips oversized records rather than stopping. `retrieve_by_entities()` uses the same eligibility filters, ranking, and budget policy. Semantic matching requires embeddings; without them, retrieval uses the lexical path and the other non-semantic signals. Set `embeddings.semantic_candidates: false` to force lexical-only retrieval even when embeddings are configured.
 
 Consolidation produces a **derived `derived_canonical` record** with full source lineage; the original source records are never overwritten (only archived from default selection), and a canonical is invalidated when its sources change. Only equivalent or compatible-complementary values are merged — contradictory values (including negations and mutually-exclusive values) and scope-incompatible facts stay separate. `validate_canonicals()` reports invalid canonicals non-destructively. Concurrent/repeated consolidation is idempotent (a stable source fingerprint prevents duplicate active canonicals).

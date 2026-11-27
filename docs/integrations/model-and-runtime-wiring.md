@@ -199,7 +199,7 @@ payload = pre_tool_use(
 # }
 ```
 
-For a full downstream app example, see [examples/claude_agent_sdk_hook_registration.py](examples/claude_agent_sdk_hook_registration.py). The key app-owned step is attaching the handlers when you create or look up the SDK client for a thread:
+For a full downstream app example, see [examples/claude_agent_sdk_hook_registration.py](../../examples/claude_agent_sdk_hook_registration.py). The key app-owned step is attaching the handlers when you create or look up the SDK client for a thread:
 
 ```python
 class ClaudeSdkApp:
@@ -261,6 +261,83 @@ Each snapshot includes:
 When `tracked_directories` is set on `AgentDB(...)` **and** `capture.track_directories`
 is enabled, middleware calls can omit directory arguments and use that default
 policy automatically.
+
+## A.2) Host-Resolved Guidance (Any Runtime)
+
+A maintainer can publish one short instruction for a specific repository and task.
+The runtime resolves the scope and delivers it; AgentDB stores the record and
+authorizes the read. This works for any runtime — it is not Claude- or
+local-specific — because it is a plain record read plus a host-side decision.
+
+### What each side owns
+
+| Step | Owner |
+|---|---|
+| Write the instruction with `repository_id` and `task_type` | maintainer (`db.write`) |
+| Map exact `repository_id` + `task_type` → record key | host configuration |
+| Resolve repository, task type, and caller | **runtime** |
+| Authorize the read | **AgentDB** (`read(key, agent_id=...)`) |
+| Verify the record's own scope matches | runtime |
+| Deliver at most one block in the ephemeral context | runtime |
+
+```python
+# 1. The maintainer publishes once, with explicit applicability.
+db.write(
+    key="memory/guidance/komper/bug-fix",
+    value="Verify an upgrade from a database created by the previous release.",
+    origin="human_approved",
+    agent_id="maintainer",
+    repository_id="komper",
+    task_type="bug_fix",
+)
+
+# 2. The host holds the mapping, not AgentDB.
+SELECTIONS = {"komper": {"bug_fix": "memory/guidance/komper/bug-fix"}}
+
+# 3. Each turn: resolve scope from trusted runtime state, then read authorized.
+def guidance_for(repository_id, task_type, caller, read):
+    key = SELECTIONS.get(repository_id, {}).get(task_type)
+    if key is None:
+        return None                      # unresolved scope or no mapping
+    try:
+        record = read(key, agent_id=caller)
+    except Exception:
+        return None                      # denied read
+    if record is None or record.archived:
+        return None                      # missing or withdrawn
+    if (record.repository_id, record.task_type) != (repository_id, task_type):
+        return None                      # record no longer applies
+    return record.value
+
+# 4. Attach to the runtime's ephemeral per-turn context, never the system prompt
+#    and never persisted history.
+text = guidance_for("komper", "bug_fix", "runtime-agent", db.read)
+```
+
+### Rules that keep it honest
+
+- **Resolve every turn.** Withdrawal is removing the mapping, and a scope switch is
+  a different lookup, so nothing carries over. Re-resolve on resume too: guidance
+  is never remembered between turns.
+- **Never write guidance into conversation history.** It belongs to the ephemeral
+  context, so a later turn with a different scope cannot replay it.
+- **Exact scope, both sides.** The mapping naming a key is not enough: the record
+  itself must still carry the matching `repository_id` and `task_type`, because it
+  can be re-scoped after the mapping was written.
+- **Ambiguity yields nothing.** A repeated `write()` on an existing key leaves
+  sibling records live, and `read()` returns one of them without saying so. Use one
+  unambiguous key per published instruction; do not rely on which sibling `read`
+  happens to return.
+- **Unresolved scope is not "any scope".** If the runtime cannot establish the
+  repository or the task type, send no guidance. An unknown task type must not
+  receive guidance written for a different kind of task.
+
+### If your runtime writes into a shared store
+
+Guidance is read through `read()`, which reflects the calling instance's view. If
+your deployment runs separate `AgentDB` instances over one database, verify that a
+withdrawal committed by one instance is observed by another before relying on
+immediate withdrawal — and report a reproducer if it is not.
 
 ## B) Local LLM Runtime
 
