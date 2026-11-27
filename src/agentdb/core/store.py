@@ -354,6 +354,35 @@ class MemoryStore:
                 return record
         return None
 
+    def select_unique_live_by_key(self, key: str) -> Optional[MemoryRecord]:
+        """The single unarchived record for ``key``, or ``None`` if not exactly one.
+
+        Uniqueness and the returned record are resolved from **one** database read,
+        not from the in-memory snapshot and not from two separate queries. Splitting
+        them (count, then fetch) lets a concurrent write land in between and returns
+        a record whose uniqueness was never true of the same state.
+
+        A repeat ``write()`` on an existing key stores a sibling and leaves the
+        original live, so a key can legitimately have several live records; that is
+        reported as no result rather than an arbitrary pick. Reading from the
+        database also means a withdrawal committed by another connection is
+        observed, which the in-memory snapshot cannot guarantee.
+        """
+        from .sqlite_connection import connect as _connect
+
+        conn = _connect(self._db_path, timeout=30.0)
+        try:
+            rows = conn.execute(
+                "SELECT * FROM memories WHERE key = ? AND archived = 0 LIMIT 2",
+                (key,),
+            ).fetchall()
+        finally:
+            conn.close()
+
+        if len(rows) != 1:
+            return None
+        return self._row_to_record(rows[0])
+
     def get_by_id(self, record_id: str) -> Optional[MemoryRecord]:
         return self._by_id.get(record_id)
 
