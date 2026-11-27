@@ -1210,6 +1210,34 @@ class AgentDB:
         )
         return record
 
+    def select_unique(self, key: str, *, agent_id: Optional[str] = None) -> Optional[MemoryRecord]:
+        """The single readable record for ``key``, or ``None``.
+
+        For a caller that needs to be certain which record it read: a configured
+        pointer to "the guidance for this repository" must not silently receive an
+        arbitrary sibling, and must not receive a record it is not allowed to read.
+
+        Returns the record only when **exactly one** unarchived record exists for
+        the key **and** the caller may read it. Returns ``None`` when the key is
+        absent, when more than one live record shares the key (ambiguous), or when
+        the record is not readable by this caller.
+
+        Uniqueness and the record come from a single database read, so a concurrent
+        write cannot land between "how many?" and "which one?". That also means a
+        withdrawal committed by another connection is observed immediately, unlike
+        :meth:`read`, which reflects this instance's view.
+
+        Denied reads return ``None`` rather than raising: to a caller asking "is
+        there exactly one record I may use here?", "none" and "not for me" are the
+        same answer. Use :meth:`read` when a denial should be an error.
+        """
+        record = self._store.select_unique_live_by_key(key)
+        if record is None:
+            return None
+        if self._permissions is not None and not self._can_read_record(record, agent_id):
+            return None
+        return record
+
     def delete(self, key: str, agent_id: str, trust_zone: str) -> None:
         """Archive a record by key. Raises PermissionDenied if not allowed."""
         if self._permissions is not None:
